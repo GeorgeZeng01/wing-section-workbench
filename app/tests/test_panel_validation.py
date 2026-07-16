@@ -118,6 +118,11 @@ def main():
     xf = xfoil_inviscid_cl(s1223, 0.0)
     if xf is not None:
         check("s1223 a=0 free vs XFOIL", sol2.Cl, xf, 3.0)
+    else:
+        # not a silent pass: the analytic Joukowski anchor below still gives
+        # an external truth, but say plainly that XFOIL was not consulted
+        print("SKIP  s1223 a=0 free vs XFOIL — xfoil.exe not installed "
+              "(see README); the Joukowski closed-form anchor still runs")
 
     # 3. demo two-element stack, installed frame.
     # The original stack_builder demo used --stack-aoa 2 under the legacy
@@ -226,6 +231,81 @@ def main():
     print(f"{'PASS' if ok else 'FAIL'}  drag realism: total "
           f"{f['drag_total_n']} N ({f['drag_induced_n']} induced + "
           f"{f['drag_profile_n']} profile), L/D {f['efficiency_ld']}")
+
+    # 10. closed-form anchor: Karman-Trefftz airfoil, exact potential-flow
+    # lift. A fully independent analytic truth — needs neither AeroSandbox
+    # nor xfoil.exe, so it always runs. (Karman-Trefftz rather than pure
+    # Joukowski: the finite TE angle is what the Hess-Smith Kutta condition
+    # is formulated for; a cusp degenerates it.)
+    b = 1.0
+    n_kt = 1.9                      # TE included angle = pi*(2 - n) = 18 deg
+    mu = complex(-0.08, 0.05)
+    a = abs(b - mu)
+    beta = np.arcsin(mu.imag / a)
+    th_te = np.angle(b - mu)
+    # cluster panel points toward the TE
+    s = np.linspace(0.0, 1.0, 501)
+    t = np.pi * (1.0 - np.cos(np.pi * s))
+    zeta = mu + a * np.exp(1j * (th_te + t))
+    z = (n_kt * b * ((zeta + b) ** n_kt + (zeta - b) ** n_kt)
+         / ((zeta + b) ** n_kt - (zeta - b) ** n_kt))
+    jk = np.column_stack([z.real, z.imag])
+    chord = float(jk[:, 0].max() - jk[:, 0].min())
+    for alpha in (0.0, 4.0, 8.0):
+        # circulation is transform-invariant: Gamma = 4*pi*U*a*sin(alpha+beta)
+        cl_exact = 8.0 * np.pi * (a / chord) * np.sin(np.radians(alpha) + beta)
+        sol_j = panel.solve([jk], alpha_deg=alpha, ground=False,
+                            ref_chord=chord)
+        check(f"Karman-Trefftz exact a={alpha:g}", sol_j.Cl, cl_exact, 1.5)
+
+    # 11. moment sign + center of pressure: thin-airfoil theory puts a
+    # symmetric section's x_cp at the quarter chord, so Cm_le = -Cl/4.
+    # The Cm sign was wrong once already (nose-down-positive); pin it.
+    sol_m = panel.solve([c0012], alpha_deg=5.0, ground=False)
+    x_cp = -sol_m.Cm_le / sol_m.Cl
+    ok = sol_m.Cm_le < 0 < sol_m.Cl and abs(x_cp - 0.25) < 0.025
+    results.append(ok)
+    print(f"{'PASS' if ok else 'FAIL'}  Cm sign & quarter-chord x_cp: "
+          f"Cm_le={sol_m.Cm_le:+.4f} Cl={sol_m.Cl:+.4f} x_cp={x_cp:.3f} "
+          f"(want ~0.25, Cm_le < 0)")
+
+    # 12. d'Alembert: the inviscid drag residual must be numerically small
+    ok = abs(sol_m.Cd_numerical) < 0.005
+    results.append(ok)
+    print(f"{'PASS' if ok else 'FAIL'}  free-air Cd residual "
+          f"{sol_m.Cd_numerical:+.5f} (|tol| 0.005)")
+
+    # 13. the image system is only a ground plane for a parallel freestream
+    try:
+        panel.solve([c0012 + np.array([0.0, 0.3])], alpha_deg=3.0, ground=True)
+        ok = False
+    except ValueError:
+        ok = True
+    results.append(ok)
+    print(f"{'PASS' if ok else 'FAIL'}  ground=True with alpha != 0 is rejected")
+
+    # 14. install_stack must seat the lowest point exactly at ride height
+    cfg_s = geometry.StackConfig.from_dict({
+        "elements": [{"airfoil": "s1223"},
+                     {"airfoil": "s1223", "chord_ratio": 0.35,
+                      "deflection_deg": 20,
+                      "slot_gap_pct": 1.5, "slot_overlap_pct": 3.0}],
+        "stack_aoa_deg": 3.0, "ride_height_mm": 42.0, "chord_mm": 350.0,
+    })
+    inst_s = geometry.install_stack(geometry.build_stack(cfg_s),
+                                    cfg_s.ride_height_c)
+    y_low = min(e["coords"][:, 1].min() for e in inst_s)
+    ok = abs(y_low - 42.0 / 350.0) < 1e-12
+    results.append(ok)
+    print(f"{'PASS' if ok else 'FAIL'}  ride-height seat: lowest point "
+          f"{y_low:.6f}c (want {42.0/350.0:.6f}c)")
+
+    # 15. far from the ground the image system must converge to free air
+    # (at 200 chords the image-induced velocity is ~Gamma/(4*pi*h) ~ 0.07%)
+    far = [c + np.array([0.0, 200.0]) for c in coords]
+    cl_g = panel.solve(far, 0.0, ground=True).Cl
+    cl_f = panel.solve(far, 0.0, ground=False).Cl
+    check("ground -> free air as h -> inf", cl_g, cl_f, 0.25)
 
     print(f"\n{sum(results)}/{len(results)} checks passed")
     return all(results)

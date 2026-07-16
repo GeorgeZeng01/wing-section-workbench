@@ -30,10 +30,13 @@ Options: (a) report raw inviscid only, (b) a single constant knockdown
 factor, (c) a ride-height-dependent realization of the ground-effect gain.
 Raw inviscid diverges as h→0 and misleads; a single constant cannot cover
 both free air (~0.85 realistic) and strong ground effect (~0.3 at h/c≈0.1).
-(c) matches the shape of measured ground-effect behavior. Both knobs are
-user-editable and the raw inviscid values are always shown beside the
-estimate. The coefficients are starting values meant to be recalibrated
-against RANS or tunnel data.
+(c) was chosen. Both knobs are user-editable and the raw inviscid values are
+always shown beside the estimate. The coefficients are starting values meant
+to be recalibrated against RANS or tunnel data. *(Superseded twice: by the
+tanh curve below, then by the bounded saturation model in the hardening
+round at the end of this file — a k_g curve alone cannot bound the estimate,
+because the inviscid gain it multiplies diverges faster than any reasonable
+curve vanishes.)*
 
 **Stack-angle sign convention: positive = more incidence = more downforce.**
 The legacy `stack_builder.py` applies the opposite rotation for its
@@ -105,9 +108,13 @@ test used an unclosed shoelace sum, which is not translation-invariant for
 open-TE contours — a far-enough translated blunt-TE flap could be silently
 re-wound and its load zeroed; the closing edge is now included. (2) `k_g`'s
 hard floor of 0.10 kept 10 % of a *diverging* inviscid gain, so the headline
-estimate diverged toward the ground — replaced with `0.85·tanh(1.4/0.85·h/c)`,
-preserving the calibrated slope and ceiling while actually vanishing at h→0
-(unchanged within ~1 % at h/c ≥ 0.09). (3) `Cm_le` was reported CCW-positive
+estimate diverged toward the ground — replaced with `0.85·tanh(1.4/0.85·h/c)`
+(matching the old clip within ~1 % only for h/c ≈ 0.07–0.12; at moderate
+ride heights it runs below it, up to ~24 % near h/c ≈ 0.6, shifting C_est by
+a few percent there — and, as the later hardening round measured, it still
+did NOT bound the estimate: k_g vanishes linearly in h while the inviscid
+gain grows faster, so C_est kept growing all the way to the input floor.
+The bounded saturation model at the end of this file is the actual fix). (3) `Cm_le` was reported CCW-positive
 (nose-down-positive); now standard nose-up-positive, with `x_cp = −Cm/Cl`
 updated so the center of pressure is numerically unchanged. (4) The
 optimizer's load-envelope penalty (weight 8) was weak enough that searches
@@ -224,10 +231,11 @@ aerodynamics.
 Options considered: (a) XFOIL-TGAP-style blended thickening, (b) straight
 truncation at the thickness target, (c) a V-shaped notch cut. Thicken keeps
 chord, planform and camber, so the section keeps its design loading — on the
-two-element S1223 baseline it costs ~1 % downforce (390 → 386 N) and is the
-standard aerodynamic prep, hence the default. Truncate exists because
-sometimes a finished part or mold must literally be cut back; on thin-tailed,
-aft-loaded sections it is expensive (S1223: −25 % downforce at a 1.5 mm
+two-element S1223 baseline it costs well under 1 % downforce (233.2 →
+232.5 N at the default 1.2 mm TE; 229.1 N at 3 mm) and is the standard
+aerodynamic prep, hence the default. Truncate exists because sometimes a
+finished part or mold must literally be cut back; on thin-tailed,
+aft-loaded sections it is expensive (S1223: −17.5 % downforce at a 1.5 mm
 target — the curled tail the cut removes is where the load lives), and the
 UI tooltip says so. A V-notch was rejected: it replaces one knife edge with
 two, adds a stress riser, and has no aerodynamic benefit at these speeds.
@@ -330,7 +338,7 @@ toggling off reproduces the original placement to within the pre-existing
 
 **The "warp" is camber-preserving by design, and that is the defensible
 optimum.** Measured on the two-element baseline: the default 1.2 mm TE costs
-0.8 % downforce, 3 mm costs 3.3 % — the price of buildability, and the
+0.3 % downforce, 3 mm costs 1.8 % — the price of buildability, and the
 optimizer sees the treated shapes, so with manufacturing enabled its optimum
 IS the buildable optimum. Distribution study (TE opened to 1 %c on the flap,
 material split symmetric / all-upper / all-lower): symmetric keeps max
@@ -388,9 +396,12 @@ streams) so there is no terminal window. One-click entry points: a
 `.bat` equivalent.
 
 **Dynamic local port instead of a fixed one.** The frontend calls the API
-with same-origin relative paths, so the port is irrelevant to it; choosing a
-free port per launch means the app never collides with another instance or a
-stray server. (The headless `uvicorn` command still uses 8642 for scripting.)
+with same-origin relative paths, so the port is irrelevant to API calls;
+choosing a free port per launch means the app never collides with another
+instance or a stray server. (The headless `uvicorn` command still uses 8642
+for scripting.) One thing the changing port is NOT irrelevant to is
+origin-keyed browser storage — which is why the working state persists
+server-side, not in localStorage (see the hardening round below).
 
 **Existing scripts left untouched.** The new app lives entirely in `app/` and
 reuses `xfoil.exe` and the venv; `scripts/` keeps working as before.
@@ -460,11 +471,17 @@ made every export button in the desktop app silently inoperative — enabling
 it surfaces each export as a standard Windows save dialog. Browser sessions
 keep the normal download behavior.
 
-**The working state persists.** Every configuration change is saved locally
-(including uploaded airfoil geometry, which is re-registered with the
-server on the next launch); reopening the app continues where the last edit
-left off, with a toast pointing at Load preset… for a fresh start. Nothing
-is stored outside the local machine.
+**The working state persists — server-side.** Every configuration change is
+saved (debounced, with an unload flush) to `app_data/session.json` through
+the API, with localStorage kept as a fallback; reopening the app continues
+where the last edit left off, with a toast pointing at Load preset… for a
+fresh start. Server-side rather than localStorage because the desktop
+window runs the server on a fresh random port each launch — a new browser
+origin whose localStorage is empty — and WebView2's default profile is
+in-private besides; origin-keyed storage could never survive a desktop
+restart. Uploaded airfoil geometry is embedded in the saved state and
+re-registered with the server on the next launch. Nothing is stored outside
+the local machine.
 
 **Plain-language microcopy.** "Model settings" → "Air properties &
 calibration"; "Drag weight" → "Drag penalty" with an explanation; tooltips
@@ -502,6 +519,140 @@ and what to do next. It now boots with the template drawn and dimensioned
 but waits for an explicit Analyze/Optimize; the results panel explains both
 actions, and the first-launch chip names the template. Loading a preset
 still analyzes immediately (an explicit user action).
+
+## Hardening round (adversarial review)
+
+A full adversarial review of the code *and of this document's claims*
+confirmed 67 defects — from a divergent estimate model to false statements
+in the docs. Everything below was fixed and is pinned by the test suite
+(now 100+ checks including closed-form anchors and export-content
+verification).
+
+**Bounded ground-gain model with a force-reduction peak.** The tanh k_g
+curve did not bound the estimate: on the shipped default, C_ground scales
+roughly h^-1.7 near the ground while k_g vanishes only linearly, so C_est
+grew monotonically all the way to the h/c = 0.005 input floor (17.0 there
+vs 6.4 at the default ride height) — no force-reduction peak, trend
+inverted vs published data below h/c ≈ 0.08. Now:
+`G_real = cap·tanh(k_g·G_inv/cap)·tanh((h/c)/h_choke)` with
+`cap = gain_cap_ratio·|C_free|` (default 3.0) and `h_choke = 0.045`;
+`C_est = η·(C_f + G_real)`. At ordinary ride heights this reduces to the
+old form (−3.9 % at the default h/c = 0.086); toward the ground the cap
+bounds the realized gain and the choke term takes it down, giving a peak at
+h/c = 0.065 on the two-element baseline and monotone force reduction below
+it — the Zerihan & Zhang shape. Options considered: warn-only below a
+validity floor (keeps publishing numbers the model itself calls wrong);
+blending in tabulated experimental curves (false precision from one
+geometry's data); the saturation form (chosen — smooth, 2 constants, exact
+reduction to the calibrated behavior where that behavior was right).
+
+**k_g is now actually user-editable — the docs said it, the code now does
+it.** Four documentation sites called k_g a user-editable knob; no such
+field existed anywhere (a POSTed `k_g` was silently dropped by config
+parsing). `k_g` is now a real config field (blank/None = the automatic
+curve, a number pins it, validated 0..1, shown in the UI next to the
+effective value), and `gain_cap_ratio` / `choke_h_c` are config fields for
+RANS/tunnel recalibration.
+
+**Per-element loading gets a ride-height-aware second check.** The
+free-air Smith budget is translation-invariant, so it could not see ride
+height at all — while four lines later the drag path computed a realized
+ground-effect operating CL for the same element. Each element now reports
+that operating CL (realized at the same ratio as the global estimate, so
+element numbers compose exactly to C_est) and its fraction of isolated
+CL_max; past 2× (measured sections rarely sustain more) the analysis warns
+that the estimate is optimistic and drag understated, and the optimizer
+penalizes the regime. The profile-drag lookup's pre-stall clamp is reported
+per element (`cd_lookup_capped`) instead of silently engaging.
+
+**The shipped defaults now pass their own budgets.** The default template
+booted at 126 % of isolated CL_max — the tool's own "expect separation"
+critical. Defaults and presets were retuned (two-element: flap 12°, stack
+angle 0°, 233 N estimate, L/D 7.4, zero warnings; three-element and E423
+presets likewise) so a new user's first Analyze is green.
+
+**The .dat parser accepts exactly two numeric fields per coordinate
+line.** The lax "first two parseable tokens" rule corrupted 22 bundled
+sections: MSES-format files (all 20 tasopt-*) turned their plot-window
+header into a (-2, 3) "coordinate", naca23021's parenthesized TE ordinates
+were dropped, and nm26-3smoothed's trailing "a -> b" edit notes became
+contour points (the "fold" downstream code choked on was parser garbage).
+Parenthesized fields are unwrapped, everything else non-2-field is
+commentary. Verified against all 2,174 bundled files: exactly the 22
+known-bad ones changed.
+
+**normalize() no longer tilts cambered sections.** The de-rotation angle
+was measured LE-vertex-to-TE, but a cambered section's farthest-from-TE
+vertex sits off the chord line, so every cambered airfoil was silently
+rotated (naca6412: 0.32°) and camber misreported (naca2412: 1.83 % instead
+of the defining 2.00 %). Tilts below 0.5° — indistinguishable from the
+vertex offset — are now treated as catalog alignment and left alone;
+genuine baked-in incidence above that is still removed. The y-origin moved
+from the (thickness-dependent) LE vertex to the TE midpoint, the stable
+catalog convention; measured camber/thickness now match defining values to
+4 decimals.
+
+**Manufacturing floor verified through the spline it must survive.** The
+aft-thickness floor held at the polyline nodes but the downstream cosine
+repanel fits a spline through them, which sagged below the floor between
+sparse nodes (goe652 flap: 2.90 mm against a 3.0 mm floor — twice the
+waist tolerance). The treatment now pre-repanels the base section onto a
+dense grid (also making surface-x monotonicity — which the vertical
+thickness measure silently requires — an explicit precondition instead of
+an accident), densifies the floored window, and verifies through an actual
+repanel round-trip, raising the pad adaptively until the floor survives.
+Contours that fold back in x are rejected with a clear error; a
+post-treatment crossed-surface check backstops everything.
+
+**Intersection checked across all element pairs.** Only adjacent pairs
+were tested, so a third element overlapping the MAIN (legal dx/dy inputs)
+analyzed silently — returning 148 kN of fantasy downforce in the review's
+reproduction. All pairs are checked now; analysis refuses and the
+optimizer marks infeasible.
+
+**Optimizer failures are diagnosable, never silent.** A job whose every
+evaluation raised (e.g. a custom airfoil lost to a restart) finished
+"done" with no best, no result, no error. Now: specs are resolved at job
+creation (422 up front), evaluation exceptions and infeasibilities are
+counted with their last messages, and a search that never saw a feasible
+design fails with that diagnosis. Also fixed in the same pass: malformed
+options/bounds 422 at creation instead of crashing the worker thread;
+progress re-planned when the refinement phase starts (the bar froze at
+~30 % after an early stop and the ETA claimed minutes seconds before
+completion); "thorough" now really uses popsize 16 (the old formula capped
+it below 16 for >10 variables — exactly the spaces the mode targets);
+the final polish really runs at the configured full resolution (was capped
+at 70/side); the reported best and candidate #1 must come from
+full-fidelity evaluations; cancelled jobs finalize under a non-terminal
+"finalizing" state so a poller that sees a terminal state always sees the
+result beside it; with airfoil selection + shape refinement combined, the
+thickness-scale floor is recomputed from the thinnest shortlist candidate.
+
+**Error paths are consistent.** Unresolvable airfoil specs returned 500
+from /api/analyze and every export endpoint (but 422 from /api/geometry);
+KeyError messages carried their Python quotes into the UI; the XFOIL
+engine without xfoil.exe returned a bare 500. All are 422/424 with clean
+text now. CSV export quotes airfoil names containing commas (the column
+count used to silently shift).
+
+**Session persistence that actually works in the desktop shell** — see the
+amended "working state persists" entry above. The browser-tab fallback of
+the launcher also now exits once the UI stops heartbeating instead of
+keeping the server alive forever, and a second instance no longer kills its
+own server through the shared browser profile.
+
+**Test suite hardened against its own weaknesses.** The review demonstrated
+the old quantitative gate tolerated a 2×-broken induced-drag formula, and
+the only external truth anchor (XFOIL) silently self-disabled when
+xfoil.exe was absent — the default state. Added: a Kármán–Trefftz
+closed-form anchor (exact potential-flow lift, no external tools; the
+solver lands within 0.5 %), Cm/x_cp sign-and-value anchors, an exact
+induced-drag recomputation that provably rejects a broken formula, export
+CONTENT verification (CSV/DXF/SVG/ZIP geometry equals the analyzed
+geometry, frames and y-sense included), the estimate-model shape (bounded,
+interior peak, monotone force reduction), an analysis payload contract for
+every field the UI reads, cache-staleness for edited .dat files, and a
+loud SKIP when XFOIL is not installed.
 
 ## Known limitations
 

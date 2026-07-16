@@ -97,6 +97,10 @@ class StackConfig:
     viscous_efficiency: float = 0.85  # inviscid -> expected real downforce
     efficiency_3d: float = 1.0        # finite-span / endplate knockdown (lift)
     span_efficiency: float = 0.9      # Oswald-style e for induced drag
+    # ground-gain model calibration (see analysis module docstring):
+    k_g: float | None = None          # None = ride-height curve; number = pinned
+    gain_cap_ratio: float = 3.0       # realized-gain ceiling, x |C_free|
+    choke_h_c: float = 0.045          # venturi-choke ride height, chords
     n_panels_per_side: int = 70
     manufacturing: ManufacturingSpec | None = None
 
@@ -122,12 +126,18 @@ class StackConfig:
             raise ValueError("stack needs at least one element")
         els[0].chord_ratio = 1.0  # main chord is the reference by definition
         els[0].dx = els[0].dy = 0.0
+        # the main element's incidence IS the stack angle; a deflection on it
+        # would double-count, so it is normalized away like chord_ratio
+        els[0].deflection_deg = 0.0
         kw = {}
         for f in ("stack_aoa_deg", "ride_height_mm", "chord_mm", "span_mm",
                   "speed_ms", "rho", "nu", "ncrit", "viscous_efficiency",
-                  "efficiency_3d", "span_efficiency"):
+                  "efficiency_3d", "span_efficiency", "gain_cap_ratio",
+                  "choke_h_c"):
             if f in d and d[f] is not None:
                 kw[f] = float(d[f])
+        if d.get("k_g") is not None:
+            kw["k_g"] = float(d["k_g"])
         if "n_panels_per_side" in d and d["n_panels_per_side"]:
             kw["n_panels_per_side"] = int(d["n_panels_per_side"])
         if d.get("manufacturing") is not None:
@@ -151,11 +161,17 @@ def _validate(cfg: StackConfig) -> None:
         "viscous_efficiency": (0.05, 1.5),
         "efficiency_3d": (0.05, 1.5),
         "span_efficiency": (0.4, 1.5),
+        "gain_cap_ratio": (0.5, 10.0),
+        "choke_h_c": (0.001, 0.5),
     }
     for name, (lo, hi) in scalar_bounds.items():
         v = getattr(cfg, name)
         if not (math.isfinite(v) and lo <= v <= hi):
             raise ValueError(f"{name} must be a finite value in {lo}..{hi}")
+    if cfg.k_g is not None and not (math.isfinite(cfg.k_g)
+                                    and 0.0 <= cfg.k_g <= 1.0):
+        raise ValueError("k_g must be a finite value in 0..1 (or omitted for "
+                         "the automatic ride-height curve)")
     if not (1 <= len(cfg.elements) <= 4):
         raise ValueError("element count must be 1..4")
     if not (10 <= cfg.n_panels_per_side <= 200):
@@ -333,7 +349,14 @@ def build_stack(cfg: StackConfig) -> list[dict]:
         pte = te_point(prev["coords"])
         cur["slot_gap"] = slot_gap_dist(prev["coords"], cur["coords"])
         cur["slot_overlap"] = float(pte[0] - cur["coords"][:, 0].min())
-        cur["intersects"] = polygons_intersect(prev["coords"], cur["coords"])
+    # intersection must be checked across ALL pairs, not just neighbors — a
+    # third element can overlap the main while clearing its own predecessor
+    from itertools import combinations
+    for e in out:
+        e["intersects"] = False
+    for i, j in combinations(range(len(out)), 2):
+        if polygons_intersect(out[i]["coords"], out[j]["coords"]):
+            out[j]["intersects"] = True
 
     if cfg.stack_aoa_deg:
         # positive stack angle = nose-up in the design frame (more incidence,
@@ -428,7 +451,14 @@ def manufacturing_report(cfg: StackConfig, design: list[dict]) -> list[str]:
                 f"edge it was opened for. Use the 'thicken' treatment "
                 f"(which floors thickness behind the nose) or a thicker "
                 f"airfoil.")
-        if m.te_gap_mm / c_mm > 0.03:
+        if m.te_gap_mm / c_mm > mfg_mod.GAP_C_MAX:
+            warnings.append(
+                f"{e['role']}: the requested {m.te_gap_mm:.1f} mm TE is "
+                f"{m.te_gap_mm / c_mm * 100:.0f}% of its {c_mm:.0f} mm chord "
+                f"— the treatment is capped at {mfg_mod.GAP_C_MAX * 100:.0f}% "
+                f"of chord, so the built TE is thinner than requested. "
+                f"Use a larger chord or a smaller TE thickness.")
+        elif m.te_gap_mm / c_mm > 0.03:
             warnings.append(
                 f"{e['role']}: TE thickness is {m.te_gap_mm / c_mm * 100:.1f}% "
                 f"of its {c_mm:.0f} mm chord — expect extra drag; consider a "
@@ -456,8 +486,8 @@ def geometry_report(cfg: StackConfig) -> dict:
     warnings = []
     for i, e in enumerate(design):
         if e.get("intersects"):
-            warnings.append(f"{e['role']} intersects the previous element — "
-                            f"open the slot (more negative dy) or reduce overlap.")
+            warnings.append(f"{e['role']} intersects another element — "
+                            f"open the slot or reduce overlap.")
         elif "slot_gap" in e and e["slot_gap"] < 0.005:
             warnings.append(f"{e['role']} slot gap {e['slot_gap']*100:.2f}%c is "
                             f"below 0.5%c — the slot will choke.")

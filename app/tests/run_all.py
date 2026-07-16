@@ -18,6 +18,7 @@ ROOT = HERE.parents[1]
 PY = sys.executable
 
 OFFLINE = ["test_manufacturing.py", "test_panel_validation.py",
+           "test_model_and_data.py", "test_export_content.py",
            "test_optimizer_candidates.py", "test_shaping.py"]
 
 
@@ -52,9 +53,14 @@ def main() -> int:
     print("\n=== test_api_adversarial.py (scratch server) ===", flush=True)
     port = free_port()
     base = f"http://127.0.0.1:{port}"
+    # isolate the scratch server's session store — the suite exercises
+    # /api/session and must never clobber the real working state
+    import tempfile
+    scratch_data = tempfile.mkdtemp(prefix="wss_test_data_")
     server = subprocess.Popen(
         [PY, "-m", "uvicorn", "app.server:app", "--port", str(port),
-         "--log-level", "warning"], cwd=ROOT)
+         "--log-level", "warning"],
+        cwd=ROOT, env={**os.environ, "WSS_DATA_DIR": scratch_data})
     try:
         if not wait_healthy(base):
             print("FAIL  scratch server did not become healthy")

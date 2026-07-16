@@ -11,8 +11,10 @@ Sources, in resolution order:
   3. UIUC database name — the .dat collection bundled with AeroSandbox (~2,170 foils)
   4. filesystem path    — a Selig-format .dat file inside the project folder
 
-All coordinates are returned unit-chord, Selig ordering (TE -> upper -> LE ->
-lower -> TE), shape (N, 2) float arrays.
+All coordinates are returned in Selig ordering (TE -> upper -> LE -> lower ->
+TE) as (N, 2) float arrays, in the source file's own scale; call
+`normalize()` (or `repaneled()`, which normalizes internally) for unit-chord,
+chord-aligned geometry.
 """
 
 from __future__ import annotations
@@ -59,7 +61,16 @@ def search_library(query: str = "", limit: int = 50) -> list[str]:
 
 
 def read_dat(path_or_text, name_fallback="airfoil"):
-    """Parse a Selig .dat (name line optional). Returns (name, (N,2) array)."""
+    """Parse a Selig .dat (name line optional). Returns (name, (N,2) array).
+
+    A coordinate line is exactly two numeric fields (parentheses around a
+    field, used by some catalog files for interpolated TE ordinates, are
+    ignored). Lines with any other shape are headers or trailing commentary
+    and are skipped — this matters in practice: MSES-style files carry a
+    four-number plot-window line after the name, and several catalog files
+    end with "a -> b" edit notes whose numeric fragments a laxer parser
+    would append to the contour as garbage points.
+    """
     if isinstance(path_or_text, Path) or (
         isinstance(path_or_text, str) and "\n" not in path_or_text
         and Path(path_or_text).suffix.lower() == ".dat"
@@ -73,16 +84,19 @@ def read_dat(path_or_text, name_fallback="airfoil"):
     pts = []
     for i, line in enumerate(lines):
         parts = line.split()
-        if len(parts) >= 2:
+        vals = []
+        for tok in parts:
             try:
-                x, y = float(parts[0]), float(parts[1])
+                vals.append(float(tok.strip("()")))
             except ValueError:
-                if i == 0:
-                    name = line.strip() or name_fallback
-                continue
-            pts.append((x, y))
+                vals = None
+                break
+        if vals is not None and len(vals) == 2:
+            pts.append((vals[0], vals[1]))
         elif i == 0 and line.strip():
-            name = line.strip()
+            name = line.strip() or name_fallback
+        # anything else (MSES plot-window line, "->" edit notes, separators
+        # like "1.0000 ......") is not contour data
     coords = np.asarray(pts, dtype=float)
     # Lednicer format: a leading (n_upper, n_lower) count pair, then both
     # surfaces LE->TE. Only re-stitch when the first pair really is a count
@@ -111,6 +125,10 @@ def naca_coords(digits: str, n_per_side: int = 100) -> np.ndarray:
     m = int(digits[0]) / 100.0
     p = int(digits[1]) / 10.0
     t = int(digits[2:]) / 100.0
+    if m > 0 and p == 0:
+        raise ValueError(f"naca{digits}: max camber {digits[0]}% at position "
+                         f"0 is undefined — use naca0{digits[2:]} for a "
+                         f"symmetric section")
     beta = np.linspace(0.0, np.pi, n_per_side)
     x = 0.5 * (1 - np.cos(beta))
     yt = 5 * t * (0.2969 * np.sqrt(x) - 0.1260 * x - 0.3516 * x**2
@@ -206,42 +224,79 @@ def resolve(spec: str) -> tuple[str, np.ndarray]:
     raise KeyError(f"airfoil {spec!r} not found (not custom/naca/.dat/UIUC name)")
 
 
+TILT_EPS_DEG = 0.5   # smaller implied tilts are catalog-alignment noise
+
+
 def normalize(coords: np.ndarray) -> np.ndarray:
-    """Unit chord, LE at the origin, chord along +x. Camber stays intact;
-    a contour drawn with baked-in incidence is de-rotated — incidence
-    belongs to the stack (stack angle / deflection), not the profile, and
-    every consumer (thickness measures, deflection semantics, TE
-    treatments) assumes a chord-aligned section."""
+    """Unit chord, LE at the origin, chord along +x.
+
+    A contour drawn with genuinely baked-in incidence is de-rotated —
+    incidence belongs to the stack (stack angle / deflection), not the
+    profile. The tilt is measured from the TE to the contour point farthest
+    from it; on a cambered section that vertex sits slightly off the true
+    chord line (for a NACA 2412 the implied angle is ~0.16 deg), so tilts
+    below TILT_EPS_DEG are treated as zero: a chord-aligned catalog file
+    passes through untouched instead of being rotated by the vertex offset,
+    which would misreport camber and skew deflection semantics for every
+    cambered airfoil in the library."""
     c = np.asarray(coords, float)
     te = 0.5 * (c[0] + c[-1])
     d = c - te
-    i_le = int(np.argmax(np.einsum("ij,ij->i", d, d)))  # farthest from TE
-    le = c[i_le]
-    chord_vec = te - le
-    chord = float(np.hypot(*chord_vec))
-    if chord < 1e-9:
+    i_far = int(np.argmax(np.einsum("ij,ij->i", d, d)))  # farthest from TE
+    far = c[i_far]
+    chord_vec = te - far
+    if float(np.hypot(*chord_vec)) < 1e-9:
         raise ValueError("degenerate airfoil: zero chord")
     ang = float(np.arctan2(chord_vec[1], chord_vec[0]))
-    ca, sa = np.cos(ang), np.sin(ang)
-    # rotate row vectors by -ang so the LE->TE line lands on +x exactly
-    return (c - le) @ np.array([[ca, -sa], [sa, ca]]) / chord
+    if abs(ang) > np.radians(TILT_EPS_DEG):
+        ca, sa = np.cos(ang), np.sin(ang)
+        c = (c - far) @ np.array([[ca, -sa], [sa, ca]])
+    # x-origin at the front-most point; y-origin at the TE midpoint — the
+    # stable catalog convention. Referencing y to the LE vertex instead
+    # would shift every measurement by that vertex's (thickness-dependent)
+    # height off the chord line.
+    te = 0.5 * (c[0] + c[-1])
+    x0 = float(c[:, 0].min())
+    chord = float(te[0] - x0)
+    if chord < 1e-9:
+        raise ValueError("degenerate airfoil: zero chord")
+    return (c - np.array([x0, te[1]])) / chord
+
+
+def spec_cache_token(spec: str) -> int:
+    """Cache-invalidation token for a spec. Filesystem .dat specs change
+    when the file changes on disk — key their caches on the mtime so edits
+    are picked up; every other spec source is immutable per string."""
+    s = str(spec).strip()
+    for prefix in ("mfg:", "shape:"):
+        if s.lower().startswith(prefix):
+            s = s.split(":", {"mfg:": 3, "shape:": 5}[prefix])[-1].strip()
+    p = Path(s)
+    if p.suffix.lower() == ".dat":
+        try:
+            return p.stat().st_mtime_ns
+        except OSError:
+            return 0
+    return 0
 
 
 @lru_cache(maxsize=2048)   # shape sweeps generate many distinct specs
-def _repanel_cached(spec: str, n_per_side: int) -> tuple:
+def _repanel_cached(spec: str, n_per_side: int, _token: int) -> tuple:
     name, raw = resolve(spec)
     import aerosandbox as asb
     af = asb.Airfoil(name="af", coordinates=normalize(raw))
     rp = np.asarray(af.repanel(n_points_per_side=n_per_side).coordinates, float)
     return name, rp
 
-_repanel_lock = threading.Lock()
+# RLock: resolving an "mfg:" spec re-enters repaneled() for its base section
+_repanel_lock = threading.RLock()
 
 
 def repaneled(spec: str, n_per_side: int = 80) -> tuple[str, np.ndarray]:
     """(name, coords) with cosine-spaced spline repaneling. Cached per spec."""
     with _repanel_lock:  # asb spline code isn't guaranteed thread-safe
-        name, rp = _repanel_cached(str(spec), int(n_per_side))
+        name, rp = _repanel_cached(str(spec), int(n_per_side),
+                                   spec_cache_token(spec))
     return name, rp.copy()
 
 

@@ -501,9 +501,11 @@ def part_i(made):
          "— more downforce — the same sense as flap deflection."),
         ("Ncrit", "Transition criterion for the viscous model. 9 is a clean "
          "tunnel; 4–7 represents on-track turbulence."),
-        ("Air properties &amp; calibration", "Density, viscosity, the free-air "
-         "viscous-realization factor (section 13), the finite-span lift "
-         "efficiency, the span efficiency for induced drag, and panel "
+        ("Air properties &amp; calibration", "Density, viscosity, the two "
+         "calibration factors of the estimate — the free-air viscous "
+         "realization and the ground-gain realization factor, left blank for "
+         "the automatic ride-height curve (section 13) — the finite-span "
+         "lift efficiency, the span efficiency for induced drag, and panel "
          "resolution."),
     ]))
     s.append(h3("Elements and slot geometry"))
@@ -546,7 +548,9 @@ def part_i(made):
         f"{B('Element loading meters')} — each element's working lift "
         "against the isolated maximum of its airfoil at its own Reynolds "
         "number. Warnings begin at 90&nbsp;% of the limit, criticals above "
-        "110&nbsp;%: the classical budget for slotted high-lift systems.",
+        "110&nbsp;%: the classical budget for slotted high-lift systems. A "
+        "second check watches the realized ground-effect operating point "
+        "(section 15).",
         f"{B('Pressure tab')} — the inviscid surface-pressure distribution "
         "of every element, the physics-level view of how the elements share "
         "load.",
@@ -652,13 +656,15 @@ def part_i(made):
                     "the tip and rescales.", made=made))
     s.append(kv_table([
         ("Thicken", "Adds thickness over the rear of the section, keeping "
-         "chord and camber. Costs roughly 1&nbsp;% of downforce at a typical "
-         "1–1.5&nbsp;mm trailing edge. This is the default and the "
-         "recommended aerodynamic preparation."),
+         "chord and camber. Costs a fraction of a percent of downforce at a "
+         "typical 1–1.5&nbsp;mm trailing edge (about 0.3&nbsp;% on the "
+         "baseline section), rising to roughly 2&nbsp;% at 3&nbsp;mm. This "
+         "is the default and the recommended aerodynamic preparation."),
         ("Cut off", "Truncates the section where it reaches the target "
          "thickness and rescales to the original chord — for when a part or "
-         "mold must literally be cut back. Thin-tailed sections lose "
-         "noticeably more downforce, and the tooltip says so."),
+         "mold must literally be cut back. Thin-tailed sections lose far "
+         "more downforce than the thicken treatment — roughly 17&nbsp;% on "
+         "the baseline section at 1.5&nbsp;mm — and the tooltip says so."),
         ("Min thickness", "An optional buildable-minimum check on the whole "
          "section. It warns when an element's thickest point is below the "
          "minimum and keeps thinner airfoils out of the optimizer and "
@@ -709,9 +715,9 @@ def part_i(made):
         "The polar tab plots each element's lift curve and drag polar from "
         "the neural-network surrogate (trained on XFOIL data; instant), for "
         "the section as actually built. An "
-        f"{B('Add XFOIL reference')} button runs the bundled XFOIL "
-        "executable for an independent cross-check — the two typically agree "
-        "within a few percent below stall."))
+        f"{B('Add XFOIL reference')} button runs the locally installed XFOIL "
+        "executable, when present, for an independent cross-check — the two "
+        "typically agree within a few percent below stall."))
 
     # 10 Export
     s.append(heading("Step 6 — Export to CAD"))
@@ -843,35 +849,52 @@ def part_ii(made):
         "effect is unphysical in the limit: as the ride height shrinks, the "
         "predicted venturi gain grows without bound, while a real flow "
         "chokes on boundary-layer growth in the gap. The tool therefore "
-        "reports a corrected estimate built from two transparent factors:"))
+        "reports a corrected estimate built from transparent, "
+        "user-adjustable factors:"))
     s.append(code(
-        "C_est = eta_visc · [ C_free + k_g · (C_ground − C_free) ]"))
+        "C_est  = eta_visc · [ C_free + G_real ]\n"
+        "G_real = cap · tanh( k_g · (C_ground − C_free) / cap ) "
+        "· tanh( (h/c) / 0.045 )\n"
+        "cap    = 3.0 · |C_free|"))
     s.append(body(
         f"Here {C('C_free')} and {C('C_ground')} are the exact inviscid "
         f"downforce coefficients in free air and in ground effect. "
         f"{C('eta_visc')} (default 0.85) is the free-air viscous "
         f"realization — how much of the inviscid free-air load a real "
         f"viscous flow achieves. {C('k_g')} is the fraction of the "
-        f"<i>additional</i> ground-effect gain that is realized, and it must "
-        f"fall toward zero as the section approaches the road:"))
+        f"<i>additional</i> ground-effect gain that is realized; at ordinary "
+        "ride heights both saturation terms are near-linear and near-one, so "
+        "the model reduces to the familiar "
+        f"{C('eta_visc · [C_free + k_g · (C_ground − C_free)]')}. The first "
+        "saturation caps the realized gain at three times the free-air "
+        "load; the second chokes it off below "
+        f"<i>h/c</i>&nbsp;≈&nbsp;0.045, where the real venturi flow stalls "
+        f"on boundary-layer growth. Left blank, {C('k_g')} follows an "
+        "automatic ride-height curve:"))
     s.append(code("k_g = 0.85 · tanh( (1.4 / 0.85) · h/c )"))
     s.append(figure("ground_model",
-                    "Figure 11 — Left: the realization factor, which "
-                    "preserves a calibrated small-height slope and an "
-                    "0.85 ceiling but vanishes at the ground. Right: on a "
-                    "real stack, the raw inviscid gain diverges as ride "
-                    "height shrinks while the realized estimate saturates.",
+                    "Figure 11 — Left: the automatic realization-factor "
+                    "curve, which preserves a calibrated small-height slope "
+                    "and an 0.85 ceiling but vanishes at the ground. Right: "
+                    "on a real stack, the raw inviscid gain diverges as ride "
+                    "height shrinks while the realized estimate peaks and "
+                    "then falls toward the road.",
                     made=made))
     s.append(body(
-        "The hyperbolic-tangent form keeps the calibrated slope at racing "
-        "ride heights while genuinely vanishing at contact, so the estimate "
-        f"no longer diverges. Of the two, {C('eta_visc')} is exposed in the "
-        "calibration group beside the raw inviscid numbers it modifies — a "
-        "starting value meant to be re-tuned against RANS or tunnel data for "
-        f"a given wing. {C('k_g')} is derived automatically from ride height "
-        "by the form above; its calibrated constants (the 0.85 ceiling and "
-        "the small-height slope) are the starting values there, re-tuned in "
-        "the source rather than through the interface."))
+        "Together the saturations keep the calibrated slope at racing ride "
+        "heights while genuinely reversing at the bottom of the travel: the "
+        "estimate peaks near <i>h/c</i>&nbsp;≈&nbsp;0.065 on the "
+        "two-element baseline and decreases as the wing drops further — the "
+        "force-reduction behaviour measured on wings in strong ground "
+        "effect — instead of growing without bound. Both knobs are exposed "
+        "in the calibration group beside the raw inviscid numbers they "
+        f"modify: {C('eta_visc')} directly, and {C('k_g')}, which follows "
+        "the automatic curve when left blank and is pinned when a value is "
+        "entered — useful for matching RANS or tunnel data at a known ride "
+        "height. The analysis always reports which source it used. The cap "
+        "ratio and choke height ("
+        f"{C('gain_cap_ratio')}, {C('choke_h_c')}) are configuration fields "
+        "with conservative defaults, adjustable at the config/API level."))
 
     # 14 Viscous
     s.append(heading("Viscous section data"))
@@ -885,8 +908,10 @@ def part_ii(made):
         f"{B('confidence')} value that falls for unusual sections and "
         "operating points."))
     s.append(body(
-        "The bundled XFOIL 6.99 executable is available as an independent "
-        "cross-check through the same interface; it is slower and "
+        "A locally installed XFOIL executable — dropped into the "
+        f"application's {C('xfoil/')} folder; it is not redistributed with "
+        "the tool — serves as an optional independent cross-check through "
+        "the same interface; it is slower and "
         "single-element, but it is the reference the surrogate approximates. "
         "Polars are cached by section, Reynolds number (bucketed to three "
         "significant figures), transition criterion, and model size, so a "
@@ -916,11 +941,20 @@ def part_ii(made):
         "at 110&nbsp;%, since slotted elements tolerate somewhat more than "
         "isolated maximum."))
     s.append(body(
-        "Free-air load is used deliberately: inviscid ground-effect loads "
-        "grow without bound near the road and would make the check "
-        "meaningless. Each element's inviscid ground-to-free multiplier is "
-        "reported separately, so the loading picture stays honest while the "
-        "ground gain remains visible."))
+        "Free-air load is used for that budget deliberately: raw inviscid "
+        "ground-effect loads grow without bound near the road and would "
+        "make the check meaningless. A second indicator watches each "
+        f"element's {B('realized ground-effect operating point')} — the "
+        "same lift coefficient the profile-drag lookup uses, so it is "
+        "consistent with the reported estimate by construction. Sections "
+        "near the ground have been measured carrying roughly up to twice "
+        "their isolated maximum before the flow gives up, so an element "
+        "past that allowance draws a screening-validity warning: treat the "
+        "downforce estimate as optimistic there, and the profile drag — "
+        "capped at the pre-stall polar — as understated. Each element's "
+        "inviscid ground-to-free multiplier is reported alongside, so the "
+        "loading picture stays honest while the ground gain remains "
+        "visible."))
 
     # 16 Drag
     s.append(heading("The drag model"))
@@ -928,8 +962,9 @@ def part_ii(made):
         "Reported drag has two parts. "
         f"{B('Profile drag')} is each element's own section drag, read from "
         "its polar at the lift coefficient it actually works at in ground "
-        "effect (its free-air load scaled by the realized share of its "
-        "ground multiplier), then summed over the elements weighted by "
+        "effect (its free-air load plus the realized share of its "
+        "ground-effect gain, viscous-realized), then summed over the "
+        "elements weighted by "
         f"chord. {B('Induced drag')} is computed from the very downforce the "
         "tool reports, so lift and induced drag are always consistent:"))
     s.append(code("CD_i = C_L² / (pi · AR · e) · phi"))
@@ -985,9 +1020,12 @@ def part_ii(made):
         f"{B('thickness floor')}: from the first station where the section "
         "reaches the requested gap, back to the trailing edge, no station is "
         "left thinner than the gap. This is what removes the mid-chord waist "
-        "that a naive ramp leaves on thin sections (Figure 7), and it is "
-        "verified by measuring the as-built, repaneled contour rather than "
-        "trusted from the construction."))
+        "that a naive ramp leaves on thin sections (Figure 7). The treatment "
+        "works on a densely repaneled copy of the base section, and the "
+        "floor is guaranteed on the geometry every consumer actually sees: "
+        "the floored contour is verified through a spline-repanel "
+        "round-trip, with the floor raised adaptively until it survives the "
+        "fit."))
     s.append(body(
         f"The {B('cut off')} treatment truncates the section at the station "
         "where it reaches the target thickness — solved so that after "
@@ -1134,8 +1172,8 @@ def reference():
         ("Project files", "Save and Open write a portable JSON project "
          "containing the full configuration, target, and any uploaded "
          "airfoil geometry (including inside shape and manufacturing "
-         "wrappers). The working session is also autosaved locally and "
-         "restored on launch."),
+         "wrappers). The working session is also autosaved server-side, in "
+         "app_data/ beside the application, and restored on launch."),
         ("Exports folder", "Exports are written to exports/ beside the "
          "application, with timestamped names; the export dialog links to "
          "the exact file."),

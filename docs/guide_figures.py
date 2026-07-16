@@ -49,9 +49,9 @@ plt.rcParams.update({
 DEMO = {
     "elements": [
         {"airfoil": "s1223", "chord_ratio": 1.0, "deflection_deg": 0},
-        {"airfoil": "s1223", "chord_ratio": 0.35, "deflection_deg": 24,
+        {"airfoil": "s1223", "chord_ratio": 0.35, "deflection_deg": 12,
          "slot_gap_pct": 1.5, "slot_overlap_pct": 3.0}],
-    "stack_aoa_deg": 1.0, "ride_height_mm": 30, "chord_mm": 350,
+    "stack_aoa_deg": 0.0, "ride_height_mm": 30, "chord_mm": 350,
     "span_mm": 1400, "speed_ms": 15, "ncrit": 7,
     "viscous_efficiency": 0.85, "efficiency_3d": 0.9,
 }
@@ -191,7 +191,7 @@ def fig_ground_model(out: Path):
     kg = np.array([analysis.ground_gain_factor(h) for h in hc])
 
     # real inviscid ground gain of the demo stack across ride heights
-    rides = np.array([12, 18, 25, 35, 50, 70, 100, 140])
+    rides = np.array([6, 9, 12, 18, 25, 35, 50, 70, 100, 140])
     gains, ests = [], []
     for rh in rides:
         cfg = geometry.StackConfig.from_dict({**DEMO, "ride_height_mm": int(rh)})
@@ -200,7 +200,7 @@ def fig_ground_model(out: Path):
         free, ground = panel.solve_pair([e["coords"] for e in inst], 0.0)
         cf, cg = -free.Cl, -ground.Cl
         gains.append(cg / cf - 1.0)
-        est, _ = analysis.corrected_downforce(cf, cg, cfg)
+        est, _, _ = analysis.corrected_downforce(cf, cg, cfg)
         ests.append(est / cf - 1.0)
     hc_r = rides / DEMO["chord_mm"]
 
@@ -219,10 +219,15 @@ def fig_ground_model(out: Path):
     ax2.plot(hc_r, 100 * np.array(ests), "s--", color=RED, lw=1.5,
              ms=4, label="realized (estimate)")
     _style(ax2)
+    # the raw curve leaves the frame — that is the point of the plot
+    ax2.set_ylim(0, 150)
+    ax2.text(0.16, 143, f"diverges ({max(gains)*100:,.0f} % at the lowest "
+             "height)", fontsize=6.5, color=BLUE, style="italic",
+             ha="left", va="top")
     ax2.set_xlabel("ride height  $h/c$")
     ax2.set_ylabel("downforce gain vs free air  (%)")
-    ax2.legend(frameon=False, fontsize=7.5, loc="upper right")
-    ax2.set_title("Inviscid gain diverges; the estimate saturates",
+    ax2.legend(frameon=False, fontsize=7.5, loc="center right")
+    ax2.set_title("Inviscid gain diverges; the estimate peaks, then falls",
                   loc="left", fontsize=8.5, color=INK)
     fig.tight_layout()
     return _save(fig, out, "ground_model")
@@ -480,7 +485,7 @@ def fig_architecture(out: Path):
     _arrow(ax, (4.3, 3.95), (5.0, 4.7), color=GOLD)
 
     _box(ax, (0.3, 1.6), 4.0, 1.1, "NeuralFoil surrogate", "#f8ecec", RED,
-         sub="+ bundled XFOIL 6.99", fs=9)
+         sub="+ local XFOIL (optional)", fs=9)
     _box(ax, (0.3, 0.3), 4.0, 1.0, "UIUC airfoil database", "#f8ecec", RED,
          sub="2,174 sections", fs=9)
     _arrow(ax, (5.6, 5.4), (3.7, 2.7), color=RED)

@@ -29,10 +29,10 @@ const state = {
   config: {
     elements: [
       { airfoil: "s1223", chord_ratio: 1.0, deflection_deg: 0 },
-      { airfoil: "s1223", chord_ratio: 0.35, deflection_deg: 24,
+      { airfoil: "s1223", chord_ratio: 0.35, deflection_deg: 12,
         slot_gap_pct: 1.5, slot_overlap_pct: 3.0 },
     ],
-    stack_aoa_deg: 1.0, ride_height_mm: 30, chord_mm: 350, span_mm: 1400,
+    stack_aoa_deg: 0.0, ride_height_mm: 30, chord_mm: 350, span_mm: 1400,
     speed_ms: 15, rho: 1.225, nu: NU, ncrit: 7,
     viscous_efficiency: 0.85, efficiency_3d: 0.9, span_efficiency: 0.9,
     n_panels_per_side: 70,
@@ -48,6 +48,7 @@ const state = {
   xfoilCache: {},             // spec|re|ncrit -> polar
   screenRows: null,
   screenSort: { key: "CL_max", dir: -1 },
+  screenShowLowConf: false,
 };
 
 const viewport = new Viewport($("viewport"));
@@ -96,6 +97,7 @@ const CFG_FIELDS = [
 
 function writeConfigToForm() {
   for (const [id, key] of CFG_FIELDS) $(id).value = state.config[key];
+  $("cfg-kg").value = state.config.k_g ?? "";
   $("cfg-target").value = state.target;
   $("opt-target").value = state.target;
   const m = state.config.manufacturing;
@@ -138,6 +140,21 @@ function bindConfigInputs() {
       updateTargetC();
       renderTargetPill();
       persistSession();
+    }
+  });
+  // not in CFG_FIELDS: clearing the field must remove the key (server then
+  // uses its automatic ride-height curve), not write NaN
+  $("cfg-kg").addEventListener("input", () => {
+    const raw = $("cfg-kg").value.trim();
+    if (raw === "") {
+      delete state.config.k_g;
+      onConfigChanged();
+      return;
+    }
+    const v = parseFloat(raw);
+    if (Number.isFinite(v)) {
+      state.config.k_g = Math.min(1, Math.max(0, v));
+      onConfigChanged();
     }
   });
 }
@@ -208,7 +225,8 @@ function elementCard(e, i) {
     flapFields.classList.add("hidden");
   } else {
     const set = (sel, val) => { node.querySelector(sel).value = val; };
-    set(".el-chord", Math.round(e.chord_ratio * 100));
+    // don't round to whole % — a re-render would misreport a 33.5% chord
+    set(".el-chord", +(e.chord_ratio * 100).toFixed(2));
     set(".el-defl", e.deflection_deg);
     // legacy configs carry dx/dy instead; inputs are backfilled with the
     // achieved values right after the first geometry refresh
@@ -339,6 +357,7 @@ function selectAirfoil(idx, spec, label) {
   const card = document.querySelector(`.el-card[data-idx="${idx}"]`);
   if (card) card.querySelector(".af-input").value = label;
   onConfigChanged();
+  buildViewportLegend();
   buildPolarChips();
 }
 
@@ -379,24 +398,48 @@ function usedCustomSpecs() {
   return used;
 }
 
+function sessionSnapshot() {
+  const custom = {};
+  for (const spec of usedCustomSpecs()) {
+    if (state.customDat[spec]) {
+      custom[spec] = state.customDat[spec];
+    }
+  }
+  return { config: state.config, target: state.target,
+           airfoil_names: state.airfoilNames, custom_airfoils: custom };
+}
+
+// the desktop shell serves on a fresh port (= new origin) every launch, so
+// localStorage rarely survives a restart — the server copy is what does
+const persistServer = debounce(() => {
+  api.sessionSave(sessionSnapshot()).catch(() => {});
+}, 800);
+
 const persistSession = debounce(() => {
   try {
-    const custom = {};
-    for (const spec of usedCustomSpecs()) {
-      if (state.customDat[spec]) {
-        custom[spec] = state.customDat[spec];
-      }
-    }
-    localStorage.setItem("wss-session", JSON.stringify({
-      config: state.config, target: state.target,
-      airfoil_names: state.airfoilNames, custom_airfoils: custom,
-    }));
-  } catch { /* storage full/blocked — session restore just won't happen */ }
+    localStorage.setItem("wss-session", JSON.stringify(sessionSnapshot()));
+  } catch { /* storage full/blocked — the server copy still covers restore */ }
+  persistServer();
 }, 500);
+
+// debounced writes lose the last edits if the tab closes inside the window
+function flushSession() {
+  try {
+    const snap = sessionSnapshot();
+    localStorage.setItem("wss-session", JSON.stringify(snap));
+    navigator.sendBeacon("/api/session",
+      new Blob([JSON.stringify({ state: snap })], { type: "application/json" }));
+  } catch { /* best effort */ }
+}
+window.addEventListener("pagehide", flushSession);
+window.addEventListener("beforeunload", flushSession);
 
 function onConfigChanged() {
   configRevision++;
   markStale();
+  // analysis overlays (CP marker) describe the previous geometry — clear
+  // them until the next analyze completes
+  if (viewport.xcp != null) viewport.setCp(null);
   updateTargetC();
   scheduleGeometry();
   persistSession();
@@ -480,12 +523,16 @@ function markStale() {
   if (state.analysis) $("results-stale").hidden = false;
 }
 
+let analyzeSeq = 0;
+
 async function runAnalysis() {
   const btn = $("btn-analyze");
   const revAtStart = configRevision;
+  const seq = ++analyzeSeq;
   busy(btn, true);
   try {
     const res = await api.analyze(state.config);
+    if (seq !== analyzeSeq) return;   // a newer analysis owns the panels
     state.analysis = res;
     renderResults(res);
     renderCp(res);
@@ -497,9 +544,9 @@ async function runAnalysis() {
       $("results-stale").hidden = false;
     }
   } catch (e) {
-    toast(`Analysis failed: ${e.message}`);
+    if (seq === analyzeSeq) toast(`Analysis failed: ${e.message}`);
   } finally {
-    busy(btn, false);
+    if (seq === analyzeSeq) busy(btn, false);
   }
 }
 
@@ -538,18 +585,25 @@ function renderResults(res) {
   $("r-ld").textContent = fmtN(f.efficiency_ld, 1);
   $("r-xcp").textContent =
     `${(c.x_cp_c * state.config.chord_mm).toFixed(0)} mm`;
+  $("kg-eff").textContent = c.k_ground_realization == null ? "–"
+    : `${fmtN(c.k_ground_realization, 2)} (${c.k_ground_source || "auto"})`;
 
   const host = $("r-loading");
   host.innerHTML = "";
   res.elements.forEach((e, i) => {
     const frac = e.loading_fraction;
+    const gf = e.loading_fraction_ground;
     const row = document.createElement("div");
     row.className = "load-row";
     const scale = 1.3; // track spans 0..130% of CL_max
+    const gload = gf == null ? "" :
+      ` · <span class="gload${gf > 2.0 ? " warn" : ""}" title="realized ` +
+      `ground-effect operating point: Cl ${fmtN(e.Cl_operating, 2)} — ` +
+      `${fmtN(gf, 2)}× the isolated CLmax">ground load ${fmtN(gf, 2)}</span>`;
     row.innerHTML =
       `<div class="load-head"><span>E${i + 1} ${e.role} · ` +
       `Cl ${fmtN(e.Cl_checked, 2)} / ${fmtN(e.CL_max_isolated, 2)} · ` +
-      `ground ×${fmtN(e.ground_multiplier, 1)}</span>` +
+      `ground ×${fmtN(e.ground_multiplier, 1)}${gload}</span>` +
       `<span>${(frac * 100).toFixed(0)}%</span></div>` +
       `<div class="load-track">` +
       `<div class="load-fill" style="width:${Math.min(frac / scale, 1) * 100}%;` +
@@ -709,9 +763,24 @@ async function startOptimization() {
     opt_shape: $("ov-shape").checked,
     airfoil_pool: $("ov-af-pool").value,
   };
-  if (state.config.elements.length === 1 &&
-      !options.opt_stack_aoa) {
+  if (![options.opt_stack_aoa, options.opt_deflections, options.opt_positions,
+        options.opt_chords, options.opt_airfoils, options.opt_shape]
+        .some(Boolean)) {
     toast("Enable at least one variable group.", "info");
+    return;
+  }
+  // deflections, positions and chords only exist on flaps; a single element
+  // still optimizes fine over stack angle, airfoil choice and shape
+  if (state.config.elements.length === 1 && !options.opt_stack_aoa &&
+      !options.opt_airfoils && !options.opt_shape) {
+    const host = $("opt-hints");
+    host.innerHTML = "";
+    const d = document.createElement("div");
+    d.className = "warning-item";
+    d.textContent = "Flap deflections, slot positions and flap chords need " +
+      "a flap — add an element, or enable stack angle, airfoil selection " +
+      "or airfoil shape.";
+    host.appendChild(d);
     return;
   }
   try {
@@ -733,6 +802,7 @@ function pollOptimizer() {
     try {
       const s = await api.optimizeStatus(state.optJob);
       renderOptimizer(s);
+      // "finalizing" (best design re-analyzing) still counts as running
       if (["done", "failed", "cancelled"].includes(s.state)) {
         clearInterval(state.optPoll);
         $("btn-opt-run").disabled = false;
@@ -741,6 +811,10 @@ function pollOptimizer() {
         if (s.best_config) {
           state.optResult = s;
           $("btn-opt-apply").disabled = false;
+        } else if (s.state === "done") {
+          $("opt-best-body").textContent =
+            "The run finished without a usable design — nothing to apply. " +
+            "Raise the effort or loosen the constraints and retry.";
         }
         renderOptHints(s);
         renderCandidates(s);
@@ -758,10 +832,11 @@ function renderOptimizer(s) {
   const pct = Math.round((s.progress || 0) * 100);
   $("opt-progress").style.width = pct + "%";
   $("opt-progress").classList.toggle("done", s.state === "done");
-  const bits = [s.state === "running" ? (s.phase || "running") : s.state,
+  const active = s.state === "running" || s.state === "finalizing";
+  const bits = [active ? (s.phase || s.state) : s.state,
                 `${pct}%`, `${s.n_eval} evaluations`, `${s.elapsed_s}s`];
   if (s.best) bits.push(`best ${s.best.downforce_n} N`);
-  if (s.state === "running" && s.eta_s != null && s.eta_s > 2) {
+  if (active && s.eta_s != null && s.eta_s > 2) {
     bits.push(`~${Math.round(s.eta_s)}s left`);
   }
   $("opt-status").textContent = bits.join(" · ");
@@ -816,7 +891,14 @@ function renderOptimizer(s) {
 function renderOptHints(s) {
   const host = $("opt-hints");
   host.innerHTML = "";
-  if (!s.best || !s.variables || s.state === "failed") return;
+  if (s.state === "failed") {
+    const d = document.createElement("div");
+    d.className = "warning-item crit";
+    d.textContent = s.error || "Optimization failed.";
+    host.appendChild(d);
+    return;
+  }
+  if (!s.best || !s.variables) return;
   const pinnedLo = [], pinnedHi = [];
   s.variables.forEach((v, i) => {
     const x = s.best.x[i], span = v.hi - v.lo;
@@ -827,7 +909,8 @@ function renderOptHints(s) {
     else if (v.hi - x < 0.03 * span) pinnedHi.push(nm);
   });
   const target = state.target;
-  const hit = Math.abs(s.best.downforce_n - target) <= Math.max(0.02 * target, 2);
+  // same on-target tolerance the optimizer applies to candidates (3%, min 1 N)
+  const hit = Math.abs(s.best.downforce_n - target) <= Math.max(0.03 * target, 1);
   let msg = null;
   if (pinnedLo.length && hit) {
     msg = `Target reached, but ${pinnedLo.join(", ")} sat at the minimum — ` +
@@ -865,7 +948,24 @@ async function applyDesign(cfgIn) {
     if (e.dx != null) e.dx = Math.round(e.dx * 1000) / 1000;
     if (e.dy != null) e.dy = Math.round(e.dy * 1000) / 1000;
   }
-  state.config = cfg;
+  // cfg is a snapshot of the configuration from when the run STARTED —
+  // adopt only the optimizer-owned fields so edits made since (speed, ride
+  // height, manufacturing, …) survive the apply
+  if (cfg.elements.length === state.config.elements.length) {
+    state.config.stack_aoa_deg = cfg.stack_aoa_deg;
+    cfg.elements.forEach((e, i) => {
+      const cur = state.config.elements[i];
+      cur.airfoil = e.airfoil;
+      cur.deflection_deg = e.deflection_deg;
+      cur.chord_ratio = e.chord_ratio;
+      if (e.slot_gap_pct != null) cur.slot_gap_pct = e.slot_gap_pct;
+      if (e.slot_overlap_pct != null) cur.slot_overlap_pct = e.slot_overlap_pct;
+    });
+  } else {
+    state.config = cfg;
+    toast("Element count changed since the run started — the whole " +
+          "configuration was restored from the optimizer run.", "info", 7000);
+  }
   writeConfigToForm();
   persistSession();
   await refreshGeometry();
@@ -962,14 +1062,20 @@ function buildScreenerTargets() {
   });
 }
 
+// prefill must not clobber hand-edited values on every tab visit; switching
+// the target element is an explicit request to prefill again
+const screenerDirty = { re: false, tmin: false };
+$("scr-re").addEventListener("input", () => { screenerDirty.re = true; });
+$("scr-tmin").addEventListener("input", () => { screenerDirty.tmin = true; });
+
 function prefillScreener() {
   const i = parseInt($("scr-elem").value || "0", 10);
-  $("scr-re").value = Math.round(elementRe(i));
+  if (!screenerDirty.re) $("scr-re").value = Math.round(elementRe(i));
   // manufacturing constraints -> %c floor at this element's chord: both the
   // explicit buildable minimum and the TE thickness (a section thinner than
   // its own TE is a plate, not an airfoil)
   const m = state.config.manufacturing;
-  if (m) {
+  if (m && !screenerDirty.tmin) {
     const floorMm = Math.max(m.min_thickness_mm || 0,
                              1.5 * (m.te_gap_mm || 0));
     if (floorMm > 0) {
@@ -980,19 +1086,25 @@ function prefillScreener() {
     }
   }
 }
-$("scr-elem").addEventListener("change", prefillScreener);
+$("scr-elem").addEventListener("change", () => {
+  screenerDirty.re = screenerDirty.tmin = false;
+  prefillScreener();
+});
 
 $("btn-screen").addEventListener("click", async () => {
   const btn = $("btn-screen");
   busy(btn, true);
   $("scr-note").textContent = "screening the library…";
   try {
+    // always fetch low-confidence rows too — the 50% cut is applied
+    // client-side so hidden sections (often uploads) stay discoverable
     const res = await api.screen({
       re: parseFloat($("scr-re").value),
       ncrit: state.config.ncrit,
       cl_ref: parseFloat($("scr-cl").value),
       thickness_pct_min: parseFloat($("scr-tmin").value) || 0,
       thickness_pct_max: parseFloat($("scr-tmax").value) || 25,
+      include_low_confidence: true,
     });
     state.screenRows = res.rows;
     $("scr-note").textContent =
@@ -1014,7 +1126,11 @@ const SCR_COLS = [
 ];
 
 function renderScreenTable() {
-  const rows = [...(state.screenRows || [])];
+  const all = state.screenRows || [];
+  const rows = state.screenShowLowConf ? [...all]
+    : all.filter(r => (r.confidence ?? 1) >= 0.5);
+  const nLow = all.length
+    - all.filter(r => (r.confidence ?? 1) >= 0.5).length;
   const { key, dir } = state.screenSort;
   rows.sort((a, b) => {
     const av = a[key], bv = b[key];
@@ -1030,6 +1146,10 @@ function renderScreenTable() {
     const tds = SCR_COLS.map(([k]) => {
       let v = r[k];
       if (v == null) v = "–";
+      if (k === "CL_max" && r.CL_max_lower_bound) {
+        return `<td title="polar had not stalled by the last analyzed ` +
+               `angle — CL_max is a lower bound">≥ ${v}</td>`;
+      }
       return `<td>${v}</td>`;
     }).join("");
     return `<tr>${tds}<td><button class="btn ghost" data-use="${r.spec}">Use</button></td></tr>`;
@@ -1037,6 +1157,25 @@ function renderScreenTable() {
   host.innerHTML =
     `<table class="data-table"><thead><tr>${th}<th></th></tr></thead>` +
     `<tbody>${trs}</tbody></table>`;
+  if (nLow > 0) {
+    const note = document.createElement("div");
+    note.className = "note conf-note";
+    note.textContent = state.screenShowLowConf
+      ? `showing all ${all.length}, including ${nLow} with NeuralFoil ` +
+        `confidence below 50% — `
+      : `showing ${rows.length} of ${all.length} — ${nLow} hidden ` +
+        `(low NeuralFoil confidence): `;
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "link-btn";
+    b.textContent = state.screenShowLowConf ? "hide" : "show";
+    b.addEventListener("click", () => {
+      state.screenShowLowConf = !state.screenShowLowConf;
+      renderScreenTable();
+    });
+    note.appendChild(b);
+    host.appendChild(note);
+  }
   host.querySelectorAll("th[data-k]").forEach((h) => {
     h.addEventListener("click", () => {
       const k = h.dataset.k;
@@ -1214,7 +1353,12 @@ async function checkHealth() {
 
 async function restoreSession() {
   let saved = null;
-  try { saved = JSON.parse(localStorage.getItem("wss-session")); } catch {}
+  // the server copy first: it is written by every session regardless of
+  // origin, so it is always at least as fresh as this origin's localStorage
+  try { saved = (await api.session()).state; } catch {}
+  if (!saved?.config?.elements?.length) {
+    try { saved = JSON.parse(localStorage.getItem("wss-session")); } catch {}
+  }
   if (!saved?.config?.elements?.length) return false;
   try {
     // uploaded airfoils live in server memory: re-register any the session used
@@ -1247,6 +1391,9 @@ async function boot() {
   loadPresets();
   checkHealth();
   setInterval(checkHealth, 20000);
+  // the desktop launcher's browser fallback reads request activity as "the
+  // tab is still open" — keep a heartbeat independent of the status dot
+  setInterval(() => { fetch("/api/health").catch(() => {}); }, 60000);
   setFrame("installed");
 
   const restored = await restoreSession();

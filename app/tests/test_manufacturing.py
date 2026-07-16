@@ -363,5 +363,44 @@ try:
 except ValueError:
     check("validation: unknown pool rejected", True)
 
+# ---- the floor must survive the downstream spline repanel ----
+# regression foils: coarse catalog sections whose fit spline used to sag
+# below the floor between nodes by up to 0.10 mm (2x the waist tolerance)
+for foil, ratio in (("goe652", 0.35), ("e378", 0.35), ("goe233", 0.20)):
+    cfg_f = geometry.StackConfig.from_dict({
+        "elements": [{"airfoil": "s1223"},
+                     {"airfoil": foil, "chord_ratio": ratio,
+                      "deflection_deg": 15,
+                      "slot_gap_pct": 1.5, "slot_overlap_pct": 2.0}],
+        "chord_mm": 350, "ride_height_mm": 30,
+        "manufacturing": {"te_gap_mm": 3.0, "te_mode": "thicken"}})
+    m = geometry.geometry_report(cfg_f)["design"][1]["mfg"]
+    check(f"thicken floor survives repanel ({foil})",
+          m["waist_ok"] and m["min_aft_thickness_mm"] >= 2.97,
+          f"(min aft {m['min_aft_thickness_mm']} mm vs 3.0 requested)")
+
+# a surface that folds back in x must produce sane treated geometry (after
+# the parser fix) — never crossed surfaces or fantasy thickness numbers
+cfg_nm = geometry.StackConfig.from_dict({
+    "elements": [{"airfoil": "nm26-3smoothed"}],
+    "chord_mm": 350, "ride_height_mm": 30,
+    "manufacturing": {"te_gap_mm": 1.2, "te_mode": "thicken"}})
+m_nm = geometry.geometry_report(cfg_nm)["design"][0]["mfg"]
+check("thin foil with historical fold parses + treats sanely",
+      10 < m_nm["max_thickness_mm"] < 25
+      and m_nm["min_aft_thickness_mm"] > 0 and m_nm["waist_ok"],
+      f"(tmax {m_nm['max_thickness_mm']} mm, "
+      f"min aft {m_nm['min_aft_thickness_mm']} mm)")
+
+# crossed-surface guard: a genuinely folded contour is rejected, not emitted
+fold = np.array([[1.0, 0.0], [0.6, 0.06], [0.72, 0.09], [0.3, 0.08],
+                 [0.0, 0.0], [0.3, -0.04], [0.6, -0.05], [1.0, -0.001]])
+try:
+    mfg.apply_te_treatment(fold, 0.01, "thicken")
+    check("folded-surface contour rejected by TE treatment", False)
+except ValueError as e:
+    check("folded-surface contour rejected by TE treatment",
+          "folds back" in str(e))
+
 print(f"\n{sum(results)}/{len(results)} manufacturing checks passed")
 sys.exit(0 if all(results) else 1)

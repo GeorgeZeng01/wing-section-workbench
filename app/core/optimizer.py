@@ -170,10 +170,31 @@ def build_airfoil_shortlists(config: dict, cfg: StackConfig,
 SHAPE_KEYS = ("shape_b25", "shape_b55", "shape_b80", "shape_ts")
 
 
+def _clean_bounds(user_bounds) -> dict:
+    """Merge user bounds over the defaults, coercing to (lo, hi) float pairs.
+
+    Malformed entries raise ValueError here — at job creation, where the API
+    can turn them into a 422 — instead of surfacing as a crashed search
+    thread minutes later."""
+    out = dict(DEFAULT_BOUNDS)
+    for k, v in (user_bounds or {}).items():
+        if k not in DEFAULT_BOUNDS:
+            raise ValueError(f"unknown bounds key {k!r} — expected one of "
+                             f"{sorted(DEFAULT_BOUNDS)}")
+        try:
+            lo, hi = float(v[0]), float(v[1])
+        except (TypeError, ValueError, IndexError, KeyError):
+            raise ValueError(f"bounds[{k!r}] must be a (lo, hi) number pair")
+        if not (np.isfinite(lo) and np.isfinite(hi) and lo < hi):
+            raise ValueError(f"bounds[{k!r}]: need finite lo < hi")
+        out[k] = (lo, hi)
+    return out
+
+
 def build_variables(config: dict, opts: dict) -> list[dict]:
     from . import shaping
     n_flaps = len(config["elements"]) - 1
-    bounds = {**DEFAULT_BOUNDS, **(opts.get("bounds") or {})}
+    bounds = _clean_bounds(opts.get("bounds"))
     variables = []
     if opts.get("opt_stack_aoa", True):
         variables.append({"key": "stack_aoa_deg", "elem": None,
@@ -311,6 +332,31 @@ class Job:
     def __init__(self, config: dict, options: dict):
         self.id = uuid.uuid4().hex[:12]
         self.config = copy.deepcopy(config)
+        # validate the numeric options eagerly: a bogus budget or target is a
+        # client error the API should 422, not a background-thread crash
+        for key, default in (("target_downforce_n", 200.0),
+                             ("drag_weight", 0.10)):
+            try:
+                float(options.get(key, default))
+            except (TypeError, ValueError):
+                raise ValueError(f"options[{key!r}] must be a number")
+        try:
+            int(options.get("budget", 1500))
+        except (TypeError, ValueError):
+            raise ValueError("options['budget'] must be an integer")
+        if options.get("mode", "global") not in ("global", "local"):
+            raise ValueError("options['mode'] must be 'global' or 'local'")
+        # every element spec must resolve NOW — a job whose every evaluation
+        # would fail (e.g. a custom airfoil lost to a server restart) must be
+        # rejected up front, not finish 'done' with nothing to show
+        from . import airfoils
+        for i, e in enumerate(config.get("elements", [])):
+            spec = e.get("airfoil", "s1223")
+            try:
+                airfoils.resolve(spec)
+            except (KeyError, ValueError) as exc:
+                raise ValueError(f"element {i + 1}: airfoil spec {spec!r} "
+                                 f"cannot be resolved ({exc})")
         # re-optimizing an already-shaped design: unwrap the shape spec and
         # seed the shape variables from it, so refinement continues from the
         # current shape instead of stacking a second modification on top
@@ -323,9 +369,14 @@ class Job:
                     e["airfoil"] = base
                     e["_shape_x0"] = [*b, ts]
         self.options = options
-        self.state = "pending"     # pending | running | done | failed | cancelled
+        self.state = "pending"     # pending | running | finalizing | done |
+                                   # failed | cancelled
         self.error = None
         self.history: list[dict] = []
+        self.n_error = 0           # evaluations that raised
+        self.n_infeasible = 0      # evaluations rejected as infeasible
+        self.last_error = None     # last exception message from objective()
+        self.last_infeasible = None
         self.best = None           # {"x", "J", "downforce_n", "drag_n"}
         self.best_config = None
         self.result = None         # full analysis of the best design
@@ -366,9 +417,13 @@ class Job:
             cfg = StackConfig.from_dict({**cfg_dict,
                                          "n_panels_per_side": self._opt_panels})
             ev = analysis.quick_objective_eval(cfg)
-        except Exception:
+        except Exception as exc:
+            self.n_error += 1
+            self.last_error = f"{type(exc).__name__}: {exc}"
             return 60.0
         if not ev["feasible"]:
+            self.n_infeasible += 1
+            self.last_infeasible = ev.get("reason")
             return 50.0
 
         f_err = (ev["downforce_n"] - target) / max(abs(target), 1.0)
@@ -377,6 +432,9 @@ class Job:
         # about as much as missing the target by 10%, so an honest miss
         # beats a fake hit
         j_pen = 40.0 * ev["load_excess"]
+        # keep the search out of the regime the model itself calls
+        # unreliable: realized ground-effect loading past the allowance
+        j_pen += 25.0 * ev.get("load_excess_ground", 0.0)
         for g in ev["gaps"]:
             j_pen += 2.0 * _band_penalty(g, GAP_BAND, 0.005)
         for o in ev["overlaps"]:
@@ -392,7 +450,8 @@ class Job:
             self.archive.append({"x": [round(float(v), 5) for v in x],
                                  "J": float(j), "penalty": float(j_pen),
                                  "downforce_n": round(ev["downforce_n"], 1),
-                                 "drag_n": round(ev["drag_n"], 2)})
+                                 "drag_n": round(ev["drag_n"], 2),
+                                 "panels": self._opt_panels})
             if self.best is None or j < self.best["J"]:
                 self.best = {"x": [round(float(v), 5) for v in x],
                              "J": float(j), "penalty": round(float(j_pen), 3),
@@ -437,7 +496,11 @@ class Job:
         target = float(self.options.get("target_downforce_n", 200.0))
         spans = [max(v["hi"] - v["lo"], 1e-9) for v in self.variables]
         by_j = sorted(archive, key=lambda a: a["J"])
-        best = by_j[0]
+        # the winner must come from full-fidelity evaluations when any exist
+        # — the coarse search paneling carries a bias larger than the drag
+        # differences between near-optimal designs
+        full = [a for a in by_j if a.get("panels") == self._full_panels]
+        best = full[0] if full else by_j[0]
         tol = max(CAND_TARGET_TOL * abs(target), 1.0)
         good = [a for a in by_j
                 if abs(a["downforce_n"] - target) <= tol and a["penalty"] < 0.5]
@@ -491,6 +554,42 @@ class Job:
 
     # ---- runner ----
 
+    def _floor_shape_ts_bounds(self):
+        """With airfoil selection active, the thickness-scale lower bound
+        must hold for EVERY shortlist candidate, not just the currently
+        selected airfoil — otherwise thinning a thinner decoded candidate
+        can drop below the buildable minimum. Recomputed from the thinnest
+        candidate once the shortlists exist."""
+        from . import airfoils, shaping
+        mfg_d = self.config.get("manufacturing") or {}
+        floor_mm = max(float(mfg_d.get("min_thickness_mm") or 0.0),
+                       1.5 * float(mfg_d.get("te_gap_mm") or 0.0))
+        if floor_mm <= 0 or not self.shortlists:
+            return
+        chord_mm = float(self.config.get("chord_mm", 350.0))
+        lo_ratio = {v["elem"]: v["lo"] for v in self.variables
+                    if v["key"] == "chord_ratio"}
+        for v in self.variables:
+            if v["key"] != "shape_ts" or v["elem"] not in self.shortlists:
+                continue
+            i = v["elem"]
+            ratio = 1.0 if i == 0 else float(lo_ratio.get(
+                i, self.config["elements"][i].get("chord_ratio", 0.3)))
+            t_min = None
+            for spec in self.shortlists[i]:
+                try:
+                    _, cc = airfoils.repaneled(spec, 60)
+                    t = airfoils.geometry_info(cc)["max_thickness"]
+                    t_min = t if t_min is None else min(t_min, t)
+                except Exception:
+                    continue
+            if not t_min:
+                continue
+            t_min_mm = t_min * ratio * chord_mm
+            if t_min_mm > 0:
+                v["lo"] = min(max(v["lo"], floor_mm / t_min_mm),
+                              shaping.BOUNDS_TS[1] - 0.01)
+
     def _target_reached(self) -> bool:
         b = self.best
         if b is None:
@@ -505,11 +604,14 @@ class Job:
         from scipy.optimize import differential_evolution, minimize
         self.state = "running"
         self.t_start = time.time()
-        # search resolution: coarser for bigger stacks so wall time stays flat
+        # search resolution: coarser for bigger stacks so wall time stays
+        # flat; the refinement phase and final analysis always run at the
+        # configured full resolution
         n_el = max(1, len(self.config.get("elements", [])))
         base_panels = 60 if n_el <= 2 else (50 if n_el == 3 else 45)
-        self._opt_panels = min(int(self.config.get("n_panels_per_side") or 70),
-                               base_panels)
+        self._full_panels = int(self.config.get("n_panels_per_side") or 70)
+        self._opt_panels = min(self._full_panels, base_panels)
+        cancelled = False
         try:
             if any(v["key"] == "airfoil_idx" for v in self.variables):
                 # candidate lists come from the screener; cached per operating
@@ -521,6 +623,7 @@ class Job:
                 self.shortlists = build_airfoil_shortlists(
                     self.config, cfg0, pool=self.airfoil_pool,
                     min_chord_ratio=min_cr or None)
+                self._floor_shape_ts_bounds()
                 if self._cancel.is_set():
                     raise _Cancelled()
 
@@ -536,8 +639,8 @@ class Job:
             thorough = mode == "global" and budget >= 3000
 
             if mode == "global":
-                popsize = max(6, min(16 if thorough else 12,
-                                     budget // (25 * dim)))
+                popsize = (16 if thorough
+                           else max(6, min(12, budget // (25 * dim))))
                 maxiter = max(8, budget // (popsize * dim))
                 polish_fev = max(150, budget // 5)
                 self.plan_total = popsize * dim * (maxiter + 1) + polish_fev
@@ -575,9 +678,13 @@ class Job:
             with self._lock:
                 coarse_best = self.best
                 self.best = None   # the winner must be a full-fidelity eval
-            self._opt_panels = min(
-                int(self.config.get("n_panels_per_side") or 70), 70)
+            self._opt_panels = self._full_panels
             fev_each = max(100, polish_fev // len(starts))
+            with self._lock:
+                # re-plan so the progress bar keeps moving after an early
+                # stop instead of freezing at the fraction of the never-run
+                # global evaluations
+                self.plan_total = self.n_eval + fev_each * len(starts)
             for x_s in starts:
                 if self._cancel.is_set():
                     raise _Cancelled()
@@ -589,25 +696,46 @@ class Job:
                 with self._lock:
                     self.best = coarse_best
         except _Cancelled:
-            self.state = "cancelled"
+            cancelled = True
         except Exception as e:
             self.state = "failed"
             self.error = f"{e}\n{traceback.format_exc(limit=3)}"
         finally:
             self.t_end = time.time()
 
-        if self.state == "running" or self.state == "cancelled":
+        if self.state == "running":
             try:
+                # keep a non-terminal state while re-analyzing the winners:
+                # a poller that sees a terminal state must already see the
+                # finalized result/candidates beside it
                 self.phase = "finalizing"
+                self.state = "finalizing"
                 if self.best is not None:
                     best_cfg = apply_vector(self.config, self.variables,
                                             np.array(self.best["x"]),
                                             self.shortlists)
-                    self.best_config = best_cfg
-                    self.result = analysis.analyze(StackConfig.from_dict(best_cfg))
-                    self.candidates = self._finalize_candidates()
-                if self.state == "running":
-                    self.state = "done"
+                    result = analysis.analyze(StackConfig.from_dict(best_cfg))
+                    candidates = self._finalize_candidates()
+                    with self._lock:
+                        self.best_config = best_cfg
+                        self.result = result
+                        self.candidates = candidates
+                        self.state = "cancelled" if cancelled else "done"
+                elif cancelled:
+                    self.state = "cancelled"
+                else:
+                    # the search ran but never saw a feasible design — that
+                    # is a failure with a diagnosable cause, not a "done"
+                    self.state = "failed"
+                    parts = [f"no feasible design found in "
+                             f"{self.n_eval} evaluations"]
+                    if self.n_error:
+                        parts.append(f"{self.n_error} evaluations raised "
+                                     f"(last: {self.last_error})")
+                    if self.n_infeasible:
+                        parts.append(f"{self.n_infeasible} were infeasible "
+                                     f"(last reason: {self.last_infeasible})")
+                    self.error = "; ".join(parts)
             except Exception as e:
                 self.state = "failed"
                 self.error = str(e)
@@ -628,6 +756,8 @@ class Job:
             return {
                 "id": self.id, "state": self.state, "error": self.error,
                 "n_eval": self.n_eval,
+                "n_error": self.n_error,
+                "n_infeasible": self.n_infeasible,
                 "elapsed_s": round(elapsed, 1),
                 "phase": self.phase,
                 "progress": round(progress, 3),

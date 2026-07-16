@@ -34,6 +34,9 @@ def _metrics_row(spec: str, re: float, ncrit: float, cl_ref: float,
     return {
         "spec": spec,
         "CL_max": round(m["CL_max"], 3),
+        # polar still climbing at the last analyzed angle: CL_max is a
+        # lower bound, not a stall value — surfaced so consumers can say so
+        "CL_max_lower_bound": bool(m["CL_max_at_grid_edge"]),
         "alpha_CL_max": round(m["alpha_CL_max"], 1),
         "LD_max": round(m["LD_max"], 1),
         "CL_at_LD_max": round(m["CL_at_LD_max"], 3),

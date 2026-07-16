@@ -8,12 +8,14 @@ thickness. Two treatments are offered:
 thicken   XFOIL-TGAP-style: extra thickness is added symmetrically about the
           camber line, blended in over the aft part of the chord (quadratic
           ramp from BLEND_START to the TE), then a hard thickness floor is
-          applied so that no station aft of the section's thickest point is
-          thinner than the TE gap itself — the reason the TE is opened is
-          that anything thinner cannot be built, and that argument applies
-          to a mid-chord waist just as much as to the TE. Chord, planform
-          and camber are preserved, so the section keeps its design loading.
-          This is the standard aerodynamic prep and the default.
+          applied so that no station aft of the nose taper is thinner than
+          the TE gap itself — the reason the TE is opened is that anything
+          thinner cannot be built, and that argument applies to a mid-chord
+          waist just as much as to the TE. The floor is verified through an
+          actual spline-repanel round-trip (the geometry every consumer
+          sees), not just at the polyline nodes. Chord, planform and camber
+          are preserved, so the section keeps its design loading. This is
+          the standard aerodynamic prep and the default.
 truncate  the contour is cut where the section last reaches the target
           thickness and closed by a straight base, then rescaled back to
           unit chord. Loses the (highly cambered) last few percent of the
@@ -131,14 +133,53 @@ FLOOR_PAD = 1.5e-4   # extra floor height soaking up interpolation noise and
                      # the downstream spline repanel's undershoot at the kinks
 
 
-def _floor_aft_thickness(c: np.ndarray, floor_c: float) -> tuple[np.ndarray, bool]:
-    """Raise local thickness to >= floor_c everywhere aft of the thickest
-    station, adding material symmetrically about the camber line.
+def _monotonic_surfaces(c: np.ndarray) -> bool:
+    """Whether both surfaces advance monotonically in x — the property the
+    vertical thickness interpolation (np.interp) silently requires."""
+    i_le = int(np.argmin(c[:, 0]))
+    up, lo = c[: i_le + 1][::-1], c[i_le:]
+    return bool((np.diff(up[:, 0]) >= -1e-12).all()
+                and (np.diff(lo[:, 0]) >= -1e-12).all())
 
-    The deficient window is densified (segment midpoints inserted) before
-    lifting, so the floor holds between the original nodes too and the
-    cosine repanel spline downstream has enough fit points to follow the
-    plateau instead of undercutting it."""
+
+def _densify_window(cc: np.ndarray, x0: float, dx_max: float) -> np.ndarray:
+    """Insert segment midpoints until no segment inside [x0, TE] is longer
+    than dx_max in x. Collinear insertions leave the polyline geometry
+    untouched; they only pin the downstream fit spline to it."""
+    for _ in range(8):
+        x = cc[:, 0]
+        seg = ((np.minimum(x[:-1], x[1:]) >= x0 - 1e-9)
+               & (np.abs(np.diff(x)) > dx_max))
+        if not seg.any():
+            break
+        mids = 0.5 * (cc[:-1][seg] + cc[1:][seg])
+        cc = np.insert(cc, np.nonzero(seg)[0] + 1, mids, axis=0)
+    return cc
+
+
+def _spline_floor_deficit(cc: np.ndarray, floor_c: float, x_start: float,
+                          x_max: float) -> float:
+    """How far the contour every consumer actually sees — the cosine spline
+    repanel of these nodes — dips below the floor inside the window. The
+    polyline satisfying the floor is not enough: a fit spline sags between
+    sparse plateau nodes by more than the pad on coarse catalog foils."""
+    import aerosandbox as asb
+    rp = np.asarray(asb.Airfoil(name="af", coordinates=cc)
+                    .repanel(n_points_per_side=100).coordinates, float)
+    lo = min(x_start + 1e-4, x_max - 0.003)
+    xs = np.linspace(lo, x_max - 0.002, 400)
+    t = thickness_at(rp, xs)
+    return float(max(0.0, floor_c - float(t.min())))
+
+
+def _floor_aft_thickness(c: np.ndarray, floor_c: float) -> tuple[np.ndarray, bool]:
+    """Raise local thickness to >= floor_c everywhere aft of the nose taper,
+    adding material symmetrically about the camber line.
+
+    The floored window is densified to a maximum node spacing first, and the
+    result is verified through an actual spline repanel round-trip — the
+    geometry downstream consumers see — raising the pad adaptively until the
+    floor survives it."""
     x_max = float(c[:, 0].max())
     # the buildable window starts where the ORIGINAL section first reaches
     # the floor (nose taper ends there) — not at its thickest point, or a
@@ -148,36 +189,33 @@ def _floor_aft_thickness(c: np.ndarray, floor_c: float) -> tuple[np.ndarray, boo
     # those separately.
     x_start = float(_aft_window(c, floor_c)[0])
 
-    def deficits(cc: np.ndarray) -> np.ndarray:
+    def deficits(cc: np.ndarray, extra: float) -> np.ndarray:
         # the pad soaks up spline undershoot along the plateau; the TE base
         # endpoints are exact fit points, so it tapers off there and the
         # requested TE gap stays exact
         x = cc[:, 0]
-        target = floor_c + FLOOR_PAD * np.clip((x_max - x) / 0.01, 0.0, 1.0)
+        target = (floor_c + (FLOOR_PAD + extra)
+                  * np.clip((x_max - x) / 0.01, 0.0, 1.0))
         d = np.maximum(target - thickness_at(cc, x), 0.0)
         d[x < x_start] = 0.0
         return d
 
-    if deficits(c).max() <= _TINY and aft_min_thickness(c, floor_c) >= floor_c:
+    if (deficits(c, 0.0).max() <= _TINY
+            and aft_min_thickness(c, floor_c) >= floor_c):
         return c, False
-    cc = c.copy()
-    for _ in range(4):
-        d = deficits(cc)
+    cc = _densify_window(c.copy(), x_start, 0.004)
+    extra = 0.0
+    for _ in range(5):
+        d = deficits(cc, extra)
         if d.max() > _TINY:
-            # densify the deficient window so the floor holds between nodes
-            lo_x = float(cc[d > 0, 0].min())
-            seg = (cc[:-1, 0] >= lo_x - 1e-6) & (cc[1:, 0] >= lo_x - 1e-6)
-            mids = 0.5 * (cc[:-1][seg] + cc[1:][seg])
-            cc = np.insert(cc, np.nonzero(seg)[0] + 1, mids, axis=0)
             i_le = int(np.argmin(cc[:, 0]))
-            d = deficits(cc)
             sign = np.ones(len(cc))
             sign[i_le + 1:] = -1.0    # lower surface moves down
             cc[:, 1] += 0.5 * d * sign
-        # verify with the same fine-grid measurement the report uses,
-        # not just at the nodes
-        if aft_min_thickness(cc, floor_c) >= floor_c - _TINY:
+        sag = _spline_floor_deficit(cc, floor_c, x_start, x_max)
+        if sag <= _TINY:
             break
+        extra += sag + 2e-5
     return cc, True
 
 
@@ -243,22 +281,47 @@ def apply_te_treatment(coords: np.ndarray, gap_c: float,
                        mode: str = "thicken") -> tuple[np.ndarray, dict]:
     """Open the TE of a unit-chord Selig contour to >= gap_c.
 
-    Returns (coords, meta); meta["clamped"] is True when the target could not
-    be reached without destroying the section (the treatment then stops at
-    its safety limit and geometry_report raises a warning instead).
+    Returns (coords, meta). In thicken mode meta["clamped"] means the smooth
+    blend ramp alone could not reach the target (its per-station addition is
+    limited to MAX_ADD_C); the aft thickness floor still guarantees the gap,
+    so the shape near the TE becomes plateau-like rather than blended —
+    geometry_report flags the plate-like cases. In truncate mode
+    meta["clamped"] means the cut station hit its forward safety limit.
+
+    Requires monotonic-x surfaces (the thickness interpolation is vertical);
+    contours that fold back in x are rejected rather than silently
+    misprocessed, and a treatment that would cross the surfaces raises.
     """
     c = np.asarray(coords, float)
+    if not _monotonic_surfaces(c):
+        raise ValueError(
+            "TE treatment: this section's surface folds back on itself in x "
+            "— the vertical thickness treatment does not support it")
     if mode == "thicken":
-        return _thicken(c, float(gap_c))
-    if mode == "truncate":
-        return _truncate(c, float(gap_c))
-    raise ValueError(f"TE treatment must be one of {MODES}, got {mode!r}")
+        out, meta = _thicken(c, float(gap_c))
+    elif mode == "truncate":
+        out, meta = _truncate(c, float(gap_c))
+    else:
+        raise ValueError(f"TE treatment must be one of {MODES}, got {mode!r}")
+    xs = np.linspace(0.01, float(out[:, 0].max()) - 0.002, 400)
+    if float(thickness_at(out, xs).min()) < -1e-6:
+        raise ValueError(
+            "TE treatment produced crossed surfaces on this section — "
+            "reduce the TE thickness or choose a different airfoil")
+    return out, meta
 
 
 def resolve_mfg(spec: str) -> tuple[str, np.ndarray]:
-    """Resolve a "mfg:" spec -> (display name, treated unit-chord coords)."""
+    """Resolve a "mfg:" spec -> (display name, treated unit-chord coords).
+
+    The base section is repaneled onto a dense cosine grid before treatment:
+    raw catalog files can be sparse (the fit spline would sag below the
+    thickness floor between nodes) or non-monotonic in x (the vertical
+    thickness measure would silently corrupt), and the treatment's guarantees
+    are only as good as the grid it works on."""
     from . import airfoils
     mode, gap_c, base = parse(spec)
-    name, raw = airfoils.resolve(base)
-    out, _meta = apply_te_treatment(airfoils.normalize(raw), gap_c, mode)
+    name, _raw = airfoils.resolve(base)
+    _, dense = airfoils.repaneled(base, 100)
+    out, _meta = apply_te_treatment(dense, gap_c, mode)
     return f"{name} (mfg)", out

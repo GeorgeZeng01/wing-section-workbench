@@ -107,12 +107,15 @@ def txt_points(coords_mm: np.ndarray) -> str:
 
 
 def csv_text(cfg: StackConfig, frame: str) -> str:
-    rows = ["element,role,airfoil,point,x_mm,y_mm"]
+    import csv as _csv
+    buf = io.StringIO()
+    w = _csv.writer(buf, lineterminator="\n")   # quotes names with commas
+    w.writerow(["element", "role", "airfoil", "point", "x_mm", "y_mm"])
     for i, e in enumerate(_frame_elements(cfg, frame)):
         for j, (x, y) in enumerate(_mm(e, cfg)):
-            rows.append(f"{i+1},{e['role']},{e['airfoil_name']},{j},"
-                        f"{x:.4f},{y:.4f}")
-    return "\n".join(rows) + "\n"
+            w.writerow([i + 1, e["role"], e["airfoil_name"], j,
+                        f"{x:.4f}", f"{y:.4f}"])
+    return buf.getvalue()
 
 
 def svg_bytes(cfg: StackConfig, frame: str = "installed") -> bytes:

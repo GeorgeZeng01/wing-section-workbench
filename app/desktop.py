@@ -153,7 +153,11 @@ def _open_app_browser(url: str) -> bool:
     exe = next((c for c in candidates if Path(c).exists()), None)
     if exe is None:
         return False
-    profile = Path(tempfile.gettempdir()) / "wing_section_studio_profile"
+    # one profile per port: with a shared profile a second instance's
+    # browser process delegates to the first and returns immediately, and
+    # this launcher would then shut down its own (still displayed) server
+    profile = (Path(tempfile.gettempdir())
+               / f"wing_section_studio_profile_{url.rsplit(':', 1)[-1]}")
     try:
         subprocess.run([str(exe), f"--app={url}",
                         "--window-size=1480,920",
@@ -211,10 +215,16 @@ def main():
     if not opened:
         import webbrowser
         webbrowser.open(url)
-        # nothing to block on; keep the server alive until the process is killed
+        # a plain browser tab gives nothing to block on. The UI heartbeats
+        # the server every minute, so exit once no request has arrived for a
+        # few minutes — the tab is gone — instead of lingering forever.
         try:
+            from app import server as server_mod
             while True:
-                time.sleep(1.0)
+                time.sleep(5.0)
+                if time.time() - server_mod.last_activity() > 300.0:
+                    _log("no UI activity for 5 minutes — shutting down")
+                    break
         except KeyboardInterrupt:
             pass
 
@@ -268,11 +278,23 @@ def _open_native_with_api(url: str, port: int) -> bool:
             else:
                 window.load_html(_ERROR_HTML)
 
-        try:
-            webview.start(func=_boot, icon=icon) if icon \
-                else webview.start(func=_boot)
-        except TypeError:
-            webview.start(func=_boot)
+        # a persistent profile: localStorage niceties (dismissed explainers)
+        # survive restarts. The working design itself is persisted
+        # server-side and does not depend on this.
+        storage = str(Path.home() / ".wing_section_studio" / "webview")
+        kwargs = {"func": _boot, "private_mode": False,
+                  "storage_path": storage}
+        if icon:
+            kwargs["icon"] = icon
+        for attempt in (kwargs,
+                        {k: v for k, v in kwargs.items()
+                         if k in ("func", "icon")},
+                        {"func": _boot}):
+            try:
+                webview.start(**attempt)
+                return True
+            except TypeError:
+                continue
         return True
     except Exception as exc:
         _log(f"native window unavailable ({exc}); falling back")

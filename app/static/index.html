@@ -6,7 +6,7 @@
 <title>Wing Section Studio</title>
 <link rel="icon" href="/static/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" href="/static/favicon.png">
-<link rel="stylesheet" href="/static/css/app.css?v=6">
+<link rel="stylesheet" href="/static/css/app.css?v=7">
 </head>
 <body>
 
@@ -46,7 +46,7 @@
         <label class="field"><span class="f-label">Span</span>
           <span class="f-wrap"><input id="cfg-span" type="number" step="10" min="100" value="1400"><i>mm</i></span></label>
         <label class="field"><span class="f-label">Stack angle</span>
-          <span class="f-wrap"><input id="cfg-aoa" type="number" step="0.5" min="-10" max="15" value="1"><i>deg</i></span></label>
+          <span class="f-wrap"><input id="cfg-aoa" type="number" step="0.5" min="-10" max="15" value="0"><i>deg</i></span></label>
         <label class="field"><span class="f-label">N<sub>crit</sub></span>
           <span class="f-wrap"><input id="cfg-ncrit" type="number" step="1" min="1" max="14" value="7"><i></i></span></label>
       </div>
@@ -67,6 +67,13 @@
             <span class="f-wrap"><input id="cfg-span-eff" type="number" step="0.05" min="0.4" max="1.5" value="0.9"><i></i></span></label>
           <label class="field"><span class="f-label">Panels / side</span>
             <span class="f-wrap"><input id="cfg-panels" type="number" step="10" min="40" max="140" value="70"><i></i></span></label>
+          <label class="field"
+                 title="Realized share of the inviscid ground-effect gain. Leave blank for the automatic ride-height curve; set 0–1 to pin it when calibrating against RANS or tunnel data.">
+            <span class="f-label">Ground gain k<sub>g</sub></span>
+            <span class="f-wrap"><input id="cfg-kg" type="number" step="0.05" min="0" max="1" placeholder="auto"><i></i></span></label>
+          <div class="field readonly" title="The k_g value the last analysis actually used.">
+            <span class="f-label">k<sub>g</sub> used</span>
+            <span class="f-wrap"><output id="kg-eff">–</output><i></i></span></div>
         </div>
         <button id="btn-model-notes" class="link-btn" type="button">How estimates are computed</button>
       </details>
@@ -362,13 +369,18 @@
     and validated against independent formulations, but inviscid ground effect
     grows without bound as ride height shrinks — real flows saturate.</p>
     <p><b>Corrected estimate.</b>
-    <code>C_est = η_visc · [C_free + k_g·(C_ground − C_free)]</code>, where
-    <code>η_visc</code> (default 0.85) is the free-air viscous realization and
-    <code>k_g = 0.85·tanh(1.4/0.85·h/c)</code> realizes only part of the
-    inviscid ground-effect gain — vanishing as the wing approaches the
-    road, where the inviscid model diverges but real flow chokes. Both knobs
-    are under Air properties &amp; calibration — recalibrate them against
-    RANS or tunnel data when available.</p>
+    <code>C_est = η_visc · [C_free + G_real]</code>, where
+    <code>η_visc</code> (default 0.85) is the free-air viscous realization
+    and <code>G_real</code> is the realized share of the inviscid
+    ground-effect gain: the gain is saturated at a cap (3× the free-air
+    load) and choked near the road by <code>tanh((h/c)/0.045)</code>, so the
+    estimate peaks around h/c ≈ 0.06–0.1 and falls toward the ground — the
+    shape measured in published ground-effect experiments. Both
+    <code>η_visc</code> and the gain-realization factor <code>k_g</code> are
+    editable under Air properties &amp; calibration; leave <code>k_g</code>
+    blank for the automatic ride-height curve, or pin it 0–1 against RANS or
+    tunnel data. The advanced constants <code>gain_cap_ratio</code> and
+    <code>choke_h_c</code> are available at the config/API level.</p>
     <p><b>Element loading.</b> Each element's free-air inviscid load (×η) is
     checked against its isolated CL<sub>max</sub> from NeuralFoil at the
     element's own Reynolds number — the classical high-lift load budget.
@@ -439,6 +451,6 @@
   </div>
 </template>
 
-<script type="module" src="/static/js/app.js?v=6"></script>
+<script type="module" src="/static/js/app.js?v=7"></script>
 </body>
 </html>

@@ -8,29 +8,44 @@ overpredict reality — mildly in free air, severely in strong ground effect,
 where the real venturi flow saturates through boundary-layer growth that the
 inviscid model cannot see. The corrected estimate is
 
-    C_est = eta_visc * [ C_f + k_g * (C_g - C_f) ]
+    C_est = eta_visc * [ C_f + G_real ]
+    G_real = cap * tanh( k_g * (C_g - C_f) / cap ) * tanh( h/c / h_choke )
+    cap    = gain_cap_ratio * |C_f|
 
-with two transparent, user-adjustable knobs:
-  eta_visc  free-air viscous realization (default 0.85)
-  k_g       ground-gain realization factor; by default ride-height dependent,
-            k_g = 0.85 * tanh(1.4/0.85 * h/c) — vanishing toward the ground
-            where the inviscid image-model gain diverges but the real flow
-            chokes, approaching full realization at large ride heights.
+Structure: k_g * (C_g - C_f) is the realized share of the inviscid gain
+(the calibrated behavior at ordinary ride heights, where the tanh terms are
+near-linear / near-1 and the model reduces to the familiar
+eta * [C_f + k_g * (C_g - C_f)]). The saturation cap bounds the realized
+gain — the inviscid gain diverges as h -> 0 while real flow cannot deliver
+more than a few times the free-air load — and the choke term models the
+force reduction measured close to the ground (Zerihan & Zhang: downforce
+peaks around h/c ~ 0.06-0.1, then falls as the boundary layers merge). With
+the defaults the estimate peaks near h/c = 0.065 on the two-element baseline
+and decreases monotonically below it, instead of growing without bound.
+
+User-adjustable knobs (all in the config, all reported in the output):
+  eta_visc        free-air viscous realization (default 0.85)
+  k_g             realization factor; None (default) uses the ride-height
+                  curve ground_gain_factor(), a number pins it
+  gain_cap_ratio  realized-gain ceiling as a multiple of |C_f| (default 3.0)
+  choke_h_c       ride height (in chords) below which the venturi chokes
+                  (default 0.045)
 
 Per-element loading is budgeted the classical way (Smith, "High-Lift
 Aerodynamics"): each element's FREE-AIR inviscid load, knocked down by
 eta_visc, is compared against its isolated CL_max (NeuralFoil, at the
-element's own Reynolds number). Ground effect is treated as a global gain
-with its own realization factor rather than being folded into element
-loading — inviscid ground loads grow without bound as h -> 0 and would make
-the per-element check meaningless. Each element's inviscid ground multiplier
-is reported alongside for transparency. Warnings start at 90% of CL_max,
-criticals at 110% (slotted elements can carry somewhat more than isolated
-CL_max).
+element's own Reynolds number). Warnings start at 90% of CL_max, criticals
+at 110% (slotted elements can carry somewhat more than isolated CL_max).
+In addition, each element's REALIZED ground-effect operating CL (the same
+number the drag lookup uses, consistent with the global estimate by
+construction) is compared against GROUND_CL_ALLOWANCE x CL_max — sections
+near the ground have been measured carrying roughly up to twice their
+free-air maximum before the flow gives up, so exceeding that is flagged as
+a screening-validity warning rather than a hard stall verdict.
 
 All inviscid inputs to the estimate are reported alongside it. Treat the
 estimate as a screening number for optimization ranking; RANS or tunnel data
-remain the truth model, and both knobs should be recalibrated against them
+remain the truth model, and the knobs should be recalibrated against them
 when available.
 """
 
@@ -43,22 +58,43 @@ from .geometry import StackConfig
 
 LOAD_WARN = 0.90
 LOAD_CRIT = 1.10
+# realized ground operating CL beyond this multiple of the isolated CL_max
+# is outside what measured sections sustain near the ground — the screening
+# model is optimistic there
+GROUND_CL_ALLOWANCE = 2.0
 
 
 def ground_gain_factor(ride_height_c: float) -> float:
-    """Fraction of the inviscid ground-effect gain that is realized.
+    """Default realization-factor curve k_g(h/c).
 
-    Must fall toward zero as h -> 0: the inviscid venturi gain grows without
-    bound there while the real flow chokes on boundary-layer growth.
-    k_g = 0.85·tanh(1.4/0.85 · h/c) keeps the calibrated small-h slope (1.4
-    per h/c — a two-element section at racing ride heights lands at wing
-    CL ~ 4-6, L/D ~ 4-8) and the 0.85 large-h ceiling, but actually vanishes
-    at the ground. The old hard floor of 0.10 kept 10 % of a diverging
-    inviscid gain, so C_est itself diverged as h -> 0 — the opposite of the
-    documented behavior. Calibrate against RANS or tunnel data when
-    available.
+    k_g = 0.85·tanh(1.4/0.85 · h/c): the calibrated small-h slope (1.4 per
+    h/c — a two-element section at racing ride heights lands at wing
+    CL ~ 4-6, L/D ~ 4-8) with a 0.85 large-h ceiling. On its own this curve
+    does NOT bound the estimate as h -> 0 (the inviscid gain it multiplies
+    diverges faster than the curve vanishes); the saturation cap and choke
+    term in realized_gain() do that. Calibrate against RANS or tunnel data
+    when available — the config's k_g field pins the factor to a constant.
     """
     return float(0.85 * np.tanh(1.4 / 0.85 * ride_height_c))
+
+
+def realized_gain(c_free: float, c_ground: float, cfg: StackConfig,
+                  ) -> tuple[float, float, float]:
+    """(G_real, k_g_used, realization_ratio r = G_real / (C_g - C_f)).
+
+    The bounded ground-gain model described in the module docstring. r is
+    the fraction of the inviscid gain actually realized; per-element
+    operating points reuse it so element numbers and the global estimate
+    stay consistent.
+    """
+    k_g = (float(cfg.k_g) if cfg.k_g is not None
+           else ground_gain_factor(cfg.ride_height_c))
+    g_inv = c_ground - c_free
+    cap = cfg.gain_cap_ratio * max(abs(c_free), 1e-9)
+    choke = np.tanh(cfg.ride_height_c / cfg.choke_h_c)
+    g_real = float(cap * np.tanh(k_g * g_inv / cap) * choke)
+    r = g_real / g_inv if abs(g_inv) > 1e-12 else 0.0
+    return g_real, float(k_g), float(r)
 
 
 def induced_drag_n(downforce_n: float, cfg: StackConfig,
@@ -92,12 +128,13 @@ def induced_drag_n(downforce_n: float, cfg: StackConfig,
 
 
 def corrected_downforce(c_free: float, c_ground: float, cfg: StackConfig,
-                        k_g: float | None = None) -> tuple[float, float]:
-    """(C_est, k_g used). Downforce-positive coefficients in, same out."""
-    if k_g is None:
-        k_g = ground_gain_factor(cfg.ride_height_c)
-    c_est = cfg.viscous_efficiency * (c_free + k_g * (c_ground - c_free))
-    return float(c_est), float(k_g)
+                        ) -> tuple[float, float, float]:
+    """(C_est, k_g used, realization ratio r).
+
+    Downforce-positive coefficients in, same out."""
+    g_real, k_g, r = realized_gain(c_free, c_ground, cfg)
+    c_est = cfg.viscous_efficiency * (c_free + g_real)
+    return float(c_est), k_g, r
 
 
 def analyze(cfg: StackConfig, include_geometry: bool = True,
@@ -115,7 +152,7 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
     # installed frame: downforce = -y
     c_free = -free.Cl
     c_ground = -ground.Cl
-    c_est, k_g = corrected_downforce(c_free, c_ground, cfg)
+    c_est, k_g, r_gain = corrected_downforce(c_free, c_ground, cfg)
 
     q = cfg.q_pa
     area = cfg.chord_m * (cfg.span_mm / 1000.0)
@@ -126,6 +163,7 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
     elements = []
     cd_stack = 0.0
     warnings = []
+    ground_hot = []   # elements past the ground-effect loading allowance
     for i, e in enumerate(design):
         c_ratio = e["chord_ratio"]
         re_e = cfg.element_re(i)
@@ -135,15 +173,17 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
         cl_check = cl_free * cfg.viscous_efficiency
         lim = viscous.cl_limit(spec_v, re_e, cfg.ncrit, model_size)
         frac = cl_check / lim["CL_max"] if lim["CL_max"] > 1e-6 else 99.0
-        # profile drag at the ground-effect operating point: the element runs
-        # harder than in free air by the realized share of its inviscid
-        # ground multiplier (capped to the pre-stall polar inside)
-        mult = cl_ground / cl_free if abs(cl_free) > 1e-6 else 1.0
-        cl_drag = cl_check * (1.0 + k_g * (mult - 1.0))
+        # realized ground-effect operating CL: the element's own inviscid
+        # gain, realized at the same ratio r as the global estimate, so
+        # sum(cl_op * chord_ratio) == C_est by construction. This is the
+        # profile-drag lookup point and the ground-loading indicator.
+        cl_op = cfg.viscous_efficiency * (cl_free + r_gain * (cl_ground - cl_free))
+        frac_ground = cl_op / lim["CL_max"] if lim["CL_max"] > 1e-6 else 99.0
         op = viscous.operating_point(spec_v, re_e,
-                                     min(cl_drag, 0.95 * lim["CL_max"]),
+                                     min(cl_op, 0.95 * lim["CL_max"]),
                                      cfg.ncrit, model_size)
         cd_stack += op["CD"] * c_ratio
+        drag_capped = bool(op["clamped_high"] or cl_op > 0.95 * lim["CL_max"])
         status = ("critical" if frac > LOAD_CRIT
                   else "warning" if frac > LOAD_WARN else "ok")
         if status == "critical":
@@ -157,6 +197,8 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
             warnings.append(f"{e['role']}: its polar had not stalled by the "
                             f"last analyzed angle, so the CL_max behind this "
                             f"loading figure is a lower bound, not a stall.")
+        if frac_ground > GROUND_CL_ALLOWANCE:
+            ground_hot.append((e["role"], frac_ground))
         elements.append({
             "role": e["role"], "airfoil": e["airfoil"],
             "airfoil_eff": spec_v,
@@ -167,19 +209,31 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
             "Re": round(re_e),
             "Cl_free_inviscid": round(cl_free, 3),
             "Cl_checked": round(cl_check, 3),
+            "Cl_operating": round(cl_op, 3),
             "ground_multiplier": round(cl_ground / cl_free, 2)
                 if abs(cl_free) > 1e-6 else None,
             "CL_max_isolated": round(lim["CL_max"], 3),
             "loading_fraction": round(frac, 3),
+            "loading_fraction_ground": round(frac_ground, 3),
             "loading_status": status,
             "CD_profile": round(op["CD"], 5),
             "alpha_equiv_deg": round(op["alpha"], 2),
+            "cd_lookup_capped": drag_capped,
             "nf_confidence": round(lim["confidence"], 3),
             "slot_gap_pct": round(design[i].get("slot_gap", np.nan) * 100, 2)
                 if i else None,
             "slot_overlap_pct": round(design[i].get("slot_overlap", np.nan) * 100, 2)
                 if i else None,
         })
+    if ground_hot:
+        names = ", ".join(f"{role} ({fg:.1f}x)" for role, fg in ground_hot)
+        warnings.append(
+            f"realized ground-effect loading is past "
+            f"{GROUND_CL_ALLOWANCE:.0f}x the isolated stall limit on: {names}. "
+            f"Measured sections rarely sustain more — treat the downforce "
+            f"estimate as optimistic and the profile drag (capped at the "
+            f"pre-stall polar) as understated; verify with RANS or tunnel "
+            f"data.")
 
     drag_profile_n = q * area * cd_stack
     drag_induced, induced_detail = induced_drag_n(downforce_n, cfg, installed)
@@ -207,6 +261,9 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
                 if abs(c_free) > 1e-9 else None,
             "C_downforce_estimated": round(c_est, 4),
             "k_ground_realization": round(k_g, 3),
+            "k_ground_source": "fixed" if cfg.k_g is not None else "auto",
+            "gain_realization_ratio": round(r_gain, 4),
+            "ground_gain_realized": round(r_gain * (c_ground - c_free), 4),
             "viscous_efficiency": cfg.viscous_efficiency,
             "CD_profile_stack": round(cd_stack, 5),
             "Cm_le_inviscid": round(ground.Cm_le, 4),
@@ -258,13 +315,14 @@ def quick_objective_eval(cfg: StackConfig, model_size: str = "large") -> dict:
         return {"feasible": False, "reason": f"solver: {e}"}
 
     c_free, c_ground = -free.Cl, -ground.Cl
-    c_est, k_g = corrected_downforce(c_free, c_ground, cfg)
+    c_est, k_g, r_gain = corrected_downforce(c_free, c_ground, cfg)
 
     q = cfg.q_pa
     area = cfg.chord_m * (cfg.span_mm / 1000.0)
     downforce_n = q * area * c_est * cfg.efficiency_3d
     cd_stack = 0.0
     load_excess = 0.0
+    load_excess_ground = 0.0
     for i, e in enumerate(design):
         cl_free_e = -free.elements[i]["Cy"] / e["chord_ratio"]
         cl_ground_e = -ground.elements[i]["Cy"] / e["chord_ratio"]
@@ -274,10 +332,12 @@ def quick_objective_eval(cfg: StackConfig, model_size: str = "large") -> dict:
         lim = viscous.cl_limit(spec_v, re_e, cfg.ncrit, model_size)
         frac = cl_check / lim["CL_max"] if lim["CL_max"] > 1e-6 else 99.0
         load_excess += max(0.0, frac - 1.05) ** 2
-        mult = cl_ground_e / cl_free_e if abs(cl_free_e) > 1e-6 else 1.0
-        cl_drag = cl_check * (1.0 + k_g * (mult - 1.0))
+        cl_op = cfg.viscous_efficiency * (
+            cl_free_e + r_gain * (cl_ground_e - cl_free_e))
+        frac_g = cl_op / lim["CL_max"] if lim["CL_max"] > 1e-6 else 99.0
+        load_excess_ground += max(0.0, frac_g / GROUND_CL_ALLOWANCE - 1.0) ** 2
         op = viscous.operating_point(spec_v, re_e,
-                                     min(cl_drag, 0.95 * lim["CL_max"]),
+                                     min(cl_op, 0.95 * lim["CL_max"]),
                                      cfg.ncrit, model_size)
         cd_stack += op["CD"] * e["chord_ratio"]
 
@@ -291,6 +351,7 @@ def quick_objective_eval(cfg: StackConfig, model_size: str = "large") -> dict:
         "c_est": c_est,
         "c_ground": c_ground,
         "load_excess": load_excess,
+        "load_excess_ground": load_excess_ground,
         "gaps": gaps,
         "overlaps": overlaps,
     }

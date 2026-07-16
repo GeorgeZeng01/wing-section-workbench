@@ -40,6 +40,8 @@ export const api = {
   optimizeCancel: (id) => request("POST", `/api/optimize/${id}/cancel`),
   screen: (body) => request("POST", "/api/screen", body),
   presets: () => request("GET", "/api/presets"),
+  session: () => request("GET", "/api/session"),
+  sessionSave: (state) => request("POST", "/api/session", { state }),
   exportSave: (fmt, config, options = {}) =>
     request("POST", `/api/export/${fmt}/save`, { config, ...options }),
   exportReveal: (path) => request("POST", "/api/export/reveal", { path }),
@@ -53,7 +55,10 @@ export async function downloadExport(fmt, config, options = {}) {
   });
   if (!res.ok) {
     let detail = res.statusText;
-    try { detail = (await res.json()).detail; } catch { /* ignore */ }
+    try {
+      const j = await res.json();
+      detail = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+    } catch { /* keep statusText */ }
     throw new ApiError(detail, res.status);
   }
   const blob = await res.blob();

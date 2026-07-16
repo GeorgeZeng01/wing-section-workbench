@@ -1,8 +1,13 @@
 """Adversarial API regression: hostile payloads must 422 (never 500/hang),
 sane payloads must keep working, and the stack-angle sign convention must
-hold. Requires a running server (or use run_all.py, which boots one):
-    .venv\\Scripts\\python.exe -m uvicorn app.server:app --port 8642
-Point at a different server with the WSS_TEST_BASE environment variable.
+hold.
+
+Run through run_all.py, which boots a throwaway scratch server. The suite
+MUTATES server state (it uploads airfoils and warms caches), so do not point
+it at a live working session; if you must run it standalone, start a
+dedicated server and set WSS_TEST_BASE to it:
+    .venv\\Scripts\\python.exe -m uvicorn app.server:app --port 8652
+    set WSS_TEST_BASE=http://127.0.0.1:8652
 """
 import json
 import os
@@ -178,8 +183,12 @@ af_cfg = {
     "span_mm": 1400, "speed_ms": 15, "ncrit": 7,
     "viscous_efficiency": 0.85, "efficiency_3d": 0.9, "span_efficiency": 0.9,
 }
+# 300 N sits inside the model's validity envelope (realized ground loading
+# under the 2x allowance); the optimizer now honestly refuses targets that
+# need the penalized past-stall regime, so an unreachable-honestly target
+# would report a miss rather than a fake hit
 s_start, job = call("POST", "/api/optimize", {"config": af_cfg, "options": {
-    "target_downforce_n": 400, "mode": "global", "budget": 900,
+    "target_downforce_n": 300, "mode": "global", "budget": 900,
     "opt_stack_aoa": True, "opt_deflections": True, "opt_positions": True,
     "opt_airfoils": True}})
 jid = job["job_id"]
@@ -189,16 +198,18 @@ while True:
     _, s = call("GET", f"/api/optimize/{jid}")
     if s["state"] in ("done", "failed", "cancelled") or time.time() - t0 > 240:
         break
+# a failed/hung job must report FAIL with its error, not crash the harness
+best = s.get("best") or {}
 af_ok = (s["state"] == "done"
-         and abs(s["best"]["downforce_n"] - 400) < 8
-         and s["best"].get("penalty", 1) < 0.5
-         and isinstance(s["best"].get("airfoils"), list)
-         and all(isinstance(a, str) and a for a in s["best"]["airfoils"])
+         and abs(best.get("downforce_n", 1e9) - 300) < 6
+         and best.get("penalty", 1) < 0.5
+         and isinstance(best.get("airfoils"), list)
+         and all(isinstance(a, str) and a for a in best["airfoils"])
          and [e["airfoil"] for e in s["best_config"]["elements"]]
-             == s["best"]["airfoils"])
+             == best["airfoils"])
 check("optimizer airfoil selection", af_ok,
-      f"({s['state']} {s['best']['downforce_n']} N in {s['elapsed_s']}s, "
-      f"picked {s['best'].get('airfoils')})")
+      f"({s['state']} {best.get('downforce_n')} N in {s['elapsed_s']}s, "
+      f"picked {best.get('airfoils')}, error={s.get('error')})")
 
 # the finished job must expose a candidate set alongside the best design
 cands = s.get("candidates") or []
@@ -226,6 +237,108 @@ check("reveal outside exports folder -> 403", s_rv == 403, f"(got {s_rv})")
 s_rv, _ = call("POST", "/api/export/reveal",
                {"path": (sv["dir"] + "/does-not-exist.dxf") if sv else "x"})
 check("reveal missing file -> 404", s_rv == 404, f"(got {s_rv})")
+
+# ---- error-path consistency: unresolvable specs are client errors ----
+
+bad_cfg = {**GOOD, "elements": [{"airfoil": "no-such-foil-xyz",
+                                 "chord_ratio": 1.0}]}
+s_an, r_an = call("POST", "/api/analyze", {"config": bad_cfg})
+detail = (r_an or {}).get("detail", "")
+check("unknown airfoil analyze -> 422 (not 500)", s_an == 422, f"(got {s_an})")
+check("error detail is clean text (no KeyError quotes)",
+      isinstance(detail, str) and not detail.startswith(("'", '"')),
+      f"({detail[:60]!r})")
+s_ex, _ = call("POST", "/api/export/csv", {"config": bad_cfg})
+check("unknown airfoil export -> 422 (not 500)", s_ex == 422, f"(got {s_ex})")
+s_op, _ = call("POST", "/api/optimize", {"config": bad_cfg, "options": {}})
+check("unknown airfoil optimize -> 422 up front", s_op == 422, f"(got {s_op})")
+
+# malformed optimizer options are client errors, not background-job failures
+for label, opts in (("budget string", {"budget": "lots"}),
+                    ("bogus mode", {"mode": "psychic"}),
+                    ("malformed bounds", {"bounds": {"stack_aoa_deg": "x"}}),
+                    ("unknown bounds key", {"bounds": {"warp_factor": [0, 9]}})):
+    s_o, _ = call("POST", "/api/optimize", {"config": GOOD, "options": opts})
+    check(f"optimizer options: {label} -> 422", s_o == 422, f"(got {s_o})")
+
+# single-element optimization is legal (stack angle alone is a variable)
+s_1e, job1 = call("POST", "/api/optimize", {
+    "config": {**GOOD, "elements": [GOOD["elements"][0]]},
+    "options": {"target_downforce_n": 120, "mode": "local", "budget": 120,
+                "opt_stack_aoa": True, "opt_deflections": False,
+                "opt_positions": False}})
+check("single-element optimize accepted", s_1e == 200, f"(got {s_1e})")
+if s_1e == 200:
+    t0 = time.time()
+    while time.time() - t0 < 120:
+        time.sleep(1.0)
+        _, s1 = call("GET", f"/api/optimize/{job1['job_id']}")
+        if s1["state"] in ("done", "failed", "cancelled"):
+            break
+    check("single-element optimize completes",
+          bool(s1["state"] == "done" and s1.get("result")),
+          f"({s1['state']}, {(s1.get('best') or {}).get('downforce_n')} N)")
+
+# a custom spec the server has never seen (a project whose upload was lost)
+# must be rejected at job creation, not finish 'done' with nothing to show
+s_gone, _ = call("POST", "/api/optimize", {"config": {
+    **GOOD, "elements": [{"airfoil": "custom:never-registered",
+                          "chord_ratio": 1.0}]}, "options": {}})
+check("lost custom airfoil optimize -> 422 up front", s_gone == 422,
+      f"(got {s_gone})")
+
+# session persistence round-trip
+marker = uuid.uuid4().hex
+s_sp, _ = call("POST", "/api/session", {"state": {"marker": marker,
+                                                  "config": GOOD}})
+s_sg, r_sg = call("GET", "/api/session")
+check("session save/load round-trip",
+      s_sp == 200 and s_sg == 200
+      and (r_sg.get("state") or {}).get("marker") == marker)
+
+# CSV export must quote airfoil names containing commas
+comma_name = "acme, mk2"
+cc = airfoils.repaneled("naca0009", 40)[1].copy()
+cc[len(cc) // 3, 1] *= 1.002
+s_cu, cu = call("POST", "/api/airfoils/upload", {
+    "name": comma_name, "dat_text": comma_name + "\n" + "\n".join(
+        f" {x:.6f} {y:.6f}" for x, y in cc)})
+if s_cu == 200:
+    csv_cfg = {**GOOD, "elements": [{"airfoil": cu["spec"],
+                                     "chord_ratio": 1.0}]}
+    import csv as _csv
+    import io as _io
+    req = urllib.request.Request(
+        BASE + "/api/export/csv",
+        data=json.dumps({"config": csv_cfg}).encode(),
+        headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(req, timeout=60) as r:
+        text = r.read().decode()
+    rows = list(_csv.reader(_io.StringIO(text)))
+    body_ok = (rows[0][:3] == ["element", "role", "airfoil"]
+               and all(len(row) == 6 for row in rows[1:] if row)
+               and rows[1][2].startswith(comma_name))
+    check("CSV quotes comma-containing airfoil names", body_ok,
+          f"(name cell: {rows[1][2]!r})")
+else:
+    check("CSV quotes comma-containing airfoil names (upload failed)", False,
+          f"(upload got {s_cu})")
+
+# polar reports the Reynolds clamp instead of silently substituting
+s_p, r_p = call("POST", "/api/polar", {"spec": "naca0012", "re": 5000,
+                                       "alpha_start": -2, "alpha_stop": 6,
+                                       "alpha_step": 1})
+check("low-Re polar reports clamp",
+      s_p == 200 and r_p.get("re_clamped") is True
+      and r_p.get("re_used") == 10000.0,
+      f"(re_used={r_p.get('re_used') if r_p else s_p})")
+
+# XFOIL engine without xfoil.exe must be a clean failed-dependency error
+if not (Path(__file__).resolve().parents[2] / "xfoil" / "xfoil.exe").exists():
+    s_x, r_x = call("POST", "/api/polar", {"spec": "naca0012", "re": 3e5,
+                                           "engine": "xfoil"})
+    check("xfoil engine absent -> 424 with guidance", s_x == 424,
+          f"(got {s_x})")
 
 print(f"\n{sum(results)}/{len(results)} adversarial checks passed")
 sys.exit(0 if all(results) else 1)

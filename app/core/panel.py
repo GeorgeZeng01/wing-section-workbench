@@ -205,9 +205,15 @@ def solve(element_coords: list[np.ndarray], alpha_deg: float = 0.0,
     """Solve the multi-element inviscid problem.
 
     element_coords: list of (N,2) contours (any winding; re-oriented CCW).
-    alpha_deg: freestream angle. Use 0 with ground=True (installed frame).
+    alpha_deg: freestream angle. Must be 0 with ground=True — the image
+    system mirrors geometry about y = 0, which is only a ground plane when
+    the freestream is parallel to it; rotate the geometry instead.
     ref_chord: reference chord for all coefficients (stack units: main = 1).
     """
+    if ground and abs(alpha_deg) > 1e-9:
+        raise ValueError("ground=True requires alpha_deg=0 (the image plane "
+                         "is only a ground plane for a parallel freestream) "
+                         "— rotate the geometry instead")
     geo, eval_pts, infl = _base_matrices(element_coords)
     if ground:
         infl = _image_matrices(geo, eval_pts, infl)

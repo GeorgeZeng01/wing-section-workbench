@@ -13,9 +13,10 @@ It runs entirely on your machine.
 The window is a self-contained application: it opens immediately on a loading
 screen while a local server starts on a private port inside the same process,
 and shuts down when you close the window. Your configuration is saved
-automatically and restored the next time you open the app. Exports are saved
-to the project's `exports/` folder — a dialog shows the exact location with a
-**Show in folder** button.
+automatically — server-side, in `app_data/session.json`, so it survives
+restarts regardless of which window or port served the UI — and restored the
+next time you open the app. Exports are saved to the project's `exports/`
+folder — a dialog shows the exact location with a **Show in folder** button.
 
 <details>
 <summary>Other ways to launch</summary>
@@ -113,8 +114,10 @@ application window, then to the default browser.
   surrogate confidence) and assigns the pick to an element.
 - **Export** — true-scale millimeter DXF (spline or polyline entities, one
   layer per element; opens directly as a sketch in SolidWorks, Fusion,
-  Onshape, NX), per-element XYZ point files, Selig `.dat` contours, CSV, a
-  1:1 SVG drawing, and a JSON manifest — individually or as one ZIP bundle.
+  Onshape, NX), CSV, and a 1:1 SVG drawing individually, or a ZIP bundle
+  that additionally carries per-element XYZ point files, Selig `.dat`
+  contours (installed positions and unit-chord profiles), and a JSON
+  manifest.
   Both the installed frame (ground at y = 0) and the upright design frame.
   Every export is written to the project's `exports/` folder with a
   timestamped name, and a dialog shows exactly where it went with a
@@ -128,38 +131,56 @@ application window, then to the default browser.
 
 The panel solution is exact for inviscid flow; its ground-effect gain grows
 without bound as ride height shrinks, where real flows saturate. The reported
-estimate is
+estimate bounds and chokes the realized share of that gain:
 
 ```
-C_est = eta_visc * [ C_free + k_g * (C_ground - C_free) ]
+C_est  = eta_visc * [ C_free + G_real ]
+G_real = cap * tanh( k_g * (C_ground - C_free) / cap ) * tanh( (h/c) / h_choke )
+cap    = gain_cap_ratio * |C_free|
 ```
 
-with `eta_visc` (default 0.85) the free-air viscous realization and
-`k_g = 0.85 · tanh(1.4/0.85 · h/c)` the fraction of the inviscid
-ground-effect gain that is realized — vanishing toward the ground, where the
-inviscid model diverges but real flow chokes. Element loading is budgeted the
-classical way: each element's free-air inviscid load (× `eta_visc`) against
-its isolated CL_max at the element's own Reynolds number, with warnings from
-90 % and criticals from 110 %.
+At ordinary ride heights the tanh terms are near-linear/near-1 and this
+reduces to the familiar `eta_visc * [C_free + k_g * (C_ground - C_free)]`;
+close to the ground the cap keeps the realized gain to a few times the
+free-air load and the choke term takes it back down, so the estimate peaks
+around h/c ≈ 0.06–0.1 and falls below that — the shape measured in published
+ground-effect experiments (Zerihan & Zhang) — instead of diverging.
+
+Model knobs, all editable in **Air properties & calibration** (or the
+config/API): `eta_visc` (default 0.85), `k_g` (blank = the automatic
+ride-height curve `0.85·tanh(1.4/0.85·h/c)`, a number pins it),
+`gain_cap_ratio` (default 3.0) and `choke_h_c` (default 0.045, API-level).
+
+Element loading is budgeted two ways: classically — each element's free-air
+inviscid load (× `eta_visc`) against its isolated CL_max at the element's
+own Reynolds number, warnings from 90 %, criticals from 110 % — and at the
+realized ground-effect operating point (the same per-element CL the drag
+lookup uses; these compose exactly to `C_est`). A realized operating point
+past 2× the isolated stall limit flags the estimate as optimistic.
 
 Drag has two parts: per-element profile drag from each section's polar at
-its ground-effect operating point, plus induced drag from the reported
-downforce, `CDi = CL²/(π·AR·e)·φ`, where `e` is the span-efficiency input
-and `φ = (16h/b)²/(1+(16h/b)²)` is the classical ground-effect reduction —
+its realized ground-effect operating CL — clamped to the pre-stall branch of
+the polar, and each element reports when that clamp engaged
+(`cd_lookup_capped`) — plus induced drag from the reported downforce,
+`CDi = CL²/(π·AR·e)·φ`, where `e` is the span-efficiency input and
+`φ = (16h/b)²/(1+(16h/b)²)` is the classical ground-effect reduction —
 induced drag dominates the total for a loaded front wing, and wings gain
 efficiency as they approach the road. Interference and support drag are not
 modeled.
 
-All raw inviscid values are reported next to every estimate, and both model
-knobs are editable under **Model settings**. Treat the estimate as a
-screening and ranking number: confirm shortlisted designs with RANS (the
-repository's OpenFOAM pipeline) or tunnel data, and recalibrate the knobs
-against those results.
+All raw inviscid values are reported next to every estimate. Treat the
+estimate as a screening and ranking number: confirm shortlisted designs with
+RANS (the repository's OpenFOAM pipeline) or tunnel data, and recalibrate
+the knobs against those results.
 
-Validation: the panel method agrees with an independent linear-vorticity
+Validation: the panel method agrees with the exact Kármán–Trefftz
+closed-form solution within ~0.5 %, with an independent linear-vorticity
 formulation (AeroSandbox, force taken by pressure integration) within ~3 %
 in free air and in ground effect, and with XFOIL's inviscid solution on
-single elements. `app/tests/test_panel_validation.py` reruns the comparison.
+single elements when `xfoil.exe` is installed.
+`app/tests/test_panel_validation.py` reruns all of it, and
+`app/tests/test_model_and_data.py` pins the estimate's required shape
+(bounded, force-reduction peak) and the induced-drag formula.
 
 ## Layout
 

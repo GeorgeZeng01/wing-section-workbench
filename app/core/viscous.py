@@ -17,7 +17,11 @@ from . import airfoils
 
 _nf_lock = threading.Lock()  # CasADi/Kulfan fitting is not proven thread-safe
 
-DEFAULT_ALPHAS = (-6.0, 24.0, 0.5)
+# The grid reaches down to -8 deg so lightly-loaded elements interpolate a
+# real operating point instead of clamping to the bottom edge; 24 deg is
+# comfortably past stall for every high-lift section in the library.
+DEFAULT_ALPHAS = (-8.0, 24.0, 0.5)
+RE_FLOOR = 1e4   # NeuralFoil's trained envelope; lower Re is clamped up
 
 
 def _alpha_grid(alphas=DEFAULT_ALPHAS) -> np.ndarray:
@@ -31,7 +35,7 @@ def _alpha_grid(alphas=DEFAULT_ALPHAS) -> np.ndarray:
 
 @lru_cache(maxsize=4096)   # shape sweeps generate many distinct specs
 def _polar_cached(spec: str, re_key: float, ncrit: float, model_size: str,
-                  alphas_key: tuple) -> dict:
+                  alphas_key: tuple, _token: int) -> dict:
     import aerosandbox as asb
     import neuralfoil as nf
     _, coords = airfoils.repaneled(spec, 80)
@@ -53,10 +57,13 @@ def _polar_cached(spec: str, re_key: float, ncrit: float, model_size: str,
 
 def polar(spec: str, re: float, ncrit: float = 9.0, model_size: str = "xlarge",
           alphas=DEFAULT_ALPHAS) -> dict:
-    """NeuralFoil polar. Re is bucketed to 3 significant figures for caching."""
-    re_key = float(f"{max(re, 1e4):.3g}")
-    return _polar_cached(str(spec), re_key, round(float(ncrit), 2),
-                         model_size, tuple(alphas))
+    """NeuralFoil polar. Re is bucketed to 3 significant figures for caching
+    and floored at RE_FLOOR (the surrogate's trained envelope); "re_used"
+    reports the Reynolds number actually evaluated."""
+    re_key = float(f"{max(re, RE_FLOOR):.3g}")
+    p = _polar_cached(str(spec), re_key, round(float(ncrit), 2),
+                      model_size, tuple(alphas), airfoils.spec_cache_token(spec))
+    return {**p, "re_used": re_key, "re_clamped": bool(re < RE_FLOOR)}
 
 
 def polar_metrics(p: dict) -> dict:
@@ -110,6 +117,10 @@ def operating_point(spec: str, re: float, cl_target: float, ncrit: float = 9.0,
         "alpha": float(np.interp(cl_used, cl_b, al_b)),
         "CL_used": cl_used,
         "clamped": bool(abs(cl_used - cl_target) > 1e-6),
+        # which side: high = target beyond the pre-stall branch (drag will be
+        # understated), low = target below the grid's bottom edge
+        "clamped_high": bool(cl_target - cl_b[-1] > 1e-6),
+        "clamped_low": bool(cl_b[0] - cl_target > 1e-6),
         "CL_max": float(cl[i_max]),
     }
 

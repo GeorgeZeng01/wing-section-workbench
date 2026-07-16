@@ -23,6 +23,24 @@ app = FastAPI(title="Wing Section Studio", docs_url="/api/docs",
 
 _LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]")
 
+import time as _time_mod
+
+_last_activity = _time_mod.time()
+
+
+def last_activity() -> float:
+    """Wall-clock time of the most recent request — the desktop launcher's
+    plain-browser fallback uses it to shut the server down once the tab is
+    gone (the UI heartbeats once a minute)."""
+    return _last_activity
+
+
+@app.middleware("http")
+async def _track_activity(request, call_next):
+    global _last_activity
+    _last_activity = _time_mod.time()
+    return await call_next(request)
+
 
 @app.middleware("http")
 async def _local_host_only(request, call_next):
@@ -99,11 +117,16 @@ class ExportBody(BaseModel):
     include_analysis: bool = True
 
 
+def _err_detail(e: BaseException) -> str:
+    # KeyError stringifies with quotes around its message — strip them
+    return str(e.args[0]) if (isinstance(e, KeyError) and e.args) else str(e)
+
+
 def _cfg(config: dict) -> StackConfig:
     try:
         return StackConfig.from_dict(config)
     except (ValueError, KeyError, TypeError) as e:
-        raise HTTPException(422, detail=str(e))
+        raise HTTPException(422, detail=_err_detail(e))
 
 
 # ---------- airfoils ----------
@@ -161,8 +184,14 @@ def polar(body: PolarBody):
             return out
         p = viscous.polar(body.spec, body.re, body.ncrit, body.model_size,
                           alphas)
+    except FileNotFoundError:
+        raise HTTPException(424, detail="xfoil.exe not found — download it "
+                                        "from the official XFOIL page and "
+                                        "place it in the xfoil/ folder (see "
+                                        "README), or use the NeuralFoil "
+                                        "engine")
     except (KeyError, ValueError) as e:
-        raise HTTPException(422, detail=str(e))
+        raise HTTPException(422, detail=_err_detail(e))
     except Exception as e:
         raise HTTPException(500, detail=f"polar failed: {e}")
     return {"engine": "neuralfoil",
@@ -178,7 +207,7 @@ def geometry_only(body: ConfigBody):
     try:
         return geometry.geometry_report(cfg)
     except (ValueError, KeyError) as e:
-        raise HTTPException(422, detail=str(e))
+        raise HTTPException(422, detail=_err_detail(e))
 
 
 @app.post("/api/analyze")
@@ -186,8 +215,10 @@ def analyze(body: ConfigBody):
     cfg = _cfg(body.config)
     try:
         return analysis.analyze(cfg)
-    except ValueError as e:
-        raise HTTPException(422, detail=str(e))
+    except (ValueError, KeyError) as e:
+        # KeyError: an element airfoil spec that no longer resolves (e.g. a
+        # custom upload lost to a restart) — a client-fixable condition
+        raise HTTPException(422, detail=_err_detail(e))
     except np.linalg.LinAlgError:
         raise HTTPException(422, detail="panel system is singular — geometry "
                                         "may be self-intersecting or touching "
@@ -269,8 +300,8 @@ def _export_bytes(fmt: str, body: ExportBody) -> tuple[bytes, str, str]:
                 except Exception:
                     result = None
             data = export.zip_bundle(cfg, result, body.entity)
-    except (ValueError, np.linalg.LinAlgError) as e:
-        raise HTTPException(422, detail=str(e))
+    except (ValueError, KeyError, np.linalg.LinAlgError) as e:
+        raise HTTPException(422, detail=_err_detail(e))
     return data, media, ext
 
 
@@ -338,14 +369,15 @@ PRESETS = [
     {
         "name": "Two-element baseline",
         "description": "S1223 main with a 35% S1223 flap — a proven starting "
-                       "point for a 350 mm front-wing section.",
+                       "point for a 350 mm front-wing section, trimmed to "
+                       "pass its own loading budget.",
         "config": {
             "elements": [
                 {"airfoil": "s1223", "chord_ratio": 1.0, "deflection_deg": 0},
-                {"airfoil": "s1223", "chord_ratio": 0.35, "deflection_deg": 24,
+                {"airfoil": "s1223", "chord_ratio": 0.35, "deflection_deg": 12,
                  "slot_gap_pct": 1.5, "slot_overlap_pct": 3.0},
             ],
-            "stack_aoa_deg": 1.0, "ride_height_mm": 30, "chord_mm": 350,
+            "stack_aoa_deg": 0.0, "ride_height_mm": 30, "chord_mm": 350,
             "span_mm": 1400, "speed_ms": 15, "ncrit": 7,
             "viscous_efficiency": 0.85, "efficiency_3d": 0.9,
         },
@@ -353,21 +385,22 @@ PRESETS = [
     },
     {
         "name": "Three-element aggressive",
-        "description": "S1223 main with two slotted flaps for maximum "
-                       "sectional load at low speed.",
+        "description": "S1223 main with two slotted flaps — the most "
+                       "sectional load the loading budget will sign off on; "
+                       "let the optimizer push it to a target.",
         "config": {
             "elements": [
                 {"airfoil": "s1223", "chord_ratio": 1.0, "deflection_deg": 0},
-                {"airfoil": "s1223", "chord_ratio": 0.30, "deflection_deg": 22,
-                 "slot_gap_pct": 1.5, "slot_overlap_pct": 3.0},
-                {"airfoil": "s1223", "chord_ratio": 0.22, "deflection_deg": 45,
-                 "slot_gap_pct": 1.5, "slot_overlap_pct": 2.0},
+                {"airfoil": "s1223", "chord_ratio": 0.28, "deflection_deg": 8,
+                 "slot_gap_pct": 1.5, "slot_overlap_pct": 1.5},
+                {"airfoil": "s1223", "chord_ratio": 0.20, "deflection_deg": 20,
+                 "slot_gap_pct": 1.5, "slot_overlap_pct": 1.5},
             ],
-            "stack_aoa_deg": 2.0, "ride_height_mm": 30, "chord_mm": 350,
+            "stack_aoa_deg": -2.0, "ride_height_mm": 30, "chord_mm": 350,
             "span_mm": 1400, "speed_ms": 15, "ncrit": 7,
             "viscous_efficiency": 0.85, "efficiency_3d": 0.9,
         },
-        "target_downforce_n": 350,
+        "target_downforce_n": 300,
     },
     {
         "name": "Low-drag two-element",
@@ -376,7 +409,7 @@ PRESETS = [
         "config": {
             "elements": [
                 {"airfoil": "e423", "chord_ratio": 1.0, "deflection_deg": 0},
-                {"airfoil": "e423", "chord_ratio": 0.33, "deflection_deg": 18,
+                {"airfoil": "e423", "chord_ratio": 0.33, "deflection_deg": 10,
                  "slot_gap_pct": 2.0, "slot_overlap_pct": 3.5},
             ],
             "stack_aoa_deg": 0.0, "ride_height_mm": 35, "chord_mm": 350,
@@ -391,6 +424,52 @@ PRESETS = [
 @app.get("/api/presets")
 def presets():
     return {"presets": PRESETS}
+
+
+# ---------- session persistence ----------
+#
+# The working state must survive an app restart. localStorage cannot carry
+# that in the desktop shell: it is keyed on the origin, and the desktop
+# window runs the server on a fresh random port each launch (and WebView2's
+# default profile is in-private besides). The state therefore lives with the
+# server, in a JSON file next to the project.
+
+# WSS_DATA_DIR override: test servers must not touch the real working state
+import os as _os_mod
+
+SESSION_FILE = Path(_os_mod.environ.get(
+    "WSS_DATA_DIR", Path(__file__).resolve().parents[1] / "app_data")
+) / "session.json"
+SESSION_MAX_BYTES = 4_000_000
+
+
+class SessionBody(BaseModel):
+    state: dict
+
+
+@app.get("/api/session")
+def session_get():
+    if not SESSION_FILE.exists():
+        return {"state": None}
+    try:
+        import json as _json
+        return {"state": _json.loads(SESSION_FILE.read_text(encoding="utf-8"))}
+    except Exception:
+        return {"state": None}
+
+
+@app.post("/api/session")
+def session_put(body: SessionBody):
+    import json as _json
+    import os as _os
+    data = _json.dumps(body.state)
+    if len(data) > SESSION_MAX_BYTES:
+        raise HTTPException(422, detail="session state too large to persist")
+    SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = SESSION_FILE.with_suffix(".json.tmp")
+    tmp.write_text(data, encoding="utf-8")
+    _os.replace(tmp, SESSION_FILE)
+    return {"ok": True, "bytes": len(data)}
 
 
 @app.get("/api/health")
