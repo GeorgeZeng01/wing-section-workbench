@@ -1,0 +1,444 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wing Section Studio</title>
+<link rel="icon" href="/static/favicon.ico" sizes="any">
+<link rel="icon" type="image/png" href="/static/favicon.png">
+<link rel="stylesheet" href="/static/css/app.css?v=6">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <svg viewBox="0 0 32 32" width="22" height="22" aria-hidden="true">
+      <path d="M3 20 Q10 8 29 14 Q18 22 3 20 Z" fill="#3987e5"/>
+      <line x1="2" y1="27" x2="30" y2="27" stroke="#8fa0c0" stroke-width="1.6"/>
+    </svg>
+    <span class="brand-name">Wing Section Studio</span>
+    <span class="brand-sub">multi-element design &amp; optimization</span>
+  </div>
+  <div class="topbar-actions">
+    <select id="preset-select" class="select" aria-label="Load preset">
+      <option value="">Load preset…</option>
+    </select>
+    <button id="btn-open" class="btn ghost" title="Open a saved project file">Open</button>
+    <button id="btn-save" class="btn ghost" title="Save the project to a file">Save</button>
+    <input id="file-project" type="file" accept=".json" hidden>
+    <span id="server-dot" class="server-dot" title="Server status"></span>
+  </div>
+</header>
+
+<main class="layout">
+
+  <!-- ============ configuration ============ -->
+  <aside class="panel config" aria-label="Configuration">
+    <section class="group">
+      <h2 class="group-title">Operating point</h2>
+      <div class="fields two-col">
+        <label class="field"><span class="f-label">Speed</span>
+          <span class="f-wrap"><input id="cfg-speed" type="number" step="0.5" min="1" value="15"><i>m/s</i></span></label>
+        <label class="field"><span class="f-label">Ride height</span>
+          <span class="f-wrap"><input id="cfg-ride" type="number" step="1" min="2" value="30"><i>mm</i></span></label>
+        <label class="field"><span class="f-label">Main chord</span>
+          <span class="f-wrap"><input id="cfg-chord" type="number" step="5" min="50" value="350"><i>mm</i></span></label>
+        <label class="field"><span class="f-label">Span</span>
+          <span class="f-wrap"><input id="cfg-span" type="number" step="10" min="100" value="1400"><i>mm</i></span></label>
+        <label class="field"><span class="f-label">Stack angle</span>
+          <span class="f-wrap"><input id="cfg-aoa" type="number" step="0.5" min="-10" max="15" value="1"><i>deg</i></span></label>
+        <label class="field"><span class="f-label">N<sub>crit</sub></span>
+          <span class="f-wrap"><input id="cfg-ncrit" type="number" step="1" min="1" max="14" value="7"><i></i></span></label>
+      </div>
+      <details class="adv">
+        <summary>Air properties &amp; calibration</summary>
+        <div class="fields two-col">
+          <label class="field"><span class="f-label">Air density</span>
+            <span class="f-wrap"><input id="cfg-rho" type="number" step="0.005" value="1.225"><i>kg/m³</i></span></label>
+          <label class="field"><span class="f-label">Kin. viscosity</span>
+            <span class="f-wrap"><input id="cfg-nu" type="number" step="1e-6" value="0.000015"><i>m²/s</i></span></label>
+          <label class="field"><span class="f-label">Viscous eff.</span>
+            <span class="f-wrap"><input id="cfg-visc-eff" type="number" step="0.01" min="0.3" max="1" value="0.85"><i></i></span></label>
+          <label class="field" title="Knockdown from 2D section to full wing lift (tip and support losses).">
+            <span class="f-label">3D efficiency</span>
+            <span class="f-wrap"><input id="cfg-3d-eff" type="number" step="0.01" min="0.3" max="1" value="0.9"><i></i></span></label>
+          <label class="field" title="Span efficiency e for induced drag. With good endplates ~0.9–1.1; without ~0.7–0.9.">
+            <span class="f-label">Span efficiency</span>
+            <span class="f-wrap"><input id="cfg-span-eff" type="number" step="0.05" min="0.4" max="1.5" value="0.9"><i></i></span></label>
+          <label class="field"><span class="f-label">Panels / side</span>
+            <span class="f-wrap"><input id="cfg-panels" type="number" step="10" min="40" max="140" value="70"><i></i></span></label>
+        </div>
+        <button id="btn-model-notes" class="link-btn" type="button">How estimates are computed</button>
+      </details>
+    </section>
+
+    <section class="group">
+      <h2 class="group-title">Target</h2>
+      <div class="fields two-col">
+        <label class="field"><span class="f-label">Downforce</span>
+          <span class="f-wrap"><input id="cfg-target" type="number" step="10" min="0" value="250"><i>N</i></span></label>
+        <div class="field readonly"><span class="f-label">Required C<sub>ΔF</sub></span>
+          <span class="f-wrap"><output id="target-c">–</output><i></i></span></div>
+      </div>
+    </section>
+
+    <section class="group">
+      <div class="group-head">
+        <h2 class="group-title">Elements</h2>
+        <div class="count-ctl" role="group" aria-label="Element count">
+          <button id="el-remove" class="btn tiny ghost" title="Remove last flap">−</button>
+          <span id="el-count" class="count">2</span>
+          <button id="el-add" class="btn tiny ghost" title="Add a flap">+</button>
+        </div>
+      </div>
+      <div id="element-cards"></div>
+    </section>
+
+    <section class="group">
+      <div class="group-head">
+        <h2 class="group-title">Manufacturing</h2>
+        <label class="check"
+               title="Prepare every element's profile for the workshop: no knife-edge trailing edges, plus warnings when a section is too thin to build. The drawing, analysis, optimizer and all exports then use the as-built shapes.">
+          <input id="mfg-on" type="checkbox"> apply</label>
+      </div>
+      <div id="mfg-body" hidden>
+        <div class="fields two-col">
+          <label class="field"
+                 title="Every element's trailing edge is opened to at least this thickness — a knife edge can't be laid up, printed or hot-wired. Composite layups: ~1–2 mm. 3D prints: ~0.8–1.5 mm.">
+            <span class="f-label">TE thickness</span>
+            <span class="f-wrap"><input id="mfg-te" type="number" step="0.1" min="0.1" max="8" value="1.2"><i>mm</i></span></label>
+          <label class="field"
+                 title="Thicken (recommended): blends extra thickness in over the rear of the profile, keeping chord and camber — costs almost no downforce. Cut off: slices the tip straight off where the section reaches the target thickness — use it when a part or mold must literally be cut back; thin-tailed sections lose noticeably more downforce.">
+            <span class="f-label">TE treatment</span>
+            <span class="f-wrap"><select id="mfg-mode" class="select-inline">
+              <option value="thicken">Thicken (keep chord)</option>
+              <option value="truncate">Cut off the tip</option>
+            </select><i></i></span></label>
+          <label class="field"
+                 title="Buildability check on the whole section: warns when an element's thickest point is below this minimum, and keeps thinner airfoils out of the optimizer's candidate lists. Local thinness near the TE is governed by the TE thickness above — the 'thicken' treatment guarantees nothing aft of the thickest point is thinner than the TE (see the 'waist' badge). 0 = off.">
+            <span class="f-label">Min thickness</span>
+            <span class="f-wrap"><input id="mfg-tmin" type="number" step="0.5" min="0" max="50" value="0"><i>mm</i></span></label>
+        </div>
+        <p class="group-note">Trailing edges get a flat base of at least the set
+        thickness (see each element's <b>TE</b> badge). Exports carry the
+        as-built contours, so what you cut is what was analyzed.</p>
+      </div>
+    </section>
+
+    <div class="action-row">
+      <button id="btn-analyze" class="btn primary">Analyze section</button>
+      <button id="btn-goto-optimize" class="btn">Optimize…</button>
+    </div>
+  </aside>
+
+  <!-- ============ viewport ============ -->
+  <section class="panel viewport-panel" aria-label="Section drawing">
+    <div class="vp-toolbar">
+      <div class="seg" role="group" aria-label="View orientation">
+        <button id="frame-installed" class="seg-btn active"
+                title="How the wing runs on the car: inverted, above the road. Analysis always uses this orientation.">As driven</button>
+        <button id="frame-design" class="seg-btn"
+                title="Mirror view with lift up — the orientation airfoil catalogs and CAD sketches use. Same geometry, just flipped for viewing.">Upright</button>
+      </div>
+      <span id="frame-note" class="frame-note"></span>
+      <label class="check"><input id="vp-dims" type="checkbox" checked> Dimensions</label>
+      <button id="vp-fit" class="btn tiny ghost" title="Fit drawing to view">Fit</button>
+      <span class="vp-nav-hint">scroll to zoom · drag to pan</span>
+      <span id="vp-legend" class="vp-legend"></span>
+    </div>
+    <div class="vp-body">
+      <svg id="viewport" class="viewport" aria-label="Wing section drawing"></svg>
+      <div id="vp-hint" class="vp-hint-chip" hidden>
+        <b>Starting template loaded</b> — a proven two-element section, drawn
+        the way it runs on the car: <i>inverted</i>, suction side toward the
+        road. Edit the elements on the left, set your target, then
+        <b>Analyze section</b>. The <b>Upright</b> toggle above only flips the
+        view for catalog-style viewing.
+        <button id="vp-hint-close" class="btn tiny">Got it</button>
+      </div>
+    </div>
+    <div id="vp-status" class="vp-status">–</div>
+  </section>
+
+  <!-- ============ results ============ -->
+  <aside class="panel results" aria-label="Results">
+    <div id="results-stale" class="stale-note" hidden>configuration changed — re-analyze</div>
+    <div id="results-empty" class="empty-note">
+      The drawing shows the loaded starting template. Adjust the operating
+      point and elements, then run <b>Analyze section</b> for predicted
+      downforce, element loading and pressure distributions —
+      or <b>Optimize…</b> to hit a target downforce directly.
+    </div>
+    <div id="results-body" hidden>
+      <div class="hero-stat">
+        <span class="hs-label">Estimated downforce
+          <button id="hero-info" class="info-btn" type="button"
+                  title="How this number is computed">i</button></span>
+        <span class="hs-value"><output id="r-downforce">–</output><i>N</i></span>
+        <span id="r-target-pill" class="pill"></span>
+      </div>
+      <div class="stat-grid">
+        <div class="stat"><span class="s-label">C<sub>ΔF</sub> estimate</span><output id="r-cest">–</output></div>
+        <div class="stat"><span class="s-label">C<sub>ΔF</sub> inviscid gnd / free</span><output id="r-cinv">–</output></div>
+        <div class="stat"><span class="s-label">Ground gain</span><output id="r-gain">–</output></div>
+        <div class="stat" id="drag-stat"><span class="s-label">Drag estimate</span><output id="r-drag">–</output><span class="s-sub" id="r-drag-split"></span></div>
+        <div class="stat"><span class="s-label">L/D estimate</span><output id="r-ld">–</output></div>
+        <div class="stat"><span class="s-label">Centre of pressure</span><output id="r-xcp">–</output></div>
+      </div>
+      <h3 class="sub-title">Element loading <span class="s-label">vs isolated CL<sub>max</sub></span></h3>
+      <div id="r-loading"></div>
+      <div id="r-warnings" class="warnings"></div>
+    </div>
+  </aside>
+
+  <!-- ============ bottom dock ============ -->
+  <section class="dock" aria-label="Detail panels">
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="pressure" role="tab">Pressure</button>
+      <button class="tab" data-tab="polars" role="tab">Polars</button>
+      <button class="tab" data-tab="optimizer" role="tab">Optimizer</button>
+      <button class="tab" data-tab="screener" role="tab">Airfoil screener</button>
+      <button class="tab" data-tab="export" role="tab">Export</button>
+    </nav>
+
+    <div id="tab-pressure" class="tab-page active" role="tabpanel">
+      <div class="empty-note" id="cp-empty">Pressure distributions appear here after an analysis.</div>
+      <div id="cp-chart" class="chart-host tall" hidden></div>
+    </div>
+
+    <div id="tab-polars" class="tab-page" role="tabpanel">
+      <div class="tab-controls">
+        <span id="polar-chips" class="chip-row"></span>
+        <button id="btn-xfoil" class="btn small ghost"
+                title="Overlay an XFOIL run for the selected element (takes up to a minute)">
+          Add XFOIL reference</button>
+        <span id="polar-note" class="note"></span>
+      </div>
+      <div class="chart-pair">
+        <div id="polar-cl" class="chart-host"></div>
+        <div id="polar-drag" class="chart-host"></div>
+      </div>
+    </div>
+
+    <div id="tab-optimizer" class="tab-page" role="tabpanel">
+      <div class="opt-grid">
+        <div class="opt-controls">
+          <div class="fields two-col">
+            <label class="field"><span class="f-label">Target</span>
+              <span class="f-wrap"><input id="opt-target" type="number" step="10" value="250"><i>N</i></span></label>
+            <label class="field"><span class="f-label">Search</span>
+              <span class="f-wrap"><select id="opt-mode" class="select-inline">
+                <option value="global">Global</option>
+                <option value="refine">Refine current</option>
+              </select><i></i></span></label>
+            <label class="field"
+                   title="Fast/Standard stop as soon as the target is reached — quick, but repeated runs can land in different drag basins. Thorough explores the whole search space before refining (takes minutes) and converges to the same lowest-drag design on every run.">
+              <span class="f-label">Effort</span>
+              <span class="f-wrap"><select id="opt-budget" class="select-inline">
+                <option value="600">Fast</option>
+                <option value="1500" selected>Standard</option>
+                <option value="4000">Thorough (reproducible)</option>
+              </select><i></i></span></label>
+            <label class="field" title="How strongly drag counts against a design. 0 = ignore drag; higher values trade downforce accuracy for cleaner, lower-drag settings.">
+              <span class="f-label">Drag penalty</span>
+              <span class="f-wrap"><input id="opt-drag-w" type="number" step="0.05" min="0" max="2" value="0.1"><i></i></span></label>
+          </div>
+          <fieldset class="var-set">
+            <legend>Free variables</legend>
+            <label class="check"><input id="ov-aoa" type="checkbox" checked> Stack angle</label>
+            <label class="check"><input id="ov-defl" type="checkbox" checked> Flap deflections</label>
+            <label class="check"><input id="ov-pos" type="checkbox" checked> Slot positions</label>
+            <label class="check"><input id="ov-chord" type="checkbox"> Flap chords</label>
+            <label class="check" title="Also choose each element's airfoil, from the library's strongest candidates at that element's own Reynolds number (the screener ranking; your current airfoils stay in the running). Leave off to keep the airfoils you selected.">
+              <input id="ov-af" type="checkbox"> Airfoil selection</label>
+            <label class="check" title="Refine each element's SHAPE beyond the library: three camber bumps (front / mid / aft loading) plus a thickness scale per element, applied to whatever airfoil the element uses. Every constraint still holds — manufacturing TE prep, buildable thickness, slot bands and the stall budget are evaluated on the modified shape. Slower: every new shape needs fresh aerodynamics. Re-running keeps refining the current shape.">
+              <input id="ov-shape" type="checkbox"> Airfoil shape (camber &amp; thickness)</label>
+            <div class="af-pool-row"
+                 title="Where airfoil candidates come from. 'My uploads only' optimizes over just the .dat files you loaded — the sections you can actually build. With a manufacturing minimum thickness set, thinner library sections are excluded automatically.">
+              <span>candidates</span>
+              <select id="ov-af-pool" class="select-inline" disabled>
+                <option value="auto">Best from library</option>
+                <option value="include_custom">Library + my uploads</option>
+                <option value="custom_only">My uploads only</option>
+              </select>
+            </div>
+          </fieldset>
+          <div class="action-row">
+            <button id="btn-opt-run" class="btn primary">Start optimization</button>
+            <button id="btn-opt-cancel" class="btn ghost" disabled>Cancel</button>
+          </div>
+          <div class="progress" aria-hidden="true"><div id="opt-progress"></div></div>
+          <div id="opt-status" class="note">idle — Fast/Standard stop early at the target; Thorough searches everything</div>
+        </div>
+        <div class="opt-charts">
+          <div id="opt-conv" class="chart-host"></div>
+          <div id="opt-obj" class="chart-host"></div>
+        </div>
+        <div class="opt-best">
+          <h3 class="sub-title">Best design</h3>
+          <div id="opt-best-body" class="note">No run yet.</div>
+          <div id="opt-hints"></div>
+          <button id="btn-opt-apply" class="btn" disabled>Apply to configuration</button>
+          <h3 class="sub-title" id="opt-cand-title" hidden
+              title="Distinct designs found during the search that also hit the target — different trade-offs, not just the single optimum. Apply one to inspect it in full.">
+            Candidates</h3>
+          <div id="opt-candidates"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-screener" class="tab-page" role="tabpanel">
+      <div class="tab-controls">
+        <label class="field inline"><span class="f-label">Re</span>
+          <span class="f-wrap"><input id="scr-re" type="number" step="10000" value="350000"><i></i></span></label>
+        <label class="field inline" title="Working lift coefficient used to compare drag between sections (the CD@CL column).">
+          <span class="f-label">Ref. CL</span>
+          <span class="f-wrap"><input id="scr-cl" type="number" step="0.1" value="1.5"><i></i></span></label>
+        <label class="field inline"><span class="f-label">Thickness</span>
+          <span class="f-wrap"><input id="scr-tmin" type="number" step="1" value="0" style="width:44px"><i>–</i>
+          <input id="scr-tmax" type="number" step="1" value="12" style="width:44px"><i>%</i></span></label>
+        <label class="field inline"><span class="f-label">Apply to</span>
+          <span class="f-wrap"><select id="scr-elem" class="select-inline"></select><i></i></span></label>
+        <button id="btn-screen" class="btn small">Screen library</button>
+        <span id="scr-note" class="note">Ranks all 2,174 bundled sections at your Reynolds number.</span>
+      </div>
+      <div id="scr-table" class="table-host">
+        <div class="empty-note">Run a screen to rank candidate airfoils for an element.</div>
+      </div>
+    </div>
+
+    <div id="tab-export" class="tab-page" role="tabpanel">
+      <div class="tab-controls">
+        <label class="field inline"><span class="f-label">Orientation</span>
+          <span class="f-wrap"><select id="exp-frame" class="select-inline">
+            <option value="installed">As driven (inverted, ground at y = 0)</option>
+            <option value="design">Upright (catalog / CAD convention)</option>
+          </select><i></i></span></label>
+        <label class="field inline"><span class="f-label">DXF entity</span>
+          <span class="f-wrap"><select id="exp-entity" class="select-inline">
+            <option value="spline">Spline (smooth, for lofting)</option>
+            <option value="polyline">Polyline (exact points)</option>
+          </select><i></i></span></label>
+      </div>
+      <div class="export-grid">
+        <div class="export-card">
+          <h3>DXF</h3>
+          <p>True-scale drawing in millimeters, one closed contour per element
+             on its own layer. Opens directly as a sketch in SolidWorks,
+             Fusion, Onshape or NX.</p>
+          <button class="btn primary" data-export="dxf">Export DXF</button>
+        </div>
+        <div class="export-card">
+          <h3>Complete bundle</h3>
+          <p>DXF in both frames, per-element point files (mm), Selig .dat
+             contours, CSV, SVG drawing and a JSON manifest with the analysis
+             snapshot.</p>
+          <button class="btn primary" data-export="zip">Export ZIP</button>
+        </div>
+        <div class="export-card">
+          <h3>SVG drawing</h3>
+          <p>True-scale vector drawing of the installed section with the
+             ground line — for documentation or quick 1:1 printing checks.</p>
+          <button class="btn" data-export="svg">Export SVG</button>
+        </div>
+        <div class="export-card">
+          <h3>Point table</h3>
+          <p>Every contour point in millimeters as CSV with element metadata —
+             for spreadsheets or custom tooling.</p>
+          <button class="btn" data-export="csv">Export CSV</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- model notes dialog -->
+<dialog id="model-dialog" class="dialog">
+  <h2>How estimates are computed</h2>
+  <div class="dialog-body">
+    <p><b>Inviscid solution.</b> A multi-element Hess–Smith panel method solves
+    the exact inviscid flow around all elements at once, in free air and in
+    ground effect (method of images). These numbers are exact for inviscid flow
+    and validated against independent formulations, but inviscid ground effect
+    grows without bound as ride height shrinks — real flows saturate.</p>
+    <p><b>Corrected estimate.</b>
+    <code>C_est = η_visc · [C_free + k_g·(C_ground − C_free)]</code>, where
+    <code>η_visc</code> (default 0.85) is the free-air viscous realization and
+    <code>k_g = 0.85·tanh(1.4/0.85·h/c)</code> realizes only part of the
+    inviscid ground-effect gain — vanishing as the wing approaches the
+    road, where the inviscid model diverges but real flow chokes. Both knobs
+    are under Air properties &amp; calibration — recalibrate them against
+    RANS or tunnel data when available.</p>
+    <p><b>Element loading.</b> Each element's free-air inviscid load (×η) is
+    checked against its isolated CL<sub>max</sub> from NeuralFoil at the
+    element's own Reynolds number — the classical high-lift load budget.
+    Warnings start at 90%, criticals at 110%.</p>
+    <p><b>Drag.</b> Two parts. <i>Profile drag</i>: each element's section
+    drag from its polar, looked up at the ground-effect operating point.
+    <i>Induced drag</i> — usually the larger part: computed from the same
+    downforce the tool reports,
+    <code>CDi = CL²/(π·AR·e)·φ</code>, where <code>e</code> is the span
+    efficiency (Air properties &amp; calibration) and
+    <code>φ = (16h/b)²/(1+(16h/b)²)</code> is the classical ground-effect
+    reduction — wings near the road shed much weaker tip vortices.
+    Interference and support drag are not modeled.</p>
+    <p class="note">This tool screens and optimizes starting geometry. Confirm
+    the shortlist with RANS (the repository's OpenFOAM pipeline) or tunnel data.</p>
+  </div>
+  <form method="dialog"><button class="btn">Close</button></form>
+</dialog>
+
+<!-- export saved dialog -->
+<dialog id="export-dialog" class="dialog">
+  <h2>Export saved</h2>
+  <div class="dialog-body">
+    <div class="kv"><span>File</span><b id="exp-dlg-name"></b></div>
+    <div class="kv"><span>Size</span><b id="exp-dlg-size"></b></div>
+    <p class="note">Saved to:</p>
+    <p><code id="exp-dlg-path" class="path-line"></code></p>
+  </div>
+  <div class="action-row">
+    <button id="exp-dlg-reveal" class="btn primary">Show in folder</button>
+    <button id="exp-dlg-download" class="btn"
+            title="Also fetch it through the browser's download flow">Download a copy</button>
+    <button id="exp-dlg-close" class="btn ghost">Close</button>
+  </div>
+</dialog>
+
+<div id="toasts" class="toasts" aria-live="polite"></div>
+
+<template id="tpl-element-card">
+  <div class="el-card">
+    <div class="el-head">
+      <span class="el-tag"></span>
+      <span class="el-title"></span>
+      <span class="el-badges"></span>
+    </div>
+    <div class="fields">
+      <label class="field af-field"><span class="f-label">Airfoil</span>
+        <span class="f-wrap af-wrap">
+          <input class="af-input" type="text" spellcheck="false" autocomplete="off">
+          <button class="af-upload btn tiny ghost" title="Load a Selig .dat file">.dat</button>
+          <input type="file" accept=".dat,.txt" hidden class="af-file">
+        </span>
+        <span class="af-list" hidden></span>
+      </label>
+    </div>
+    <div class="fields two-col flap-only">
+      <label class="field"><span class="f-label">Chord</span>
+        <span class="f-wrap"><input class="el-chord" type="number" step="1" min="5" max="100"><i>%</i></span></label>
+      <label class="field"><span class="f-label">Deflection</span>
+        <span class="f-wrap"><input class="el-defl" type="number" step="0.5" min="-90" max="90"><i>deg</i></span></label>
+      <label class="field" title="Smallest clearance between this flap and the previous element's trailing edge. Healthy slots: 1–2.5% of chord.">
+        <span class="f-label">Slot gap</span>
+        <span class="f-wrap"><input class="el-gap" type="number" step="0.1" min="0.2" max="10"><i>%c</i></span></label>
+      <label class="field" title="How far this flap's nose tucks under the previous trailing edge. Typical: 2–4% of chord.">
+        <span class="f-label">Overlap</span>
+        <span class="f-wrap"><input class="el-ovl" type="number" step="0.1" min="-3" max="10"><i>%c</i></span></label>
+    </div>
+  </div>
+</template>
+
+<script type="module" src="/static/js/app.js?v=6"></script>
+</body>
+</html>

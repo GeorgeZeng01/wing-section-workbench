@@ -1,0 +1,1271 @@
+/* Wing Section Studio — application wiring. */
+
+import { api, downloadExport } from "./api.js";
+import { lineChart, airfoilPreview } from "./charts.js";
+import { Viewport, SERIES } from "./viewport.js";
+
+const $ = (id) => document.getElementById(id);
+const NU = 1.5e-5;
+
+const CONFIG_DEFAULTS = {
+  stack_aoa_deg: 0, ride_height_mm: 30, chord_mm: 350, span_mm: 1400,
+  speed_ms: 15, rho: 1.225, nu: NU, ncrit: 7,
+  viscous_efficiency: 0.85, efficiency_3d: 1.0, span_efficiency: 0.9,
+  n_panels_per_side: 70,
+};
+
+function withDefaults(cfg) {
+  const merged = { ...CONFIG_DEFAULTS, ...cfg };
+  merged.elements = (cfg.elements || []).map(e => ({
+    airfoil: "s1223", chord_ratio: 1, deflection_deg: 0, dx: -0.03, dy: -0.03,
+    ...e,
+  }));
+  return merged;
+}
+
+/* ---------------- state ---------------- */
+
+const state = {
+  config: {
+    elements: [
+      { airfoil: "s1223", chord_ratio: 1.0, deflection_deg: 0 },
+      { airfoil: "s1223", chord_ratio: 0.35, deflection_deg: 24,
+        slot_gap_pct: 1.5, slot_overlap_pct: 3.0 },
+    ],
+    stack_aoa_deg: 1.0, ride_height_mm: 30, chord_mm: 350, span_mm: 1400,
+    speed_ms: 15, rho: 1.225, nu: NU, ncrit: 7,
+    viscous_efficiency: 0.85, efficiency_3d: 0.9, span_efficiency: 0.9,
+    n_panels_per_side: 70,
+  },
+  target: 250,
+  geo: null,
+  analysis: null,
+  airfoilNames: {},           // spec -> display name
+  customDat: {},              // spec -> dat text (for project save)
+  optJob: null,
+  optPoll: null,
+  polarElem: 0,
+  xfoilCache: {},             // spec|re|ncrit -> polar
+  screenRows: null,
+  screenSort: { key: "CL_max", dir: -1 },
+};
+
+const viewport = new Viewport($("viewport"));
+let configRevision = 0;   // bumped on every config edit (stale-result tracking)
+
+/* ---------------- helpers ---------------- */
+
+function toast(msg, kind = "err", ms = 5000) {
+  const t = document.createElement("div");
+  t.className = `toast ${kind}`;
+  t.textContent = msg;
+  $("toasts").appendChild(t);
+  setTimeout(() => t.remove(), ms);
+}
+
+function busy(btn, on) {
+  btn.classList.toggle("busy", on);
+  btn.disabled = on;
+}
+
+function fmtN(v, d = 1) { return v == null ? "–" : (+v).toFixed(d); }
+function fmtRe(re) {
+  return re >= 1e6 ? (re / 1e6).toFixed(2) + "M" : Math.round(re / 1000) + "k";
+}
+function elementRe(i) {
+  const c = state.config;
+  return c.speed_ms * c.elements[i].chord_ratio * (c.chord_mm / 1000) / c.nu;
+}
+function roleName(i) { return i === 0 ? "main" : `flap ${i}`; }
+function debounce(fn, ms) {
+  let t = null;
+  return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+}
+
+/* ---------------- config form ---------------- */
+
+const CFG_FIELDS = [
+  ["cfg-speed", "speed_ms"], ["cfg-ride", "ride_height_mm"],
+  ["cfg-chord", "chord_mm"], ["cfg-span", "span_mm"],
+  ["cfg-aoa", "stack_aoa_deg"], ["cfg-ncrit", "ncrit"],
+  ["cfg-rho", "rho"], ["cfg-nu", "nu"],
+  ["cfg-visc-eff", "viscous_efficiency"], ["cfg-3d-eff", "efficiency_3d"],
+  ["cfg-span-eff", "span_efficiency"],
+  ["cfg-panels", "n_panels_per_side"],
+];
+
+function writeConfigToForm() {
+  for (const [id, key] of CFG_FIELDS) $(id).value = state.config[key];
+  $("cfg-target").value = state.target;
+  $("opt-target").value = state.target;
+  const m = state.config.manufacturing;
+  $("mfg-on").checked = !!m;
+  $("mfg-body").hidden = !m;
+  if (m) {
+    $("mfg-te").value = m.te_gap_mm ?? 1.2;
+    $("mfg-mode").value = m.te_mode || "thicken";
+    $("mfg-tmin").value = m.min_thickness_mm ?? 0;
+  }
+  buildElementCards();
+  updateTargetC();
+}
+
+function bindConfigInputs() {
+  for (const [id, key] of CFG_FIELDS) {
+    $(id).addEventListener("input", () => {
+      const v = parseFloat($(id).value);
+      if (Number.isFinite(v)) {
+        state.config[key] = v;
+        onConfigChanged();
+      }
+    });
+  }
+  $("cfg-target").addEventListener("input", () => {
+    const v = parseFloat($("cfg-target").value);
+    if (Number.isFinite(v)) {
+      state.target = v;
+      $("opt-target").value = v;
+      updateTargetC();
+      renderTargetPill();
+      persistSession();
+    }
+  });
+  $("opt-target").addEventListener("input", () => {
+    const v = parseFloat($("opt-target").value);
+    if (Number.isFinite(v)) {
+      state.target = v;
+      $("cfg-target").value = v;
+      updateTargetC();
+      renderTargetPill();
+      persistSession();
+    }
+  });
+}
+
+function updateTargetC() {
+  const c = state.config;
+  const q = 0.5 * c.rho * c.speed_ms ** 2;
+  const area = (c.chord_mm / 1000) * (c.span_mm / 1000);
+  const denom = q * area * (c.efficiency_3d || 1);
+  $("target-c").textContent = denom > 0 ? (state.target / denom).toFixed(2) : "–";
+}
+
+/* ---------------- manufacturing ---------------- */
+
+function readMfgForm() {
+  return {
+    te_gap_mm: parseFloat($("mfg-te").value) || 1.2,
+    te_mode: $("mfg-mode").value,
+    min_thickness_mm: parseFloat($("mfg-tmin").value) || 0,
+  };
+}
+
+function bindManufacturing() {
+  $("mfg-on").addEventListener("change", () => {
+    if ($("mfg-on").checked) {
+      state.config.manufacturing = readMfgForm();
+    } else {
+      delete state.config.manufacturing;
+    }
+    $("mfg-body").hidden = !$("mfg-on").checked;
+    onConfigChanged();
+  });
+  for (const id of ["mfg-te", "mfg-mode", "mfg-tmin"]) {
+    $(id).addEventListener("input", () => {
+      if (!$("mfg-on").checked) return;
+      state.config.manufacturing = readMfgForm();
+      onConfigChanged();
+    });
+  }
+}
+
+/* ---------------- element cards ---------------- */
+
+function buildElementCards() {
+  const host = $("element-cards");
+  host.innerHTML = "";
+  $("el-count").textContent = state.config.elements.length;
+  state.config.elements.forEach((e, i) => host.appendChild(elementCard(e, i)));
+  state.polarElem = Math.min(state.polarElem, state.config.elements.length - 1);
+  buildViewportLegend();
+  buildPolarChips();
+  buildScreenerTargets();
+}
+
+function elementCard(e, i) {
+  const node = $("tpl-element-card").content.firstElementChild.cloneNode(true);
+  node.dataset.idx = i;
+  node.querySelector(".el-tag").textContent = `E${i + 1}`;
+  node.querySelector(".el-title").textContent = roleName(i).toUpperCase();
+  updateCardBadges(node, i);
+
+  const afInput = node.querySelector(".af-input");
+  afInput.value = state.airfoilNames[e.airfoil] || e.airfoil;
+  wireAirfoilCombo(node, afInput, i);
+
+  const flapFields = node.querySelector(".flap-only");
+  if (i === 0) {
+    flapFields.classList.add("hidden");
+  } else {
+    const set = (sel, val) => { node.querySelector(sel).value = val; };
+    set(".el-chord", Math.round(e.chord_ratio * 100));
+    set(".el-defl", e.deflection_deg);
+    // legacy configs carry dx/dy instead; inputs are backfilled with the
+    // achieved values right after the first geometry refresh
+    if (e.slot_gap_pct != null) set(".el-gap", e.slot_gap_pct);
+    if (e.slot_overlap_pct != null) set(".el-ovl", e.slot_overlap_pct);
+    const wire = (sel, fn) => {
+      node.querySelector(sel).addEventListener("input", (ev) => {
+        const v = parseFloat(ev.target.value);
+        if (Number.isFinite(v)) { fn(v); onConfigChanged(); }
+      });
+    };
+    wire(".el-chord", v => { state.config.elements[i].chord_ratio = v / 100; });
+    wire(".el-defl", v => { state.config.elements[i].deflection_deg = v; });
+    wire(".el-gap", v => { state.config.elements[i].slot_gap_pct = v; });
+    wire(".el-ovl", v => { state.config.elements[i].slot_overlap_pct = v; });
+  }
+  return node;
+}
+
+function updateCardBadges(card, i) {
+  const badges = card.querySelector(".el-badges");
+  badges.innerHTML = "";
+  const add = (txt, cls = "") => {
+    const b = document.createElement("span");
+    b.className = `badge ${cls}`;
+    b.textContent = txt;
+    badges.appendChild(b);
+  };
+  add(`Re ${fmtRe(elementRe(i))}`);
+  const ge = state.geo?.design?.[i];
+  if (ge && ge.slot_gap != null) {
+    const gp = ge.slot_gap * 100, op = ge.slot_overlap * 100;
+    add(`gap ${gp.toFixed(1)}%`,
+        ge.intersects || gp < 0.5 ? "crit" : (gp < 0.8 || gp > 3.5) ? "warn" : "");
+    add(`ovl ${op.toFixed(1)}%`, (op < -1 || op > 5) ? "warn" : "");
+  }
+  if (ge?.mfg) {
+    add(`TE ${ge.mfg.te_gap_mm} mm`, ge.mfg.te_ok ? "" : "crit");
+    add(`t ${ge.mfg.max_thickness_mm} mm`, ge.mfg.thickness_ok ? "" : "crit");
+    if (ge.mfg.min_aft_thickness_mm != null) {
+      add(`waist ${ge.mfg.min_aft_thickness_mm} mm`,
+          ge.mfg.waist_ok ? "" : "crit");
+    }
+  }
+}
+
+function refreshAllBadges() {
+  document.querySelectorAll(".el-card").forEach((card) => {
+    updateCardBadges(card, +card.dataset.idx);
+  });
+}
+
+function wireAirfoilCombo(card, input, idx) {
+  const list = card.querySelector(".af-list");
+  const fileBtn = card.querySelector(".af-upload");
+  const fileInput = card.querySelector(".af-file");
+
+  const search = debounce(async () => {
+    if (document.activeElement !== input) { list.hidden = true; return; }
+    const q = input.value.trim();
+    try {
+      const res = await api.airfoils(q, 24);
+      if (document.activeElement !== input) { list.hidden = true; return; }
+      const items = [
+        ...res.custom.filter(c =>
+          c.name.toLowerCase().includes(q.toLowerCase()))
+          .map(c => ({ spec: c.spec, label: c.name, note: "uploaded" })),
+        ...res.library.map(n => ({ spec: n, label: n, note: "" })),
+      ];
+      list.innerHTML = "";
+      if (!items.length) { list.hidden = true; return; }
+      for (const it of items.slice(0, 24)) {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "af-item";
+        b.innerHTML = it.note
+          ? `${it.label}<small>${it.note}</small>` : it.label;
+        b.addEventListener("pointerdown", (ev) => {
+          ev.preventDefault();
+          selectAirfoil(idx, it.spec, it.label);
+          list.hidden = true;
+        });
+        list.appendChild(b);
+      }
+      list.hidden = false;
+    } catch { list.hidden = true; }
+  }, 180);
+
+  input.addEventListener("input", search);
+  input.addEventListener("focus", () => { input.select(); search(); });
+  input.addEventListener("blur", () => setTimeout(() => {
+    list.hidden = true;
+    const e = state.config.elements[idx];
+    if (!e || !input.isConnected) return;   // card may have been removed
+    input.value = state.airfoilNames[e.airfoil] || e.airfoil;
+  }, 150));
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") {
+      const q = input.value.trim();
+      if (q) selectAirfoil(idx, q.toLowerCase(), q.toLowerCase());
+      list.hidden = true;
+      input.blur();
+    }
+    if (ev.key === "Escape") { list.hidden = true; input.blur(); }
+  });
+
+  fileBtn.addEventListener("click", () => fileInput.click());
+  fileInput.addEventListener("change", async () => {
+    const f = fileInput.files[0];
+    if (!f) return;
+    try {
+      const text = await f.text();
+      const up = await api.uploadAirfoil(f.name.replace(/\.(dat|txt)$/i, ""), text);
+      state.customDat[up.spec] = text;
+      selectAirfoil(idx, up.spec, up.name);
+      toast(`Loaded ${up.name} (${up.info.n_points} points, ` +
+            `t ${Math.round(up.info.max_thickness * 1000) / 10}%)`, "good");
+    } catch (e) {
+      toast(`Could not load airfoil: ${e.message}`);
+    }
+    fileInput.value = "";
+  });
+}
+
+function selectAirfoil(idx, spec, label) {
+  state.config.elements[idx].airfoil = spec;
+  state.airfoilNames[spec] = label;
+  const card = document.querySelector(`.el-card[data-idx="${idx}"]`);
+  if (card) card.querySelector(".af-input").value = label;
+  onConfigChanged();
+  buildPolarChips();
+}
+
+$("el-add").addEventListener("click", () => {
+  const els = state.config.elements;
+  if (els.length >= 4) { toast("Maximum of 4 elements.", "info"); return; }
+  const last = els[els.length - 1];
+  els.push({
+    airfoil: last.airfoil,
+    chord_ratio: Math.max(0.15, (last.chord_ratio || 0.35) * 0.7),
+    deflection_deg: Math.min(60, (last.deflection_deg || 20) + 18),
+    slot_gap_pct: 1.5, slot_overlap_pct: 2.0,
+  });
+  buildElementCards();
+  onConfigChanged();
+});
+
+$("el-remove").addEventListener("click", () => {
+  const els = state.config.elements;
+  if (els.length <= 1) { toast("The main element cannot be removed.", "info"); return; }
+  els.pop();
+  buildElementCards();
+  onConfigChanged();
+});
+
+/* ---------------- geometry preview ---------------- */
+
+const scheduleGeometry = debounce(refreshGeometry, 260);
+
+// a custom base may sit inside shape:/mfg: wrappers; the slug is always the
+// last (colon-free) segment, so it can be pulled out of any wrapped spec
+function usedCustomSpecs() {
+  const used = new Set();
+  for (const e of state.config.elements) {
+    const m = String(e.airfoil || "").match(/custom:[a-z0-9_-]+$/);
+    if (m) used.add(m[0]);
+  }
+  return used;
+}
+
+const persistSession = debounce(() => {
+  try {
+    const custom = {};
+    for (const spec of usedCustomSpecs()) {
+      if (state.customDat[spec]) {
+        custom[spec] = state.customDat[spec];
+      }
+    }
+    localStorage.setItem("wss-session", JSON.stringify({
+      config: state.config, target: state.target,
+      airfoil_names: state.airfoilNames, custom_airfoils: custom,
+    }));
+  } catch { /* storage full/blocked — session restore just won't happen */ }
+}, 500);
+
+function onConfigChanged() {
+  configRevision++;
+  markStale();
+  updateTargetC();
+  scheduleGeometry();
+  persistSession();
+}
+
+let geoReqSeq = 0;
+
+async function refreshGeometry() {
+  const seq = ++geoReqSeq;
+  try {
+    const geo = await api.geometry(state.config);
+    if (seq !== geoReqSeq) return;   // a newer request is in flight/landed
+    state.geo = geo;
+    viewport.setData(geo, state.config.chord_mm);
+    // migrate legacy dx/dy elements to the gap/overlap parameterization by
+    // adopting the achieved values OF THE SHARP GEOMETRY (with manufacturing
+    // prep on, the server reports both; the as-built numbers depend on the
+    // treatment and would bake the warped placement in permanently)
+    geo.design.forEach((g, i) => {
+      if (i === 0 || g.slot_gap == null) return;
+      const e = state.config.elements[i];
+      if (!e) return;
+      if (e.slot_gap_pct == null) {
+        const gv = g.slot_gap_sharp ?? g.slot_gap;
+        e.slot_gap_pct = Math.round(gv * 1000) / 10;
+        const inp = document.querySelector(`.el-card[data-idx="${i}"] .el-gap`);
+        if (inp) inp.value = e.slot_gap_pct;
+      }
+      if (e.slot_overlap_pct == null) {
+        const ov = g.slot_overlap_sharp ?? g.slot_overlap;
+        e.slot_overlap_pct = Math.round(ov * 1000) / 10;
+        const inp = document.querySelector(`.el-card[data-idx="${i}"] .el-ovl`);
+        if (inp) inp.value = e.slot_overlap_pct;
+      }
+    });
+    refreshAllBadges();
+    const warn = geo.warnings.length ? ` · ${geo.warnings[0]}` : "";
+    $("vp-status").textContent =
+      `overall length ${geo.system_chord_mm.toFixed(0)} mm · ` +
+      `ride height ${state.config.ride_height_mm} mm ` +
+      `(${(geo.ride_height_c * 100).toFixed(1)}% chord)` + warn;
+    $("vp-status").style.color = geo.warnings.length ? "var(--warning)" : "";
+  } catch (e) {
+    if (seq !== geoReqSeq) return;
+    $("vp-status").textContent = e.message;
+    $("vp-status").style.color = "var(--critical)";
+  }
+}
+
+function buildViewportLegend() {
+  const lg = $("vp-legend");
+  lg.innerHTML = "";
+  state.config.elements.forEach((e, i) => {
+    const s = document.createElement("span");
+    s.className = "lg";
+    s.innerHTML = `<span class="sw" style="background:${SERIES[i]}"></span>` +
+      `E${i + 1} ${state.airfoilNames[e.airfoil] || e.airfoil}`;
+    lg.appendChild(s);
+  });
+}
+
+$("frame-installed").addEventListener("click", () => setFrame("installed"));
+$("frame-design").addEventListener("click", () => setFrame("design"));
+const FRAME_NOTES = {
+  installed: "inverted above the road — the orientation the analysis uses",
+  upright: "mirror view, lift up — how catalogs and CAD sketches draw airfoils",
+};
+function setFrame(f) {
+  viewport.setFrame(f);
+  $("frame-installed").classList.toggle("active", f === "installed");
+  $("frame-design").classList.toggle("active", f === "design");
+  $("frame-note").textContent =
+    f === "installed" ? FRAME_NOTES.installed : FRAME_NOTES.upright;
+}
+$("vp-dims").addEventListener("change", (e) => viewport.setDims(e.target.checked));
+$("vp-fit").addEventListener("click", () => viewport.fit());
+
+/* ---------------- analysis + results ---------------- */
+
+function markStale() {
+  if (state.analysis) $("results-stale").hidden = false;
+}
+
+async function runAnalysis() {
+  const btn = $("btn-analyze");
+  const revAtStart = configRevision;
+  busy(btn, true);
+  try {
+    const res = await api.analyze(state.config);
+    state.analysis = res;
+    renderResults(res);
+    renderCp(res);
+    // only claim freshness if the form wasn't edited mid-flight
+    if (configRevision === revAtStart) {
+      $("results-stale").hidden = true;
+      viewport.setCp(res.coefficients.x_cp_c);
+    } else {
+      $("results-stale").hidden = false;
+    }
+  } catch (e) {
+    toast(`Analysis failed: ${e.message}`);
+  } finally {
+    busy(btn, false);
+  }
+}
+
+function renderTargetPill() {
+  const res = state.analysis;
+  const pill = $("r-target-pill");
+  if (!res) return;
+  const f = res.forces.downforce_n;
+  const d = f - state.target;
+  const pct = state.target > 0 ? (d / state.target) * 100 : 0;
+  pill.textContent = `target ${state.target} N · ${d >= 0 ? "+" : ""}${d.toFixed(0)} N ` +
+                     `(${pct >= 0 ? "+" : ""}${pct.toFixed(0)}%)`;
+  pill.className = "pill " + (Math.abs(pct) <= 8 ? "good"
+    : Math.abs(pct) <= 25 ? "warn" : "crit");
+}
+
+function renderResults(res) {
+  $("results-empty").hidden = true;
+  $("results-body").hidden = false;
+  const c = res.coefficients, f = res.forces;
+  $("r-downforce").textContent = fmtN(f.downforce_n, 0);
+  renderTargetPill();
+  $("r-cest").textContent = fmtN(c.C_downforce_estimated, 2);
+  $("r-cinv").textContent = `${fmtN(c.C_downforce_inviscid_ground, 2)} / ` +
+                            `${fmtN(c.C_downforce_inviscid_free, 2)}`;
+  $("r-gain").textContent = c.ground_gain_inviscid == null ? "–"
+    : `+${(c.ground_gain_inviscid * 100).toFixed(0)}% inviscid`;
+  $("r-drag").textContent = `${fmtN(f.drag_total_n, 1)} N`;
+  $("r-drag-split").textContent =
+    `${fmtN(f.drag_induced_n, 1)} induced · ${fmtN(f.drag_profile_n, 1)} profile`;
+  $("drag-stat").title = f.induced_model
+    ? `CDi ${f.induced_model.CDi} at wing CL ${f.induced_model.CL_wing} · ` +
+      `AR ${f.induced_model.AR} · ground factor ` +
+      `${f.induced_model.ground_factor_phi}`
+    : "";
+  $("r-ld").textContent = fmtN(f.efficiency_ld, 1);
+  $("r-xcp").textContent =
+    `${(c.x_cp_c * state.config.chord_mm).toFixed(0)} mm`;
+
+  const host = $("r-loading");
+  host.innerHTML = "";
+  res.elements.forEach((e, i) => {
+    const frac = e.loading_fraction;
+    const row = document.createElement("div");
+    row.className = "load-row";
+    const scale = 1.3; // track spans 0..130% of CL_max
+    row.innerHTML =
+      `<div class="load-head"><span>E${i + 1} ${e.role} · ` +
+      `Cl ${fmtN(e.Cl_checked, 2)} / ${fmtN(e.CL_max_isolated, 2)} · ` +
+      `ground ×${fmtN(e.ground_multiplier, 1)}</span>` +
+      `<span>${(frac * 100).toFixed(0)}%</span></div>` +
+      `<div class="load-track">` +
+      `<div class="load-fill" style="width:${Math.min(frac / scale, 1) * 100}%;` +
+      `background:${SERIES[i]}"></div>` +
+      `<div class="load-limit" style="left:${(1 / scale) * 100}%"></div></div>`;
+    host.appendChild(row);
+  });
+
+  const w = $("r-warnings");
+  w.innerHTML = "";
+  for (const msg of res.warnings) {
+    const d = document.createElement("div");
+    const crit = /separation|intersect|choke/.test(msg);
+    d.className = "warning-item" + (crit ? " crit" : "");
+    d.textContent = msg;
+    w.appendChild(d);
+  }
+}
+
+$("btn-analyze").addEventListener("click", runAnalysis);
+
+/* ---------------- pressure tab ---------------- */
+
+function renderCp(res) {
+  const host = $("cp-chart");
+  $("cp-empty").hidden = true;
+  host.hidden = false;
+  const mm = state.config.chord_mm;
+  lineChart(host, {
+    series: res.cp_distributions.map((d, i) => ({
+      name: `E${i + 1} ${d.role}`,
+      color: SERIES[i],
+      x: d.x.map(v => v * mm),
+      y: d.cp,
+    })),
+    xLabel: "x [mm]", yLabel: "Cp (inviscid)", invertY: true, height: 235,
+  });
+}
+
+/* ---------------- tabs ---------------- */
+
+document.querySelectorAll(".tab").forEach((t) => {
+  t.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach(x =>
+      x.classList.toggle("active", x === t));
+    document.querySelectorAll(".tab-page").forEach(p =>
+      p.classList.toggle("active", p.id === `tab-${t.dataset.tab}`));
+    if (t.dataset.tab === "polars") renderPolars();
+    if (t.dataset.tab === "screener") prefillScreener();
+  });
+});
+$("btn-goto-optimize").addEventListener("click", () => {
+  document.querySelector('.tab[data-tab="optimizer"]').click();
+});
+
+/* ---------------- polars tab ---------------- */
+
+function buildPolarChips() {
+  const host = $("polar-chips");
+  host.innerHTML = "";
+  state.config.elements.forEach((e, i) => {
+    const b = document.createElement("button");
+    b.className = "chip" + (i === state.polarElem ? " active" : "");
+    b.textContent = `E${i + 1} ${state.airfoilNames[e.airfoil] || e.airfoil} · ` +
+                    `Re ${fmtRe(elementRe(i))}`;
+    b.addEventListener("click", () => {
+      state.polarElem = Math.min(i, state.config.elements.length - 1);
+      buildPolarChips();
+      renderPolars();
+    });
+    host.appendChild(b);
+  });
+}
+
+let polarReqSeq = 0;
+
+async function renderPolars(withXfoil = false) {
+  const seq = ++polarReqSeq;
+  const i = Math.min(state.polarElem, state.config.elements.length - 1);
+  const e = state.config.elements[i];
+  const re = elementRe(i);
+  // with manufacturing prep on, show the polar of the as-built section
+  const spec = state.geo?.design?.[i]?.airfoil_eff || e.airfoil;
+  const asBuilt = spec !== e.airfoil;
+  const note = $("polar-note");
+  note.textContent = "computing…";
+  try {
+    const nf = await api.polar({ spec, re, ncrit: state.config.ncrit });
+    const key = `${spec}|${Math.round(re)}|${state.config.ncrit}`;
+    let xf = state.xfoilCache[key];
+    if (withXfoil && !xf) {
+      note.textContent = "running XFOIL — up to a minute…";
+      xf = await api.polar({ spec, re, ncrit: state.config.ncrit,
+                             engine: "xfoil" });
+      state.xfoilCache[key] = xf;
+    }
+    // element chip switched (or config changed) while we were fetching —
+    // a newer render owns the charts now
+    if (seq !== polarReqSeq) return;
+    const series = (xk, yk) => {
+      const s = [{ name: "NeuralFoil", color: SERIES[i],
+                   x: nf[xk], y: nf[yk] }];
+      if (xf) s.push({ name: "XFOIL", color: "#e9edf6", markers: "only",
+                       x: xf[xk], y: xf[yk] });
+      return s;
+    };
+    lineChart($("polar-cl"), {
+      series: series("alpha", "CL"),
+      xLabel: "α [deg]", yLabel: "CL", height: 205,
+    });
+    lineChart($("polar-drag"), {
+      series: series("CD", "CL"),
+      xLabel: "CD", yLabel: "CL", height: 205,
+    });
+    const m = nf.metrics;
+    note.textContent = (asBuilt ? "as-built section · " : "") +
+      `CLmax ${m.CL_max.toFixed(2)} @ ${m.alpha_CL_max.toFixed(1)}° · ` +
+      `L/D max ${m.LD_max.toFixed(0)} @ CL ${m.CL_at_LD_max.toFixed(2)} · ` +
+      `confidence ${(m.confidence_at_CL_max * 100).toFixed(0)}%` +
+      (xf ? ` · XFOIL: ${xf.alpha.length} converged points` : "");
+  } catch (err) {
+    if (seq !== polarReqSeq) return;
+    note.textContent = `polar failed: ${err.message}`;
+  }
+}
+
+$("btn-xfoil").addEventListener("click", async () => {
+  busy($("btn-xfoil"), true);
+  await renderPolars(true);
+  busy($("btn-xfoil"), false);
+});
+
+/* ---------------- optimizer tab ---------------- */
+
+$("btn-opt-run").addEventListener("click", startOptimization);
+$("btn-opt-cancel").addEventListener("click", async () => {
+  if (state.optJob) { try { await api.optimizeCancel(state.optJob); } catch {} }
+});
+$("btn-opt-apply").addEventListener("click", applyBestDesign);
+$("ov-af").addEventListener("change", () => {
+  $("ov-af-pool").disabled = !$("ov-af").checked;
+});
+
+async function startOptimization() {
+  const dragW = parseFloat($("opt-drag-w").value);
+  const options = {
+    target_downforce_n: state.target,
+    mode: $("opt-mode").value,
+    budget: parseInt($("opt-budget").value, 10),
+    // 0 is a legal weight ("ignore drag") — don't || it away
+    drag_weight: Number.isFinite(dragW) ? dragW : 0.1,
+    opt_stack_aoa: $("ov-aoa").checked,
+    opt_deflections: $("ov-defl").checked,
+    opt_positions: $("ov-pos").checked,
+    opt_chords: $("ov-chord").checked,
+    opt_airfoils: $("ov-af").checked,
+    opt_shape: $("ov-shape").checked,
+    airfoil_pool: $("ov-af-pool").value,
+  };
+  if (state.config.elements.length === 1 &&
+      !options.opt_stack_aoa) {
+    toast("Enable at least one variable group.", "info");
+    return;
+  }
+  try {
+    const { job_id } = await api.optimize(state.config, options);
+    state.optJob = job_id;
+    state.optResult = null;
+    $("btn-opt-run").disabled = true;
+    $("btn-opt-cancel").disabled = false;
+    $("btn-opt-apply").disabled = true;
+    pollOptimizer();
+  } catch (e) {
+    toast(`Could not start optimization: ${e.message}`);
+  }
+}
+
+function pollOptimizer() {
+  clearInterval(state.optPoll);
+  state.optPoll = setInterval(async () => {
+    try {
+      const s = await api.optimizeStatus(state.optJob);
+      renderOptimizer(s);
+      if (["done", "failed", "cancelled"].includes(s.state)) {
+        clearInterval(state.optPoll);
+        $("btn-opt-run").disabled = false;
+        $("btn-opt-cancel").disabled = true;
+        if (s.state === "failed") toast(`Optimization failed: ${s.error}`);
+        if (s.best_config) {
+          state.optResult = s;
+          $("btn-opt-apply").disabled = false;
+        }
+        renderOptHints(s);
+        renderCandidates(s);
+      }
+    } catch (e) {
+      clearInterval(state.optPoll);
+      $("btn-opt-run").disabled = false;
+      $("btn-opt-cancel").disabled = true;
+      toast(`Lost the optimization job: ${e.message}`);
+    }
+  }, 700);
+}
+
+function renderOptimizer(s) {
+  const pct = Math.round((s.progress || 0) * 100);
+  $("opt-progress").style.width = pct + "%";
+  $("opt-progress").classList.toggle("done", s.state === "done");
+  const bits = [s.state === "running" ? (s.phase || "running") : s.state,
+                `${pct}%`, `${s.n_eval} evaluations`, `${s.elapsed_s}s`];
+  if (s.best) bits.push(`best ${s.best.downforce_n} N`);
+  if (s.state === "running" && s.eta_s != null && s.eta_s > 2) {
+    bits.push(`~${Math.round(s.eta_s)}s left`);
+  }
+  $("opt-status").textContent = bits.join(" · ");
+  if (s.history && s.history.length) {
+    lineChart($("opt-conv"), {
+      series: [{ name: "downforce", color: SERIES[0],
+                 x: s.history.map(h => h.eval),
+                 y: s.history.map(h => h.downforce_n) }],
+      xLabel: "evaluation", yLabel: "downforce [N]",
+      targetY: state.target, targetLabel: `target ${state.target} N`,
+      height: 128,
+    });
+    lineChart($("opt-obj"), {
+      series: [{ name: "objective", color: SERIES[2],
+                 x: s.history.map(h => h.eval),
+                 y: s.history.map(h => h.J) }],
+      xLabel: "evaluation", yLabel: "objective (log)", logY: true,
+      height: 128,
+    });
+  }
+  if (s.best && s.variables) {
+    const NAMES = { deflection_deg: "deflection", chord_ratio: "chord",
+                    slot_gap_pct: "slot gap", slot_overlap_pct: "overlap",
+                    dx: "slot dx", dy: "slot dy",
+                    shape_b25: "camber @25%", shape_b55: "camber @55%",
+                    shape_b80: "camber @80%", shape_ts: "thickness" };
+    const afRows = (s.best.airfoils || []).map((a, i) =>
+      `<div class="kv"><span>E${i + 1} airfoil</span><b>${a}</b></div>`).join("");
+    const rows = afRows + s.variables.map((v, i) => {
+      if (v.key === "airfoil_idx") return "";   // shown by name above
+      const label = v.elem == null ? "stack angle"
+        : `E${v.elem + 1} ${NAMES[v.key] || v.key}`;
+      const val = s.best.x[i];
+      const unit =
+        v.key === "slot_gap_pct" || v.key === "slot_overlap_pct"
+          ? `${val.toFixed(1)} %c`
+        : v.key === "dx" || v.key === "dy" ? `${(val * 100).toFixed(1)} %c`
+        : v.key === "chord_ratio" ? `${(val * 100).toFixed(0)} %`
+        : v.key === "shape_ts" ? `×${val.toFixed(2)}`
+        : v.key && v.key.startsWith("shape_b")
+          ? `${val >= 0 ? "+" : ""}${(val * 100).toFixed(2)} %c`
+        : `${val.toFixed(1)}°`;
+      return `<div class="kv"><span>${label}</span><b>${unit}</b></div>`;
+    }).join("");
+    $("opt-best-body").innerHTML =
+      `<div class="kv"><span>downforce</span><b>${s.best.downforce_n} N</b></div>` +
+      `<div class="kv"><span>drag estimate</span><b>${s.best.drag_n} N</b></div>` +
+      rows;
+  }
+}
+
+function renderOptHints(s) {
+  const host = $("opt-hints");
+  host.innerHTML = "";
+  if (!s.best || !s.variables || s.state === "failed") return;
+  const pinnedLo = [], pinnedHi = [];
+  s.variables.forEach((v, i) => {
+    const x = s.best.x[i], span = v.hi - v.lo;
+    const isLoad = v.key === "stack_aoa_deg" || v.key === "deflection_deg";
+    if (!isLoad || span <= 0) return;
+    const nm = v.elem == null ? "stack angle" : `E${v.elem + 1} deflection`;
+    if (x - v.lo < 0.03 * span) pinnedLo.push(nm);
+    else if (v.hi - x < 0.03 * span) pinnedHi.push(nm);
+  });
+  const target = state.target;
+  const hit = Math.abs(s.best.downforce_n - target) <= Math.max(0.02 * target, 2);
+  let msg = null;
+  if (pinnedLo.length && hit) {
+    msg = `Target reached, but ${pinnedLo.join(", ")} sat at the minimum — ` +
+          `this stack can make far more than ${target} N. For a cleaner ` +
+          `design, raise the target, drop an element, or shrink the chord.`;
+  } else if (pinnedHi.length && !hit && s.best.downforce_n < target) {
+    msg = `${pinnedHi.join(", ")} hit the maximum and the target was still ` +
+          `missed — ${target} N is beyond this stack at these conditions. ` +
+          `Add an element, enlarge the chord, or lower the target.`;
+  }
+  if (msg) {
+    const d = document.createElement("div");
+    d.className = "warning-item";
+    d.textContent = msg;
+    host.appendChild(d);
+  }
+}
+
+async function applyDesign(cfgIn) {
+  const cfg = structuredClone(cfgIn);
+  // shaped sections get a readable display name derived from their base
+  for (const e of cfg.elements) {
+    const a = e.airfoil || "";
+    if (a.startsWith("shape:") && !state.airfoilNames[a]) {
+      const base = a.split(":").slice(5).join(":");
+      state.airfoilNames[a] = `${state.airfoilNames[base] || base} (shaped)`;
+    }
+  }
+  cfg.stack_aoa_deg = Math.round(cfg.stack_aoa_deg * 100) / 100;
+  for (const e of cfg.elements) {
+    e.deflection_deg = Math.round(e.deflection_deg * 10) / 10;
+    e.chord_ratio = Math.round(e.chord_ratio * 1000) / 1000;
+    if (e.slot_gap_pct != null) e.slot_gap_pct = Math.round(e.slot_gap_pct * 10) / 10;
+    if (e.slot_overlap_pct != null) e.slot_overlap_pct = Math.round(e.slot_overlap_pct * 10) / 10;
+    if (e.dx != null) e.dx = Math.round(e.dx * 1000) / 1000;
+    if (e.dy != null) e.dy = Math.round(e.dy * 1000) / 1000;
+  }
+  state.config = cfg;
+  writeConfigToForm();
+  persistSession();
+  await refreshGeometry();
+  runAnalysis();
+}
+
+async function applyBestDesign() {
+  const s = state.optResult;
+  if (!s || !s.best_config) return;
+  await applyDesign(s.best_config);
+  toast("Optimized design applied.", "good");
+}
+
+function renderCandidates(s) {
+  const host = $("opt-candidates");
+  host.innerHTML = "";
+  const cands = s.candidates || [];
+  $("opt-cand-title").hidden = cands.length === 0;
+  cands.forEach((c) => {
+    const card = document.createElement("div");
+    card.className = "cand-card";
+    const f = c.summary || {};
+    const dn = f.downforce_n ?? c.downforce_n;
+    const drag = f.drag_total_n ?? c.drag_n;
+    const ld = f.efficiency_ld;
+    const badges =
+      (c.on_target ? "" : `<span class="badge warn">off target</span>`) +
+      (f.warnings ? `<span class="badge warn">${f.warnings} warning` +
+                    `${f.warnings > 1 ? "s" : ""}</span>` : "");
+    const head = document.createElement("div");
+    head.className = "cand-head";
+    head.innerHTML =
+      `<span><b>#${c.rank}</b> ${fmtN(dn, 0)} N · drag ${fmtN(drag, 1)} N` +
+      (ld != null ? ` · L/D ${fmtN(ld, 1)}` : "") + `</span><span>${badges}</span>`;
+    card.appendChild(head);
+
+    const body = document.createElement("div");
+    body.className = "cand-body";
+    const bits = [];
+    (c.airfoils || []).forEach((a, i) =>
+      bits.push(`E${i + 1} ${state.airfoilNames[a] || a}`));
+    const shapeByElem = {};
+    (s.variables || []).forEach((v, i) => {
+      if (v.key === "airfoil_idx") return;
+      const val = c.x[i];
+      if (v.key && v.key.startsWith("shape_")) {
+        (shapeByElem[v.elem] = shapeByElem[v.elem] || {})[v.key] = +val;
+        return;
+      }
+      if (v.key === "stack_aoa_deg") bits.push(`aoa ${(+val).toFixed(1)}°`);
+      else if (v.key === "deflection_deg")
+        bits.push(`E${v.elem + 1} defl ${(+val).toFixed(1)}°`);
+      else if (v.key === "chord_ratio")
+        bits.push(`E${v.elem + 1} chord ${(val * 100).toFixed(0)}%`);
+      else if (v.key === "slot_gap_pct")
+        bits.push(`E${v.elem + 1} gap ${(+val).toFixed(1)}%`);
+      else if (v.key === "slot_overlap_pct")
+        bits.push(`E${v.elem + 1} ovl ${(+val).toFixed(1)}%`);
+    });
+    for (const [e, p] of Object.entries(shapeByElem)) {
+      const b = ["shape_b25", "shape_b55", "shape_b80"].map(k => {
+        const v = (p[k] || 0) * 100;
+        return `${v >= 0 ? "+" : ""}${v.toFixed(2)}`;
+      });
+      bits.push(`E${+e + 1} Δcam ${b.join("/")}%c t×${(p.shape_ts ?? 1).toFixed(2)}`);
+    }
+    body.textContent = bits.join(" · ");
+    card.appendChild(body);
+
+    const btn = document.createElement("button");
+    btn.className = "btn small";
+    btn.textContent = "Apply";
+    btn.addEventListener("click", async () => {
+      busy(btn, true);
+      await applyDesign(c.config);
+      busy(btn, false);
+      toast(`Candidate #${c.rank} applied.`, "good");
+    });
+    card.appendChild(btn);
+    host.appendChild(card);
+  });
+}
+
+/* ---------------- screener tab ---------------- */
+
+function buildScreenerTargets() {
+  const sel = $("scr-elem");
+  sel.innerHTML = "";
+  state.config.elements.forEach((e, i) => {
+    const o = document.createElement("option");
+    o.value = i;
+    o.textContent = `E${i + 1} ${roleName(i)}`;
+    sel.appendChild(o);
+  });
+}
+
+function prefillScreener() {
+  const i = parseInt($("scr-elem").value || "0", 10);
+  $("scr-re").value = Math.round(elementRe(i));
+  // manufacturing constraints -> %c floor at this element's chord: both the
+  // explicit buildable minimum and the TE thickness (a section thinner than
+  // its own TE is a plate, not an airfoil)
+  const m = state.config.manufacturing;
+  if (m) {
+    const floorMm = Math.max(m.min_thickness_mm || 0,
+                             1.5 * (m.te_gap_mm || 0));
+    if (floorMm > 0) {
+      const cMm = (i === 0 ? 1 : state.config.elements[i].chord_ratio)
+                  * state.config.chord_mm;
+      const floor = Math.ceil((floorMm / cMm) * 1000) / 10;
+      $("scr-tmin").value = Math.max(parseFloat($("scr-tmin").value) || 0, floor);
+    }
+  }
+}
+$("scr-elem").addEventListener("change", prefillScreener);
+
+$("btn-screen").addEventListener("click", async () => {
+  const btn = $("btn-screen");
+  busy(btn, true);
+  $("scr-note").textContent = "screening the library…";
+  try {
+    const res = await api.screen({
+      re: parseFloat($("scr-re").value),
+      ncrit: state.config.ncrit,
+      cl_ref: parseFloat($("scr-cl").value),
+      thickness_pct_min: parseFloat($("scr-tmin").value) || 0,
+      thickness_pct_max: parseFloat($("scr-tmax").value) || 25,
+    });
+    state.screenRows = res.rows;
+    $("scr-note").textContent =
+      `${res.count} sections passed the filters — click a column to sort.`;
+    renderScreenTable();
+  } catch (e) {
+    $("scr-note").textContent = "";
+    toast(`Screening failed: ${e.message}`);
+  } finally {
+    busy(btn, false);
+  }
+});
+
+const SCR_COLS = [
+  ["spec", "airfoil"], ["CL_max", "CLmax"], ["alpha_CL_max", "α@CLmax"],
+  ["LD_max", "L/D max"], ["CL_at_LD_max", "CL@L/D"],
+  ["CD_at_CL_ref", "CD@CLref"], ["thickness_pct", "t %"],
+  ["camber_pct", "camber %"], ["confidence", "conf"],
+];
+
+function renderScreenTable() {
+  const rows = [...(state.screenRows || [])];
+  const { key, dir } = state.screenSort;
+  rows.sort((a, b) => {
+    const av = a[key], bv = b[key];
+    if (av == null) return 1;
+    if (bv == null) return -1;
+    return (av < bv ? -1 : av > bv ? 1 : 0) * dir;
+  });
+  const top = rows.slice(0, 60);
+  const host = $("scr-table");
+  const th = SCR_COLS.map(([k, label]) =>
+    `<th data-k="${k}" class="${k === key ? "sorted" : ""}">${label}</th>`).join("");
+  const trs = top.map(r => {
+    const tds = SCR_COLS.map(([k]) => {
+      let v = r[k];
+      if (v == null) v = "–";
+      return `<td>${v}</td>`;
+    }).join("");
+    return `<tr>${tds}<td><button class="btn ghost" data-use="${r.spec}">Use</button></td></tr>`;
+  }).join("");
+  host.innerHTML =
+    `<table class="data-table"><thead><tr>${th}<th></th></tr></thead>` +
+    `<tbody>${trs}</tbody></table>`;
+  host.querySelectorAll("th[data-k]").forEach((h) => {
+    h.addEventListener("click", () => {
+      const k = h.dataset.k;
+      state.screenSort = {
+        key: k,
+        dir: state.screenSort.key === k ? -state.screenSort.dir
+          : (k === "spec" || k === "CD_at_CL_ref" ? 1 : -1),
+      };
+      renderScreenTable();
+    });
+  });
+  host.querySelectorAll("button[data-use]").forEach((b) => {
+    b.addEventListener("click", () => {
+      const idx = parseInt($("scr-elem").value || "0", 10);
+      selectAirfoil(idx, b.dataset.use, b.dataset.use);
+      toast(`E${idx + 1} set to ${b.dataset.use}.`, "good");
+    });
+  });
+}
+
+/* ---------------- export tab ---------------- */
+
+let lastExport = null;   // {path, dir, filename, fmt}
+
+document.querySelectorAll("[data-export]").forEach((b) => {
+  b.addEventListener("click", async () => {
+    busy(b, true);
+    const fmt = b.dataset.export;
+    const options = { frame: $("exp-frame").value, entity: $("exp-entity").value };
+    try {
+      const saved = await api.exportSave(fmt, state.config, options);
+      lastExport = { ...saved, fmt, options };
+      $("exp-dlg-name").textContent = saved.filename;
+      $("exp-dlg-size").textContent = `${(saved.size_bytes / 1024).toFixed(1)} kB`;
+      $("exp-dlg-path").textContent = saved.path;
+      $("export-dialog").showModal();
+    } catch (e) {
+      toast(`Export failed: ${e.message}`);
+    } finally {
+      busy(b, false);
+    }
+  });
+});
+
+$("exp-dlg-reveal").addEventListener("click", async () => {
+  if (!lastExport) return;
+  try {
+    await api.exportReveal(lastExport.path);
+  } catch (e) {
+    toast(`Could not open the folder: ${e.message}`);
+  }
+});
+$("exp-dlg-download").addEventListener("click", async () => {
+  if (!lastExport) return;
+  busy($("exp-dlg-download"), true);
+  try {
+    await downloadExport(lastExport.fmt, state.config, lastExport.options);
+  } catch (e) {
+    toast(`Download failed: ${e.message}`);
+  } finally {
+    busy($("exp-dlg-download"), false);
+  }
+});
+$("exp-dlg-close").addEventListener("click", () => $("export-dialog").close());
+
+/* ---------------- presets + project files ---------------- */
+
+async function loadPresets() {
+  try {
+    const { presets } = await api.presets();
+    const sel = $("preset-select");
+    presets.forEach((p, i) => {
+      const o = document.createElement("option");
+      o.value = i;
+      o.textContent = p.name;
+      o.title = p.description;
+      sel.appendChild(o);
+    });
+    sel.addEventListener("change", () => {
+      if (sel.value === "") return;
+      const p = presets[+sel.value];
+      state.config = withDefaults(structuredClone(p.config));
+      state.target = p.target_downforce_n ?? state.target;
+      writeConfigToForm();
+      persistSession();
+      refreshGeometry().then(runAnalysis);
+      sel.value = "";
+    });
+  } catch { /* presets are optional */ }
+}
+
+$("btn-save").addEventListener("click", async () => {
+  const custom = {};
+  for (const spec of usedCustomSpecs()) {
+    if (state.customDat[spec]) {
+      custom[spec] = state.customDat[spec];
+    } else {
+      // uploaded in an earlier session: rebuild the .dat from server coords
+      try {
+        const g = await api.airfoil(spec);
+        custom[spec] = g.name + "\n" +
+          g.coords.map(p => ` ${p[0].toFixed(6)} ${p[1].toFixed(6)}`).join("\n") + "\n";
+        state.customDat[spec] = custom[spec];
+      } catch {
+        toast(`Could not embed ${spec} in the project file — re-upload it ` +
+              `before saving.`, "err", 8000);
+        return;
+      }
+    }
+  }
+  const blob = new Blob([JSON.stringify({
+    app: "wing-section-studio", version: 1,
+    config: state.config, target_downforce_n: state.target,
+    airfoil_names: state.airfoilNames, custom_airfoils: custom,
+  }, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "wing_section_project.json";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+});
+
+$("btn-open").addEventListener("click", () => $("file-project").click());
+$("file-project").addEventListener("change", async () => {
+  const f = $("file-project").files[0];
+  $("file-project").value = "";
+  if (!f) return;
+  try {
+    const p = JSON.parse(await f.text());
+    if (!p.config?.elements) throw new Error("not a project file");
+    // re-register embedded custom airfoils; server may assign new ids
+    const remap = {};
+    for (const [spec, dat] of Object.entries(p.custom_airfoils || {})) {
+      const up = await api.uploadAirfoil(spec.split(":")[1], dat);
+      remap[spec] = up.spec;
+      state.customDat[up.spec] = dat;
+      state.airfoilNames[up.spec] = up.name;
+    }
+    for (const e of p.config.elements) {
+      if (remap[e.airfoil]) { e.airfoil = remap[e.airfoil]; continue; }
+      // custom base wrapped in shape:/mfg: — remap the embedded slug
+      const m = String(e.airfoil || "").match(/custom:[a-z0-9_-]+$/);
+      if (m && remap[m[0]]) e.airfoil = e.airfoil.replace(m[0], remap[m[0]]);
+    }
+    Object.assign(state.airfoilNames, p.airfoil_names || {});
+    state.config = withDefaults(p.config);
+    state.target = p.target_downforce_n ?? 250;
+    writeConfigToForm();
+    persistSession();
+    await refreshGeometry();
+    runAnalysis();
+    toast("Project loaded.", "good");
+  } catch (e) {
+    toast(`Could not open project: ${e.message}`);
+  }
+});
+
+/* ---------------- dialogs, health ---------------- */
+
+$("btn-model-notes").addEventListener("click", () =>
+  $("model-dialog").showModal());
+
+async function checkHealth() {
+  try {
+    await api.health();
+    $("server-dot").classList.add("ok");
+    $("server-dot").classList.remove("err");
+  } catch {
+    $("server-dot").classList.add("err");
+    $("server-dot").classList.remove("ok");
+  }
+}
+
+/* ---------------- boot ---------------- */
+
+async function restoreSession() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem("wss-session")); } catch {}
+  if (!saved?.config?.elements?.length) return false;
+  try {
+    // uploaded airfoils live in server memory: re-register any the session used
+    const remap = {};
+    for (const [spec, dat] of Object.entries(saved.custom_airfoils || {})) {
+      try {
+        const up = await api.uploadAirfoil(spec.split(":")[1], dat);
+        remap[spec] = up.spec;
+        state.customDat[up.spec] = dat;
+        state.airfoilNames[up.spec] = up.name;
+      } catch { /* leave the old spec; geometry will report it clearly */ }
+    }
+    for (const e of saved.config.elements) {
+      if (remap[e.airfoil]) { e.airfoil = remap[e.airfoil]; continue; }
+      const m = String(e.airfoil || "").match(/custom:[a-z0-9_-]+$/);
+      if (m && remap[m[0]]) e.airfoil = e.airfoil.replace(m[0], remap[m[0]]);
+    }
+    Object.assign(state.airfoilNames, saved.airfoil_names || {});
+    state.config = withDefaults(saved.config);
+    if (Number.isFinite(saved.target)) state.target = saved.target;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function boot() {
+  bindConfigInputs();
+  bindManufacturing();
+  loadPresets();
+  checkHealth();
+  setInterval(checkHealth, 20000);
+  setFrame("installed");
+
+  const restored = await restoreSession();
+  writeConfigToForm();
+  // draw the section, but leave analysis to the user — the results panel
+  // explains the two actions
+  refreshGeometry();
+
+  if (restored) {
+    toast("Continuing where you left off — use Load preset… to start fresh.",
+          "info", 6500);
+  } else if (!localStorage.getItem("wss-hint-dismissed")) {
+    $("vp-hint").hidden = false;
+  }
+  $("vp-hint-close").addEventListener("click", () => {
+    $("vp-hint").hidden = true;
+    localStorage.setItem("wss-hint-dismissed", "1");
+  });
+  $("hero-info").addEventListener("click", () => $("model-dialog").showModal());
+}
+
+boot();
