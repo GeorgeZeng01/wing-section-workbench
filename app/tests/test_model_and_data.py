@@ -254,6 +254,38 @@ def main():
           {"design", "installed", "warnings"} <= set(full["geometry"])
           and all("coords" in e for e in full["geometry"]["design"]))
 
+    # ---- 11. operating-map sweep ----
+    cfg_s = geometry.StackConfig.from_dict({**DEFAULT,
+                                            "n_panels_per_side": 40})
+    hs_s = [7.0, 12.0, 20.0, 30.0, 45.0, 65.0, 90.0, 120.0]
+    sw = analysis.sweep(cfg_s, "ride_height_mm", hs_s)
+    pts = sw["points"]
+    check("sweep points return finite downforce",
+          len(pts) == len(hs_s) and sw["n_panels_per_side_used"] == 40
+          and all("error" not in p and np.isfinite(p["downforce_n"])
+                  for p in pts))
+    dns = [p["downforce_n"] for p in pts]
+    ipk = int(np.argmax(dns))
+    check("ride-height sweep peak is interior",
+          0 < ipk < len(hs_s) - 1,
+          f"(peak {dns[ipk]} N at {hs_s[ipk]:.0f} mm)")
+    check("per-point k_g varies across ride height",
+          len({p["k_ground_realization"] for p in pts}) > 1)
+    try:
+        analysis.sweep(cfg_s, "chord_mm", [300.0, 350.0])
+        check("invalid sweep variable rejected", False)
+    except ValueError:
+        check("invalid sweep variable rejected", True)
+    try:
+        analysis.sweep(cfg_s, "ride_height_mm", [float(v) for v in range(10, 51)])
+        check("oversized sweep rejected", False)
+    except ValueError:
+        check("oversized sweep rejected", True)
+    sw_v = analysis.sweep(cfg_s, "speed_ms", [8.0, 12.0, 16.0, 20.0, 24.0, 28.0])
+    dn_v = [p["downforce_n"] for p in sw_v["points"]]
+    check("downforce increases monotonically with speed",
+          all(a < b for a, b in zip(dn_v, dn_v[1:])), f"({dn_v})")
+
     print(f"\n{sum(results)}/{len(results)} model/data checks passed")
     return all(results)
 

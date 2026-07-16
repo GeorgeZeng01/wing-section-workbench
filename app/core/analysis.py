@@ -51,6 +51,8 @@ when available.
 
 from __future__ import annotations
 
+import dataclasses
+
 import numpy as np
 
 from . import geometry, panel, viscous
@@ -354,4 +356,127 @@ def quick_objective_eval(cfg: StackConfig, model_size: str = "large") -> dict:
         "load_excess_ground": load_excess_ground,
         "gaps": gaps,
         "overlaps": overlaps,
+    }
+
+
+SWEEP_VARIABLES = ("ride_height_mm", "speed_ms")
+SWEEP_MAX_POINTS = 40
+SWEEP_MAX_PANELS = 60   # per-point solves stay fast at map resolution
+
+
+def _sweep_point(cfg: StackConfig, design: list[dict], installed: list[dict],
+                 free, ground, model_size: str) -> dict:
+    """One operating-map point: the force/efficiency slice of analyze().
+
+    Same model, same numbers — just without plots, geometry payload or
+    warning prose. n_warnings counts the messages analyze() would emit."""
+    c_free, c_ground = -free.Cl, -ground.Cl
+    c_est, k_g, r_gain = corrected_downforce(c_free, c_ground, cfg)
+
+    q = cfg.q_pa
+    area = cfg.chord_m * (cfg.span_mm / 1000.0)
+    downforce_n = q * area * c_est * cfg.efficiency_3d
+
+    cd_stack = 0.0
+    frac_ground_max = 0.0
+    n_warnings = 0
+    ground_hot = 0
+    for i, e in enumerate(design):
+        c_ratio = e["chord_ratio"]
+        re_e = cfg.element_re(i)
+        spec_v = e.get("airfoil_eff", e["airfoil"])
+        cl_free = -free.elements[i]["Cy"] / c_ratio
+        cl_ground = -ground.elements[i]["Cy"] / c_ratio
+        cl_check = cl_free * cfg.viscous_efficiency
+        lim = viscous.cl_limit(spec_v, re_e, cfg.ncrit, model_size)
+        frac = cl_check / lim["CL_max"] if lim["CL_max"] > 1e-6 else 99.0
+        cl_op = cfg.viscous_efficiency * (cl_free + r_gain * (cl_ground - cl_free))
+        frac_ground = cl_op / lim["CL_max"] if lim["CL_max"] > 1e-6 else 99.0
+        frac_ground_max = max(frac_ground_max, frac_ground)
+        op = viscous.operating_point(spec_v, re_e,
+                                     min(cl_op, 0.95 * lim["CL_max"]),
+                                     cfg.ncrit, model_size)
+        cd_stack += op["CD"] * c_ratio
+        if frac > LOAD_WARN:
+            n_warnings += 1                       # free-air loading message
+            if lim.get("at_grid_edge"):
+                n_warnings += 1                   # CL_max lower-bound caveat
+        if frac_ground > GROUND_CL_ALLOWANCE:
+            ground_hot += 1
+    if ground_hot:
+        n_warnings += 1                           # combined allowance message
+
+    drag_profile_n = q * area * cd_stack
+    drag_induced, _ = induced_drag_n(downforce_n, cfg, installed)
+    drag_total_n = drag_profile_n + drag_induced
+    return {
+        "downforce_n": round(downforce_n, 1),
+        "drag_total_n": round(drag_total_n, 2),
+        "drag_induced_n": round(drag_induced, 2),
+        "drag_profile_n": round(drag_profile_n, 2),
+        "efficiency_ld": round(downforce_n / drag_total_n, 2)
+            if drag_total_n > 1e-9 else None,
+        "C_downforce_estimated": round(c_est, 4),
+        "k_ground_realization": round(k_g, 3),
+        "loading_fraction_ground_max": round(frac_ground_max, 3),
+        "n_warnings": n_warnings,
+    }
+
+
+def sweep(cfg: StackConfig, variable: str, values: list[float],
+          model_size: str = "large") -> dict:
+    """Operating map: re-evaluate the design across ride height or speed.
+
+    The section geometry never changes along either sweep, so the stack is
+    built once. A ride-height sweep re-installs and re-solves the panel
+    system per point (the ground image moves); a speed sweep reuses ONE
+    inviscid solution (it is speed-independent) and only the Reynolds-number
+    lookups and dynamic pressure vary. Points that fail the config bounds are
+    skipped with a per-point "error" entry — dataclasses.replace() bypasses
+    from_dict validation, so each value is re-checked here.
+    """
+    if variable not in SWEEP_VARIABLES:
+        raise ValueError(f"sweep variable must be one of {SWEEP_VARIABLES}")
+    if len(values) > SWEEP_MAX_POINTS:
+        raise ValueError(f"sweep is capped at {SWEEP_MAX_POINTS} points "
+                         f"({len(values)} requested)")
+    n_used = min(cfg.n_panels_per_side, SWEEP_MAX_PANELS)
+    base = dataclasses.replace(cfg, n_panels_per_side=n_used)
+    design = geometry.build_stack(base)
+    if any(e.get("intersects") for e in design):
+        raise ValueError("elements intersect — fix the slot geometry before "
+                         "sweeping")
+
+    fixed = None   # speed sweep: (installed, free, ground), solved once
+    if variable == "speed_ms":
+        installed = geometry.install_stack(design, base.ride_height_c)
+        coords = [e["coords"] for e in installed]
+        fixed = (installed, *panel.solve_pair(coords, 0.0))
+
+    points = []
+    for v in values:
+        pt_cfg = dataclasses.replace(base, **{variable: float(v)})
+        try:
+            geometry._validate(pt_cfg)
+        except ValueError as e:
+            points.append({"value": float(v), "error": str(e)})
+            continue
+        if fixed is not None:
+            installed, free, ground = fixed
+        else:
+            installed = geometry.install_stack(design, pt_cfg.ride_height_c)
+            coords = [e["coords"] for e in installed]
+            try:
+                free, ground = panel.solve_pair(coords, 0.0)
+            except np.linalg.LinAlgError:
+                points.append({"value": float(v),
+                               "error": "panel system is singular"})
+                continue
+        points.append({"value": float(v),
+                       **_sweep_point(pt_cfg, design, installed, free,
+                                      ground, model_size)})
+    return {
+        "variable": variable,
+        "n_panels_per_side_used": n_used,
+        "points": points,
     }

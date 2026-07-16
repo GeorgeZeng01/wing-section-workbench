@@ -654,6 +654,58 @@ interior peak, monotone force reduction), an analysis payload contract for
 every field the UI reads, cache-staleness for edited .dat files, and a
 loud SKIP when XFOIL is not installed.
 
+## Roadmap execution
+
+**Off-design behaviour as a sweep tab (operating maps), not a multi-point
+optimizer objective.** A design tuned at one ride height can be wrong across
+the travel, and the bounded estimate model now predicts a force-reduction
+peak that a single-point analysis never shows. Options: (a) fold multiple
+operating points into the optimizer objective (a weighted sum over ride
+heights and speeds) — rejected for now: this is a screening tool, and a
+multi-point weighting hides the trade-off inside coefficients the user must
+guess at; (b) a Maps tab that sweeps the analyzed design across ride height
+or speed and plots the result (chosen) — the single-point objective stays
+honest and the trade-off stays in the user's hands, visible on a chart.
+`sweep()` re-evaluates the same force/efficiency model at up to 40 points
+with paneling capped at 60/side (the cap is reported in the payload); the
+UI charts downforce and L/D against the swept value, marks the current
+operating point and the downforce peak, and flags swept points past the 2×
+ground-loading allowance as model-optimistic ("treat as upper bounds").
+Speed sweeps reuse one inviscid solution — it is speed-independent; only
+Reynolds numbers and dynamic pressure vary. Measured: the default
+two-element template peaks at ~20 mm ride height (h/c ≈ 0.057), 234.7 N,
+L/D 8.7 — the Zerihan & Zhang shape, now directly visible; a 23-point
+ride-height sweep takes ~1.6 s.
+
+**OpenFOAM case export, meshed with gmsh through its Python API.** The
+roadmap's first two items (2D mesh generator, RANS case template) shipped
+as one exporter: the OpenFOAM card in the Export tab writes a complete,
+ready-to-run simpleFoam k-ω SST case for the installed section. Options for
+meshing: (a) snappyHexMesh — needs a 3D STL pipeline and a dictionary stack
+an order of magnitude more fragile than the geometry deserves; (b) an
+in-repo structured multi-block mesher — months of work; (c) gmsh via its
+Python API (chosen) — pip-installable, boundary-layer fields, and direct
+physical-group control over the patches. Ground BC options: a slip wall
+(no ground boundary layer at all — wrong physics under the wing), a
+stationary no-slip wall (grows a spurious boundary layer upstream — the
+wrong reference frame), or a no-slip wall moving at the freestream speed
+(chosen — the road in the wing-fixed frame). y+ strategy: wall functions on
+a y+ ≈ 30 first cell would cut the cell count but smear the very slot and
+ground-gap gradients the case exists to resolve, so the first layer is
+sized for y+ ≈ 1 from the flat-plate correlation at the config's Reynolds
+number — with y+-adaptive wall treatment in the 0/* fields, so the
+pure-refinement fallback mesh (gmsh's BoundaryLayer field is its fragile
+corner) runs the identical case. The boundary-layer stack is auto-capped at
+40 % of the tightest clearance in the geometry, so opposing layers never
+collide across a slot or the ground gap. Presets land ~15k / ~40k / ~90k
+cells (coarse/medium/fine). The exported case is the roadmap's "truth
+model" handoff made concrete — panel/NeuralFoil screen, RANS decides:
+`run.sh` sources the newest WSL OpenFOAM environment (before enabling shell
+strictness — the documented pitfall), converts and checks the mesh, runs
+the solver, and greps the final downforce-positive, main-chord-referenced
+coefficients into `results.txt`, ready to recalibrate `eta_visc`/`k_g`
+against.
+
 ## Known limitations
 
 Documented, not fixed. The custom-airfoil registry lives in server memory

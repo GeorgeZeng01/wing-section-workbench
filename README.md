@@ -193,10 +193,15 @@ Find `<your-username>` with `wsl -d Ubuntu -- whoami`.
 
 ## Roadmap
 
-- [ ] gmsh-based 2D mesh generator around the exported stack (`pip install
-      gmsh`, Python API) with a moving-ground boundary and y+ ≈ 1 wall layers
-- [ ] OpenFOAM case template: `simpleFoam`, k-ω SST, moving ground + rotating
-      wheels excluded (2D section first), automated Cl/Cd extraction
+- [x] gmsh-based 2D mesh generator around the exported stack — shipped as
+      the app's CFD exporter (`app/core/cfd.py`): unstructured mesh with
+      y+ ≈ 1 wall layers on the wing and the ground under it, three
+      resolution presets (~15k/40k/90k cells)
+- [x] OpenFOAM case template: `simpleFoam`, k-ω SST, moving ground +
+      rotating wheels excluded (2D section first), automated Cl/Cd
+      extraction — shipped in the same exporter: **Export → OpenFOAM case**
+      writes a complete case with a WSL run script; `results.txt` carries
+      the downforce-positive coefficients (see app/README.md, RANS handoff)
 - [ ] Optimizer loop: NeuralFoil/panel pre-screen → RANS on the shortlist
       (scipy/optuna; AeroSandbox's CasADi optimizer for the smooth parts)
 - [ ] Validation anchor: Zerihan & Zhang single-element ground-effect data,

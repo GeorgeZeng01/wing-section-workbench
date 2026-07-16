@@ -39,11 +39,15 @@ export const api = {
   optimizeStatus: (id) => request("GET", `/api/optimize/${id}`),
   optimizeCancel: (id) => request("POST", `/api/optimize/${id}/cancel`),
   screen: (body) => request("POST", "/api/screen", body),
+  sweep: (config, variable, values) =>
+    request("POST", "/api/sweep", { config, variable, values }),
   presets: () => request("GET", "/api/presets"),
   session: () => request("GET", "/api/session"),
   sessionSave: (state) => request("POST", "/api/session", { state }),
   exportSave: (fmt, config, options = {}) =>
     request("POST", `/api/export/${fmt}/save`, { config, ...options }),
+  exportCfd: (config, meshSize) =>
+    request("POST", "/api/export/cfd/save", { config, mesh_size: meshSize }),
   exportReveal: (path) => request("POST", "/api/export/reveal", { path }),
 };
 

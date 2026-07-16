@@ -1196,6 +1196,111 @@ function renderScreenTable() {
   });
 }
 
+/* ---------------- maps tab ---------------- */
+
+const MAP_DEFAULTS = {
+  ride_height_mm: { from: 10, to: 120, steps: 23 },
+  speed_ms: { from: 5, to: 30, steps: 26 },
+};
+const MAP_LABELS = { ride_height_mm: "ride height [mm]", speed_ms: "speed [m/s]" };
+const MAP_UNITS = { ride_height_mm: "mm", speed_ms: "m/s" };
+
+$("map-var").addEventListener("change", () => {
+  const d = MAP_DEFAULTS[$("map-var").value];
+  $("map-from").value = d.from;
+  $("map-to").value = d.to;
+  $("map-steps").value = d.steps;
+});
+
+$("btn-sweep").addEventListener("click", runSweep);
+
+async function runSweep() {
+  const btn = $("btn-sweep");
+  const variable = $("map-var").value;
+  const from = parseFloat($("map-from").value);
+  const to = parseFloat($("map-to").value);
+  const steps = Math.round(parseFloat($("map-steps").value));
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from === to) {
+    toast("Give the sweep two distinct from/to values.", "info");
+    return;
+  }
+  if (!Number.isFinite(steps) || steps < 2 || steps > 40) {
+    toast("Steps must be between 2 and 40.", "info");
+    return;
+  }
+  const values = Array.from({ length: steps }, (_, i) =>
+    +(from + ((to - from) * i) / (steps - 1)).toFixed(4));
+  busy(btn, true);
+  $("map-note").textContent = "sweeping…";
+  try {
+    const res = await api.sweep(state.config, variable, values);
+    renderSweep(res);
+  } catch (e) {
+    $("map-note").textContent = "";
+    toast(`Sweep failed: ${e.message}`);
+  } finally {
+    busy(btn, false);
+  }
+}
+
+function renderSweep(res) {
+  const variable = res.variable;
+  const xLabel = MAP_LABELS[variable] || variable;
+  const unit = MAP_UNITS[variable] || "";
+  const pts = res.points.filter(p => !p.error && Number.isFinite(p.downforce_n));
+  const skipped = res.points.length - pts.length;
+  $("map-allowance").hidden = true;
+  if (!pts.length) {
+    $("map-note").textContent =
+      "no valid sweep points — every value failed validation";
+    return;
+  }
+  const xs = pts.map(p => p.value);
+  const dn = pts.map(p => p.downforce_n);
+  let ipk = 0;
+  dn.forEach((v, i) => { if (v > dn[ipk]) ipk = i; });
+
+  // current operating point, interpolated onto the sweep
+  const series = [
+    { name: "downforce", color: SERIES[0], x: xs, y: dn, markers: true },
+    { name: "peak", color: "#fab219", markers: "only",
+      x: [xs[ipk]], y: [dn[ipk]] },
+  ];
+  const cur = state.config[variable];
+  for (let i = 0; i + 1 < xs.length; i++) {
+    if ((cur - xs[i]) * (cur - xs[i + 1]) <= 0 && xs[i] !== xs[i + 1]) {
+      const t = (cur - xs[i]) / (xs[i + 1] - xs[i]);
+      series.push({ name: "current", color: "#e9edf6", markers: "only",
+                    x: [cur], y: [dn[i] + t * (dn[i + 1] - dn[i])] });
+      break;
+    }
+  }
+  lineChart($("map-downforce"), {
+    series, xLabel, yLabel: "downforce [N]", height: 205,
+  });
+  lineChart($("map-ld"), {
+    series: [{ name: "L/D", color: SERIES[2], x: xs,
+               y: pts.map(p => p.efficiency_ld), markers: true }],
+    xLabel, yLabel: "L/D estimate", height: 205,
+  });
+
+  // points past the ground-loading allowance carry an optimistic estimate
+  const hot = pts.filter(p => p.loading_fraction_ground_max > 2);
+  if (hot.length) {
+    const hx = hot.map(p => p.value);
+    $("map-allowance").textContent =
+      `${hot.length} of ${pts.length} points (${Math.min(...hx)}–` +
+      `${Math.max(...hx)} ${unit}) push element loading past 2× the ` +
+      `isolated stall limit — the model is optimistic there; treat those ` +
+      `downforce values as upper bounds.`;
+    $("map-allowance").hidden = false;
+  }
+  $("map-note").textContent =
+    `peak ${fmtN(dn[ipk], 0)} N at ${fmtN(xs[ipk], 1)} ${unit}` +
+    (skipped ? ` · ${skipped} point${skipped > 1 ? "s" : ""} skipped` : "") +
+    ` · ${res.n_panels_per_side_used} panels/side`;
+}
+
 /* ---------------- export tab ---------------- */
 
 let lastExport = null;   // {path, dir, filename, fmt}
@@ -1211,6 +1316,7 @@ document.querySelectorAll("[data-export]").forEach((b) => {
       $("exp-dlg-name").textContent = saved.filename;
       $("exp-dlg-size").textContent = `${(saved.size_bytes / 1024).toFixed(1)} kB`;
       $("exp-dlg-path").textContent = saved.path;
+      $("exp-dlg-download").hidden = false;
       $("export-dialog").showModal();
     } catch (e) {
       toast(`Export failed: ${e.message}`);
@@ -1218,6 +1324,27 @@ document.querySelectorAll("[data-export]").forEach((b) => {
       busy(b, false);
     }
   });
+});
+
+$("btn-export-cfd").addEventListener("click", async () => {
+  const b = $("btn-export-cfd");
+  busy(b, true);
+  try {
+    const saved = await api.exportCfd(state.config, $("exp-cfd-mesh").value);
+    // a case is a folder, not a downloadable file: fmt null hides Download
+    lastExport = { ...saved, fmt: null };
+    const s = saved.summary;
+    $("exp-dlg-name").textContent = saved.filename;
+    $("exp-dlg-size").textContent =
+      `${s.n_cells.toLocaleString()} cells, y+ ≈ ${s.y_plus_est}`;
+    $("exp-dlg-path").textContent = saved.path;
+    $("exp-dlg-download").hidden = true;
+    $("export-dialog").showModal();
+  } catch (e) {
+    toast(`Case generation failed: ${e.message}`);
+  } finally {
+    busy(b, false);
+  }
 });
 
 $("exp-dlg-reveal").addEventListener("click", async () => {
@@ -1229,7 +1356,7 @@ $("exp-dlg-reveal").addEventListener("click", async () => {
   }
 });
 $("exp-dlg-download").addEventListener("click", async () => {
-  if (!lastExport) return;
+  if (!lastExport || !lastExport.fmt) return;
   busy($("exp-dlg-download"), true);
   try {
     await downloadExport(lastExport.fmt, state.config, lastExport.options);

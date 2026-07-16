@@ -117,6 +117,11 @@ class ExportBody(BaseModel):
     include_analysis: bool = True
 
 
+class CfdExportBody(BaseModel):
+    config: dict
+    mesh_size: Literal["coarse", "medium", "fine"] = "medium"
+
+
 def _err_detail(e: BaseException) -> str:
     # KeyError stringifies with quotes around its message — strip them
     return str(e.args[0]) if (isinstance(e, KeyError) and e.args) else str(e)
@@ -218,6 +223,29 @@ def analyze(body: ConfigBody):
     except (ValueError, KeyError) as e:
         # KeyError: an element airfoil spec that no longer resolves (e.g. a
         # custom upload lost to a restart) — a client-fixable condition
+        raise HTTPException(422, detail=_err_detail(e))
+    except np.linalg.LinAlgError:
+        raise HTTPException(422, detail="panel system is singular — geometry "
+                                        "may be self-intersecting or touching "
+                                        "the ground")
+
+
+class SweepBody(BaseModel):
+    config: dict
+    variable: str
+    values: list[float] = Field(min_length=2, max_length=40)
+
+
+@app.post("/api/sweep")
+def sweep(body: SweepBody):
+    """Operating map: the design evaluated across ride height or speed."""
+    if body.variable not in analysis.SWEEP_VARIABLES:
+        raise HTTPException(422, detail=f"variable must be one of "
+                                        f"{list(analysis.SWEEP_VARIABLES)}")
+    cfg = _cfg(body.config)
+    try:
+        return analysis.sweep(cfg, body.variable, body.values)
+    except (ValueError, KeyError) as e:
         raise HTTPException(422, detail=_err_detail(e))
     except np.linalg.LinAlgError:
         raise HTTPException(422, detail="panel system is singular — geometry "
@@ -329,6 +357,36 @@ def export_reveal(body: RevealBody):
     else:
         subprocess.Popen(["xdg-open", str(p.parent)])
     return {"ok": True}
+
+
+@app.post("/api/export/cfd/save")   # before /api/export/{fmt}/save
+def export_cfd_save(body: CfdExportBody):
+    """Generate a ready-to-run OpenFOAM 2D RANS case under exports/.
+
+    gmsh meshing runs behind cfd's module lock — the library is global
+    C state and calls must not overlap."""
+    import time as _time
+
+    from .core import cfd
+    cfg = _cfg(body.config)
+    EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = _time.strftime("%Y%m%d-%H%M%S")
+    case = EXPORTS_DIR / f"cfd_case_{stamp}"
+    k = 2
+    while case.exists():
+        case = EXPORTS_DIR / f"cfd_case_{stamp}-{k}"
+        k += 1
+    try:
+        summary = cfd.build_case(cfg, case, body.mesh_size)
+    except (ValueError, KeyError, cfd.MeshError) as e:
+        import shutil
+        shutil.rmtree(case, ignore_errors=True)   # no half-written cases
+        detail = _err_detail(e)
+        if isinstance(e, cfd.MeshError):
+            detail = f"mesh generation failed: {detail}"
+        raise HTTPException(422, detail=detail)
+    return {"filename": case.name, "path": str(case),
+            "dir": str(EXPORTS_DIR), "summary": summary}
 
 
 @app.post("/api/export/{fmt}")

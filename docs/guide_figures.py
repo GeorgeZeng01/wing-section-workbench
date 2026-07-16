@@ -421,6 +421,45 @@ def fig_optimizer(out: Path):
     return _save(fig, out, "optimizer")
 
 
+def fig_maps(out: Path):
+    """A real operating map: the Maps tab's ride-height sweep of the
+    default template, produced by the same analysis.sweep the app calls."""
+    cfg = geometry.StackConfig.from_dict(DEMO)
+    values = list(np.linspace(10, 120, 23))
+    res = analysis.sweep(cfg, "ride_height_mm", values)
+    pts = [p for p in res["points"] if "error" not in p]
+    x = np.array([p["value"] for p in pts])
+    dn = np.array([p["downforce_n"] for p in pts])
+    ld = np.array([p["efficiency_ld"] for p in pts])
+    ipk = int(np.argmax(dn))
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(6.6, 2.7))
+    ax1.plot(x, dn, "o-", color=BLUE, lw=1.5, ms=3.2, zorder=3)
+    ax1.scatter([x[ipk]], [dn[ipk]], s=46, color=GOLD, zorder=5)
+    ax1.annotate(f"peak {dn[ipk]:.0f} N @ {x[ipk]:.0f} mm",
+                 (x[ipk], dn[ipk]), (x[ipk] + 16, dn[ipk] - 4),
+                 fontsize=7.5, color=INK, ha="left", va="top",
+                 arrowprops=dict(arrowstyle="-", color=INK3, lw=0.7))
+    ax1.axvline(DEMO["ride_height_mm"], color=INK3, lw=0.8, ls=":", zorder=1)
+    ax1.text(DEMO["ride_height_mm"] + 2, float(dn.min()), "current",
+             fontsize=7, color=INK3, ha="left", va="bottom")
+    _style(ax1)
+    ax1.set_xlabel("ride height  (mm)")
+    ax1.set_ylabel("downforce  (N)")
+    ax1.set_title("Downforce peaks, then falls toward the road", loc="left",
+                  fontsize=8.5, fontweight="bold", color=INK)
+
+    ax2.plot(x, ld, "o-", color=GREEN, lw=1.5, ms=3.2, zorder=3)
+    ax2.axvline(DEMO["ride_height_mm"], color=INK3, lw=0.8, ls=":", zorder=1)
+    _style(ax2)
+    ax2.set_xlabel("ride height  (mm)")
+    ax2.set_ylabel("L/D estimate")
+    ax2.set_title("Efficiency across the travel", loc="left",
+                  fontsize=8.5, fontweight="bold", color=INK)
+    fig.tight_layout()
+    return _save(fig, out, "maps")
+
+
 # ------------------------------------------------ schematic diagrams
 
 def _box(ax, xy, w, h, title, fill, ec, sub=None, fs=8.5, tc=None):
@@ -564,6 +603,7 @@ ALL = [
     fig_architecture, fig_pipeline, fig_spec_chain, fig_slot_definition,
     fig_panel_method, fig_cp, fig_ground_model, fig_induced, fig_loading,
     fig_te_treatment, fig_thickness_floor, fig_shaping, fig_optimizer,
+    fig_maps,
 ]
 
 

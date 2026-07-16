@@ -6,7 +6,7 @@
 <title>Wing Section Studio</title>
 <link rel="icon" href="/static/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" href="/static/favicon.png">
-<link rel="stylesheet" href="/static/css/app.css?v=7">
+<link rel="stylesheet" href="/static/css/app.css?v=8">
 </head>
 <body>
 
@@ -205,6 +205,7 @@
       <button class="tab" data-tab="polars" role="tab">Polars</button>
       <button class="tab" data-tab="optimizer" role="tab">Optimizer</button>
       <button class="tab" data-tab="screener" role="tab">Airfoil screener</button>
+      <button class="tab" data-tab="maps" role="tab">Maps</button>
       <button class="tab" data-tab="export" role="tab">Export</button>
     </nav>
 
@@ -314,6 +315,30 @@
       </div>
     </div>
 
+    <div id="tab-maps" class="tab-page" role="tabpanel">
+      <div class="tab-controls">
+        <label class="field inline"><span class="f-label">Variable</span>
+          <span class="f-wrap"><select id="map-var" class="select-inline">
+            <option value="ride_height_mm">Ride height [mm]</option>
+            <option value="speed_ms">Speed [m/s]</option>
+          </select><i></i></span></label>
+        <label class="field inline"><span class="f-label">From</span>
+          <span class="f-wrap"><input id="map-from" type="number" step="1" value="10"><i></i></span></label>
+        <label class="field inline"><span class="f-label">To</span>
+          <span class="f-wrap"><input id="map-to" type="number" step="1" value="120"><i></i></span></label>
+        <label class="field inline"><span class="f-label">Steps</span>
+          <span class="f-wrap"><input id="map-steps" type="number" step="1" min="2" max="40" value="23"><i></i></span></label>
+        <button id="btn-sweep" class="btn small">Sweep</button>
+        <span id="map-note" class="note">Sweep ride height or speed to map
+          how the current design behaves away from its operating point.</span>
+      </div>
+      <div class="chart-pair">
+        <div id="map-downforce" class="chart-host"></div>
+        <div id="map-ld" class="chart-host"></div>
+      </div>
+      <div id="map-allowance" class="note" style="color: var(--warning)" hidden></div>
+    </div>
+
     <div id="tab-export" class="tab-page" role="tabpanel">
       <div class="tab-controls">
         <label class="field inline"><span class="f-label">Orientation</span>
@@ -353,6 +378,20 @@
           <p>Every contour point in millimeters as CSV with element metadata —
              for spreadsheets or custom tooling.</p>
           <button class="btn" data-export="csv">Export CSV</button>
+        </div>
+        <div class="export-card">
+          <h3>OpenFOAM case</h3>
+          <p>Ready-to-run 2D RANS truth case: gmsh mesh with boundary layers
+             and a moving ground, simpleFoam + k-ω SST, force coefficients
+             extracted automatically. Run it in WSL — the case's README.txt
+             has the one-line command.</p>
+          <label class="field inline"><span class="f-label">Mesh</span>
+            <span class="f-wrap"><select id="exp-cfd-mesh" class="select-inline">
+              <option value="coarse">Coarse (~15k cells)</option>
+              <option value="medium" selected>Medium (~40k cells)</option>
+              <option value="fine">Fine (~90k cells)</option>
+            </select><i></i></span></label>
+          <button id="btn-export-cfd" class="btn primary">Generate case</button>
         </div>
       </div>
     </div>
@@ -451,6 +490,6 @@
   </div>
 </template>
 
-<script type="module" src="/static/js/app.js?v=7"></script>
+<script type="module" src="/static/js/app.js?v=8"></script>
 </body>
 </html>

@@ -117,7 +117,8 @@ application window, then to the default browser.
   Onshape, NX), CSV, and a 1:1 SVG drawing individually, or a ZIP bundle
   that additionally carries per-element XYZ point files, Selig `.dat`
   contours (installed positions and unit-chord profiles), and a JSON
-  manifest.
+  manifest. Plus a ready-to-run **OpenFOAM 2D RANS case** — mesh, boundary
+  conditions, solver settings and a run script (see RANS handoff below).
   Both the installed frame (ground at y = 0) and the upright design frame.
   Every export is written to the project's `exports/` folder with a
   timestamped name, and a dialog shows exactly where it went with a
@@ -126,6 +127,37 @@ application window, then to the default browser.
   blunt trailing edges get a straight base (a separate LINE in the spline
   DXF so the corners stay sharp), and the manifest records the achieved TE
   thickness per element.
+
+## RANS handoff
+
+The estimates above screen and rank; OpenFOAM decides. **Export → OpenFOAM
+case** turns the current stack into a complete 2D RANS case under
+`exports/cfd_case_<stamp>/` (this implements the repository roadmap's mesh
+and case-template items):
+
+- gmsh mesh of the installed section in meters — unstructured triangles
+  graded from the wing outward, quad boundary layers on the airfoil walls
+  and on the ground under the wing, first layer at y+ ≈ 1 for the
+  configured Reynolds number. Three presets: coarse ≈ 15k, medium ≈ 40k,
+  fine ≈ 90k cells.
+- `simpleFoam` + k-ω SST with a ground plane **moving at the freestream
+  speed** (the wing-fixed frame of a car), y+-adaptive wall treatment, and
+  a `forceCoeffs` function object with `liftDir (0 -1 0)` — reported Cl is
+  downforce-positive, referenced to the main chord.
+
+Run it from Windows (requires the repository's one-time OpenFOAM/WSL
+setup):
+
+```powershell
+wsl -d Ubuntu -- bash run.sh
+```
+
+The script converts the mesh, fixes patch types, runs `checkMesh` and
+`simpleFoam`, and writes the final coefficients to `results.txt`.
+Sectional downforce per unit span is `L' = Cl · ½ρU²c`; compare it with
+the studio's estimate and recalibrate the `k_g` / viscous-efficiency knobs
+against it. Each case's `README.txt` documents its exact numbers and
+conventions.
 
 ## Prediction model
 
@@ -198,6 +230,7 @@ app/
     optimizer.py       target-downforce search (background jobs)
     screener.py        library-wide airfoil ranking
     export.py          DXF / DAT / TXT / CSV / SVG / ZIP writers
+    cfd.py             OpenFOAM 2D RANS case generation (gmsh mesh + case)
   static/              the web UI (no build step, no external dependencies)
   tests/               validation suite
 ```
