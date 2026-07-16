@@ -62,7 +62,15 @@ def main():
     tmp = Path(tempfile.mkdtemp(prefix="wss_cfd_case_"))
     try:
         case = tmp / "case"
+        path_before = cfd._real_env_path()
         summary = cfd.build_case(CFG, case, "coarse")
+
+        # gmsh clobbers the real Win32 process PATH; build_case must restore
+        # it or every later subprocess (docker, explorer) fails to resolve
+        check("real process PATH survives meshing",
+              cfd._real_env_path() == path_before,
+              f"(len {len(path_before or '')} -> "
+              f"{len(cfd._real_env_path() or '')})")
 
         missing = [f for f in REQUIRED_FILES if not (case / f).is_file()]
         check("all case files present", not missing, f"missing: {missing}")

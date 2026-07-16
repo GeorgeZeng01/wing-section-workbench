@@ -122,6 +122,12 @@ class CfdExportBody(BaseModel):
     mesh_size: Literal["coarse", "medium", "fine"] = "medium"
 
 
+class RansStartBody(BaseModel):
+    config: dict
+    mesh_size: Literal["coarse", "medium", "fine"] = "coarse"
+    max_iters: int = Field(default=3000, ge=100, le=20000)
+
+
 def _err_detail(e: BaseException) -> str:
     # KeyError stringifies with quotes around its message — strip them
     return str(e.args[0]) if (isinstance(e, KeyError) and e.args) else str(e)
@@ -278,6 +284,56 @@ def optimize_status(job_id: str):
 @app.post("/api/optimize/{job_id}/cancel")
 def optimize_cancel(job_id: str):
     job = optimizer.get(job_id)
+    if job is None:
+        raise HTTPException(404, detail="unknown job")
+    job.cancel()
+    return {"ok": True}
+
+
+# ---------- RANS verification (Docker) ----------
+#
+# Opt-in truth runs: nothing here executes unless the user clicks Verify.
+# The routes with literal paths must be declared before /api/rans/{job_id}.
+
+@app.get("/api/rans/availability")
+def rans_availability(refresh: bool = False):
+    from .core import cfd_run
+    return cfd_run.availability(refresh)
+
+
+@app.get("/api/rans/current")
+def rans_current():
+    """Active/most-recent job id — a reloaded page re-attaches through this."""
+    from .core import cfd_run
+    return cfd_run.current()
+
+
+@app.post("/api/rans/start")
+def rans_start(body: RansStartBody):
+    _cfg(body.config)   # validate before spawning the job
+    from .core import cfd_run
+    try:
+        job_id = cfd_run.start(body.config, body.mesh_size, body.max_iters)
+    except RuntimeError as e:
+        raise HTTPException(409, detail=str(e))
+    except (ValueError, TypeError, KeyError) as e:
+        raise HTTPException(422, detail=_err_detail(e))
+    return {"job_id": job_id}
+
+
+@app.get("/api/rans/{job_id}")
+def rans_status(job_id: str):
+    from .core import cfd_run
+    job = cfd_run.get(job_id)
+    if job is None:
+        raise HTTPException(404, detail="unknown job")
+    return job.snapshot()
+
+
+@app.post("/api/rans/{job_id}/cancel")
+def rans_cancel(job_id: str):
+    from .core import cfd_run
+    job = cfd_run.get(job_id)
     if job is None:
         raise HTTPException(404, detail="unknown job")
     job.cancel()

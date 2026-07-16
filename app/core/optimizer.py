@@ -22,7 +22,19 @@ soft penalties keeping the design in the healthy high-lift envelope:
   - slot gap inside a 0.8%c .. 3.5%c band
   - slot overlap inside a -1%c .. 5%c band
   - element loading below ~105% of isolated CL_max
+  - realized ground-effect loading inside the model's validity allowance
   - hard penalty on intersecting geometry / solver failure
+
+Every soft band is widened per-run so the STARTING design's own operating
+point is penalty-free (see Job._baseline_allowance): analyze() reports that
+design's downforce as the headline number for the stack, so an optimizer
+that refuses its loading level can only ever hand back less downforce than
+the user already has — which is exactly the failure this guards against.
+Where the baseline sits inside a band, the band applies unchanged, so
+searches from healthy designs are still barred from wandering into
+separated-flow loading. Default search bounds are likewise widened to
+include the baseline's values, keeping the starting design representable
+(bounds the caller set explicitly stay hard).
 
 Search: differential evolution (global, seeded and reproducible) or
 Nelder-Mead refinement around the current design. Runs on a worker thread;
@@ -49,6 +61,9 @@ from .geometry import StackConfig
 # penalty band deliberately reaches 1 %c below the 0 %c search floor, so a
 # fixed, slightly-negative overlap is tolerated rather than penalized (a tuned
 # choice, kept as-is). Kept here so bounds and bands stay in one place.
+# These are the ABSOLUTE envelopes; Job._baseline_allowance() widens each
+# job's working copies so the starting design is never penalized for being
+# what it already is.
 GAP_WORKABLE_PCT = (0.8, 3.5)
 OVERLAP_WORKABLE_PCT = (0.0, 5.0)
 GAP_BAND = (GAP_WORKABLE_PCT[0] / 100.0, GAP_WORKABLE_PCT[1] / 100.0)  # == gap bounds
@@ -177,6 +192,9 @@ def _clean_bounds(user_bounds) -> dict:
     can turn them into a 422 — instead of surfacing as a crashed search
     thread minutes later."""
     out = dict(DEFAULT_BOUNDS)
+    if user_bounds is not None and not isinstance(user_bounds, dict):
+        raise ValueError("options['bounds'] must be an object of "
+                         "{key: (lo, hi)} pairs")
     for k, v in (user_bounds or {}).items():
         if k not in DEFAULT_BOUNDS:
             raise ValueError(f"unknown bounds key {k!r} — expected one of "
@@ -195,11 +213,22 @@ def build_variables(config: dict, opts: dict) -> list[dict]:
     from . import shaping
     n_flaps = len(config["elements"]) - 1
     bounds = _clean_bounds(opts.get("bounds"))
+    user_keys = set(opts.get("bounds") or {})
+
+    def span(key: str, current) -> tuple[float, float]:
+        # the starting design must be representable, or "optimize" can only
+        # lose it: default bounds stretch to include the current value.
+        # Bounds the caller set explicitly stay hard limits.
+        lo, hi = bounds[key]
+        if current is not None and key not in user_keys:
+            lo, hi = min(lo, float(current)), max(hi, float(current))
+        return lo, hi
+
     variables = []
     if opts.get("opt_stack_aoa", True):
+        lo, hi = span("stack_aoa_deg", config.get("stack_aoa_deg"))
         variables.append({"key": "stack_aoa_deg", "elem": None,
-                          "lo": bounds["stack_aoa_deg"][0],
-                          "hi": bounds["stack_aoa_deg"][1]})
+                          "lo": lo, "hi": hi})
     if opts.get("opt_airfoils", False):
         for i in range(0, n_flaps + 1):
             variables.append({"key": "airfoil_idx", "elem": i,
@@ -211,11 +240,22 @@ def build_variables(config: dict, opts: dict) -> list[dict]:
                        1.5 * float(mfg_d.get("te_gap_mm") or 0.0))
         chord_mm = float(config.get("chord_mm", 350.0))
         for i in range(0, n_flaps + 1):
-            for k in SHAPE_KEYS[:3]:
-                variables.append({"key": k, "elem": i,
-                                  "lo": shaping.BOUNDS_BUMP[0],
-                                  "hi": shaping.BOUNDS_BUMP[1]})
+            # re-optimizing an already-shaped design: its current shape
+            # params must be representable (initial_vector clips to bounds,
+            # which would silently move the start) — same do-no-harm rule
+            # as span() above
+            seed = config["elements"][i].get("_shape_x0")
+            for k_i, k in enumerate(SHAPE_KEYS[:3]):
+                lo, hi = shaping.BOUNDS_BUMP
+                if seed is not None:
+                    lo = min(lo, float(seed[k_i]))
+                    hi = max(hi, float(seed[k_i]))
+                variables.append({"key": k, "elem": i, "lo": lo, "hi": hi})
             ts_lo = shaping.BOUNDS_TS[0]
+            ts_hi = shaping.BOUNDS_TS[1]
+            if seed is not None:
+                ts_lo = min(ts_lo, float(seed[3]))
+                ts_hi = max(ts_hi, float(seed[3]))
             if floor_mm > 0:
                 # thinning must not push the section below the buildable
                 # minimum (or into plate territory vs the TE gap)
@@ -228,28 +268,31 @@ def build_variables(config: dict, opts: dict) -> list[dict]:
                     tmax_mm = (airfoils.geometry_info(cc)["max_thickness"]
                                * ratio * chord_mm)
                     if tmax_mm > 0:
+                        # the buildable floor is an explicit user constraint
+                        # — it outranks seed representability
                         ts_lo = min(max(ts_lo, floor_mm / tmax_mm),
-                                    shaping.BOUNDS_TS[1] - 0.01)
+                                    ts_hi - 0.01)
                 except Exception:
                     pass
             variables.append({"key": "shape_ts", "elem": i,
-                              "lo": ts_lo, "hi": shaping.BOUNDS_TS[1]})
+                              "lo": ts_lo, "hi": ts_hi})
     for i in range(1, n_flaps + 1):
+        e = config["elements"][i]
         if opts.get("opt_deflections", True):
+            lo, hi = span("deflection_deg", e.get("deflection_deg"))
             variables.append({"key": "deflection_deg", "elem": i,
-                              "lo": bounds["deflection_deg"][0],
-                              "hi": bounds["deflection_deg"][1]})
+                              "lo": lo, "hi": hi})
         if opts.get("opt_positions", True):
+            lo, hi = span("slot_gap_pct", e.get("slot_gap_pct"))
             variables.append({"key": "slot_gap_pct", "elem": i,
-                              "lo": bounds["slot_gap_pct"][0],
-                              "hi": bounds["slot_gap_pct"][1]})
+                              "lo": lo, "hi": hi})
+            lo, hi = span("slot_overlap_pct", e.get("slot_overlap_pct"))
             variables.append({"key": "slot_overlap_pct", "elem": i,
-                              "lo": bounds["slot_overlap_pct"][0],
-                              "hi": bounds["slot_overlap_pct"][1]})
+                              "lo": lo, "hi": hi})
         if opts.get("opt_chords", False):
+            lo, hi = span("chord_ratio", e.get("chord_ratio"))
             variables.append({"key": "chord_ratio", "elem": i,
-                              "lo": bounds["chord_ratio"][0],
-                              "hi": bounds["chord_ratio"][1]})
+                              "lo": lo, "hi": hi})
     if not variables:
         raise ValueError("no optimization variables enabled")
     return variables
@@ -332,6 +375,10 @@ class Job:
     def __init__(self, config: dict, options: dict):
         self.id = uuid.uuid4().hex[:12]
         self.config = copy.deepcopy(config)
+        # pristine copy for the baseline-allowance evaluation: shape specs
+        # stay wrapped here even when opt_shape unwraps them below, so the
+        # reference loading is that of the design as the user has it
+        self.baseline_config = copy.deepcopy(config)
         # validate the numeric options eagerly: a bogus budget or target is a
         # client error the API should 422, not a background-thread crash
         for key, default in (("target_downforce_n", 200.0),
@@ -389,6 +436,13 @@ class Job:
         self.phase = None          # screening | searching | refining | finalizing
         self.plan_total = None     # planned evaluation count (progress basis)
         self.shortlists: dict[int, list[str]] = {}
+        # soft-penalty bands, widened by _baseline_allowance() at run start
+        # so the starting design is penalty-free (None/absolute until then)
+        n_flaps = max(0, len(self.config.get("elements", [])) - 1)
+        self.load_band: list[float] | None = None
+        self.ground_band: list[float] | None = None
+        self.gap_bands: list[tuple[float, float]] = [GAP_BAND] * n_flaps
+        self.overlap_bands: list[tuple[float, float]] = [OVERLAP_BAND] * n_flaps
         self._cancel = threading.Event()
         self._lock = threading.Lock()
         self.variables = build_variables(self.config, options)
@@ -427,18 +481,34 @@ class Job:
             return 50.0
 
         f_err = (ev["downforce_n"] - target) / max(abs(target), 1.0)
-        # at 8.0 the search happily settled 30-40% past isolated CL_max —
-        # separated-flow fantasy designs. 40.0 makes a 15% overshoot cost
-        # about as much as missing the target by 10%, so an honest miss
-        # beats a fake hit
-        j_pen = 40.0 * ev["load_excess"]
+        # weight 40: at the old 8.0 the search happily settled 30-40% past
+        # isolated CL_max from HEALTHY starts — separated-flow fantasy
+        # designs. 40.0 makes a 15% loading overshoot cost about as much as
+        # missing the target by 10%, so an honest miss beats a fake hit.
+        # The band tops come from _baseline_allowance(): each element may
+        # carry max(105% CL_max, its own baseline loading + headroom), so a
+        # start that already runs hot is penalized only for getting HOTTER,
+        # never for matching itself — an absolute cap here made every run
+        # from an aggressive design land below its baseline downforce.
+        if self.load_band:
+            load_excess = sum(max(0.0, f - top) ** 2
+                              for f, top in zip(ev["fracs"], self.load_band))
+        else:
+            load_excess = ev["load_excess"]
+        j_pen = 40.0 * load_excess
         # keep the search out of the regime the model itself calls
-        # unreliable: realized ground-effect loading past the allowance
-        j_pen += 25.0 * ev.get("load_excess_ground", 0.0)
-        for g in ev["gaps"]:
-            j_pen += 2.0 * _band_penalty(g, GAP_BAND, 0.005)
-        for o in ev["overlaps"]:
-            j_pen += 2.0 * _band_penalty(o, OVERLAP_BAND, 0.01)
+        # unreliable: realized ground-effect loading past the allowance —
+        # baseline-relative for the same do-no-harm reason as above
+        if self.ground_band:
+            j_pen += 25.0 * sum(
+                max(0.0, f / top - 1.0) ** 2
+                for f, top in zip(ev["fracs_ground"], self.ground_band))
+        else:
+            j_pen += 25.0 * ev.get("load_excess_ground", 0.0)
+        for g, band in zip(ev["gaps"], self.gap_bands):
+            j_pen += 2.0 * _band_penalty(g, band, 0.005)
+        for o, band in zip(ev["overlaps"], self.overlap_bands):
+            j_pen += 2.0 * _band_penalty(o, band, 0.01)
         # the target term must dominate realistic drag savings inside ~1%
         # of target, or induced drag (which falls with downforce^2) would
         # pull the optimum a few percent under the requested load
@@ -554,6 +624,38 @@ class Job:
 
     # ---- runner ----
 
+    def _baseline_allowance(self) -> None:
+        """Widen the soft-penalty bands to admit the starting design.
+
+        analyze() reports the current design's downforce as the number for
+        this stack (with warnings at most), so the optimizer must never
+        refuse the baseline's own operating point — an absolute envelope
+        made every run from an aggressive design land below what the user
+        already had. Elements and slots the baseline runs inside the
+        absolute bands keep those bands; anything it runs beyond gets its
+        own value plus a little headroom (paneling bias between the search
+        and full-fidelity phases) as the allowance. Falls back to the
+        absolute bands when the baseline itself cannot be evaluated."""
+        try:
+            ev0 = analysis.quick_objective_eval(StackConfig.from_dict(
+                {**self.baseline_config,
+                 "n_panels_per_side": self._opt_panels}))
+        except Exception:
+            return
+        if not ev0.get("feasible"):
+            return
+        self.load_band = [max(1.05, f + 0.03) for f in ev0["fracs"]]
+        self.ground_band = [max(analysis.GROUND_CL_ALLOWANCE, f + 0.05)
+                            for f in ev0["fracs_ground"]]
+        self.gap_bands = [GAP_BAND if g is None else
+                          (min(GAP_BAND[0], g - 5e-4),
+                           max(GAP_BAND[1], g + 5e-4))
+                          for g in ev0["gaps"]]
+        self.overlap_bands = [OVERLAP_BAND if o is None else
+                              (min(OVERLAP_BAND[0], o - 5e-4),
+                               max(OVERLAP_BAND[1], o + 5e-4))
+                              for o in ev0["overlaps"]]
+
     def _floor_shape_ts_bounds(self):
         """With airfoil selection active, the thickness-scale lower bound
         must hold for EVERY shortlist candidate, not just the currently
@@ -613,6 +715,7 @@ class Job:
         self._opt_panels = min(self._full_panels, base_panels)
         cancelled = False
         try:
+            self._baseline_allowance()
             if any(v["key"] == "airfoil_idx" for v in self.variables):
                 # candidate lists come from the screener; cached per operating
                 # point, so this is seconds cold and instant warm

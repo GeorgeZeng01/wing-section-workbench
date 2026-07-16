@@ -44,6 +44,9 @@ const state = {
   customDat: {},              // spec -> dat text (for project save)
   optJob: null,
   optPoll: null,
+  ransJob: null,
+  ransPoll: null,
+  ransCEst: null,             // panel estimate snapshotted at RANS start
   polarElem: 0,
   xfoilCache: {},             // spec|re|ncrit -> polar
   screenRows: null,
@@ -653,6 +656,7 @@ document.querySelectorAll(".tab").forEach((t) => {
       p.classList.toggle("active", p.id === `tab-${t.dataset.tab}`));
     if (t.dataset.tab === "polars") renderPolars();
     if (t.dataset.tab === "screener") prefillScreener();
+    if (t.dataset.tab === "rans") refreshRansAvailability();
   });
 });
 $("btn-goto-optimize").addEventListener("click", () => {
@@ -1299,6 +1303,206 @@ function renderSweep(res) {
     `peak ${fmtN(dn[ipk], 0)} N at ${fmtN(xs[ipk], 1)} ${unit}` +
     (skipped ? ` · ${skipped} point${skipped > 1 ? "s" : ""} skipped` : "") +
     ` · ${res.n_panels_per_side_used} panels/side`;
+}
+
+/* ---------------- RANS verify tab ---------------- */
+
+let ransChecked = false;
+
+async function refreshRansAvailability() {
+  // a job the page does not know about (reload, second window, dropped
+  // poll) is re-attached first — its id is server-side state. A finished
+  // one renders its result; a live one resumes polling.
+  if (!state.ransJob && !$("rans-result").querySelector(".kv")) {
+    try {
+      const cur = await api.ransCurrent();
+      if (cur.job_id && ["pending", "running"].includes(cur.state)) {
+        state.ransJob = cur.job_id;
+        $("btn-rans-run").disabled = true;
+        $("btn-rans-cancel").disabled = false;
+        pollRans();
+      } else if (cur.job_id && cur.state === "done") {
+        const s = await api.ransStatus(cur.job_id);
+        renderRans(s);
+        renderRansResult(s);
+      }
+    } catch { /* rediscovery is best-effort */ }
+  }
+  // the good-news probe latches (the server caches it anyway); the
+  // unavailable state must NOT latch — the note tells the user to start
+  // Docker Desktop and reopen the tab, and reopening has to re-check
+  if (ransChecked) return;
+  const note = $("rans-note");
+  try {
+    const a = await api.ransAvailability();
+    if (a.available) {
+      ransChecked = true;
+      note.textContent = a.image_present
+        ? `Docker ${a.docker} ready · ${a.image}`
+        : `Docker ${a.docker} ready — the OpenFOAM image downloads on the ` +
+          `first run (~1 GB, one time)`;
+      if (!state.ransJob) $("btn-rans-run").disabled = false;
+    } else {
+      note.textContent = `Docker unavailable (${a.detail || "not running"}) — ` +
+        `start Docker Desktop and reopen this tab, or generate the case in ` +
+        `the Export tab and run it in WSL.`;
+      $("btn-rans-run").disabled = true;
+    }
+  } catch (e) {
+    note.textContent = `Could not check Docker: ${e.message}`;
+  }
+}
+
+$("btn-rans-run").addEventListener("click", startRansVerify);
+$("btn-rans-cancel").addEventListener("click", async () => {
+  if (state.ransJob) { try { await api.ransCancel(state.ransJob); } catch {} }
+});
+
+async function startRansVerify() {
+  const iters = parseInt($("rans-iters").value, 10);
+  try {
+    const { job_id } = await api.ransStart(
+      state.config, $("rans-mesh").value,
+      Number.isFinite(iters) ? Math.min(Math.max(iters, 100), 20000) : 3000);
+    state.ransJob = job_id;
+    // the target line must describe the config THIS run solves, not
+    // whatever the form says later — snapshot the estimate at start
+    state.ransCEst = state.analysis?.coefficients?.C_downforce_estimated
+      ?? null;
+    $("btn-rans-run").disabled = true;
+    $("btn-rans-cancel").disabled = false;
+    $("rans-conv").innerHTML = "";   // previous run's chart is not this run
+    $("rans-result").innerHTML =
+      '<div class="empty-note">Verification running…</div>';
+    pollRans();
+  } catch (e) {
+    toast(`Could not start the RANS run: ${e.message}`);
+  }
+}
+
+function pollRans() {
+  clearInterval(state.ransPoll);
+  let misses = 0;
+  state.ransPoll = setInterval(async () => {
+    try {
+      const s = await api.ransStatus(state.ransJob);
+      misses = 0;
+      renderRans(s);
+      if (["done", "failed", "cancelled"].includes(s.state)) {
+        clearInterval(state.ransPoll);
+        state.ransJob = null;
+        $("btn-rans-run").disabled = false;
+        $("btn-rans-cancel").disabled = true;
+        if (s.state === "failed") {
+          toast("RANS verification failed — details in the RANS tab.", "err");
+          $("rans-result").innerHTML = "";
+          const d = document.createElement("div");
+          d.className = "warning-item crit";
+          d.style.whiteSpace = "pre-wrap";
+          d.textContent = s.error || "run failed";
+          $("rans-result").appendChild(d);
+        }
+        if (s.state === "cancelled") {
+          $("rans-result").innerHTML =
+            '<div class="empty-note">Run cancelled — the partial case was ' +
+            'kept for inspection.</div>';
+        }
+        if (s.state === "done") renderRansResult(s);
+      }
+    } catch (e) {
+      // a lost poll must not orphan the run: the job keeps solving
+      // server-side, so ride out transient failures; only a definitive
+      // "job unknown" (404) or a persistent outage detaches — and the tab
+      // re-attaches through /api/rans/current either way
+      misses++;
+      if (e.status !== 404 && misses < 5) return;
+      clearInterval(state.ransPoll);
+      state.ransJob = null;
+      $("btn-rans-run").disabled = false;
+      $("btn-rans-cancel").disabled = true;
+      toast(`Lost the RANS job: ${e.message} — reopen this tab to ` +
+            `re-attach if it is still running.`);
+    }
+  }, 1000);
+}
+
+function renderRans(s) {
+  const pct = Math.round((s.progress || 0) * 100);
+  $("rans-progress").style.width = pct + "%";
+  $("rans-progress").classList.toggle("done", s.state === "done");
+  const bits = [s.state === "running" ? (s.phase || "running") : s.state];
+  if (s.mesh) bits.push(`${s.mesh.n_cells.toLocaleString()} cells`);
+  if (s.iteration) bits.push(`iteration ${s.iteration} / ${s.n_iters}`);
+  if (s.latest) bits.push(`Cl ${s.latest.cl.toFixed(3)}`,
+                          `Cd ${s.latest.cd.toFixed(4)}`);
+  bits.push(`${Math.round(s.elapsed_s)}s`);
+  $("rans-status").textContent = bits.join(" · ");
+  if (s.history && s.history.length > 1) {
+    const cEst = s.result?.panel?.c_est ?? state.ransCEst;
+    lineChart($("rans-conv"), {
+      series: [{ name: "Cl (RANS)", color: SERIES[0],
+                 x: s.history.map(h => h.iter),
+                 y: s.history.map(h => h.cl) }],
+      xLabel: "iteration", yLabel: "Cl (downforce +)",
+      targetY: cEst ?? undefined,
+      targetLabel: cEst != null ? `panel C_est ${(+cEst).toFixed(2)}` : undefined,
+      height: 180,
+    });
+  }
+}
+
+function renderRansResult(s) {
+  const r = s.result;
+  if (!r) return;
+  const host = $("rans-result");
+  const p = r.panel;
+  const pct = (v) => v == null ? "–"
+    : `${v > 0 ? "+" : ""}${(+v).toFixed(1)}%`;
+  const rows = [
+    ["Sectional Cl — RANS", `${r.cl_rans.toFixed(3)} ± ${r.cl_rans_std.toFixed(3)}`],
+    ["Sectional Cl — panel C_est", p ? (+p.c_est).toFixed(3) : "–"],
+    ["Cl delta (RANS vs estimate)", pct(r.delta_cl_pct)],
+    ["Profile Cd — RANS", r.cd_rans.toFixed(4)],
+    ["Profile Cd — panel stack", p ? (+p.cd_profile).toFixed(4) : "–"],
+    ["Downforce at RANS Cl", `${r.downforce_n_at_rans_cl} N`],
+    ["Downforce — panel estimate", p ? `${p.downforce_n} N` : "–"],
+    ["Iterations", `${r.n_iters_run}` +
+      (r.residual_stop ? " (residuals converged)" : ` (max; tail mean of ${r.tail_rows})`)],
+  ];
+  host.innerHTML = rows.map(([k, v]) =>
+    `<div class="kv"><span>${k}</span><b>${v}</b></div>`).join("");
+  if (!p && r.panel_error) {
+    const w = document.createElement("div");
+    w.className = "warning-item";
+    w.textContent = `The panel-model comparison could not be computed ` +
+      `(${r.panel_error}) — the RANS numbers above stand on their own.`;
+    host.appendChild(w);
+  }
+  if (r.suggested_k_g != null) {
+    const d = document.createElement("div");
+    d.className = "kv";
+    d.innerHTML = `<span title="Pinning the ground-gain factor to this value
+      makes the studio estimate reproduce the RANS sectional load at this
+      operating point.">suggested k<sub>g</sub></span>
+      <b>${r.suggested_k_g}
+      <button id="btn-rans-apply-kg" class="btn tiny">Apply</button></b>`;
+    host.appendChild(d);
+    $("btn-rans-apply-kg").addEventListener("click", () => {
+      state.config.k_g = r.suggested_k_g;
+      writeConfigToForm();
+      onConfigChanged();
+      toast(`k_g pinned to ${r.suggested_k_g} — re-analyze to see the ` +
+            `calibrated estimate.`, "good", 6000);
+    });
+  }
+  const note = document.createElement("p");
+  note.className = "note";
+  note.style.marginTop = "6px";
+  note.innerHTML = `2D section truth check: RANS Cd is profile drag only —
+    induced drag is a 3D effect and is compared in the studio's totals, not
+    here. Case retained at <code>${r.case_dir}</code> (fields, logs,
+    ParaView-openable <code>case.foam</code>).`;
+  host.appendChild(note);
 }
 
 /* ---------------- export tab ---------------- */

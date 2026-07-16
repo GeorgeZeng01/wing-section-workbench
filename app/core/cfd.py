@@ -41,6 +41,7 @@ serializes on a module lock and runs initialize/finalize per call.
 from __future__ import annotations
 
 import math
+import sys
 import threading
 from pathlib import Path
 
@@ -66,6 +67,29 @@ MESH_PRESETS = {
 }
 
 _gmsh_lock = threading.Lock()
+
+
+# gmsh's C runtime REPLACES the real Win32 process PATH during
+# initialize/finalize (measured: 1822 -> 357 chars) without touching
+# Python's os.environ snapshot — every subprocess launched afterwards
+# (docker for the in-app RANS runs, explorer for "Show in folder") then
+# fails to resolve executables. The real environment is snapshotted before
+# gmsh runs and restored after.
+
+def _real_env_path() -> str | None:
+    if sys.platform != "win32":
+        return None
+    import ctypes
+    buf = ctypes.create_unicode_buffer(32768)
+    n = ctypes.windll.kernel32.GetEnvironmentVariableW("PATH", buf, 32768)
+    return buf.value if n else None
+
+
+def _restore_env_path(path: str | None) -> None:
+    if path is None or sys.platform != "win32":
+        return
+    import ctypes
+    ctypes.windll.kernel32.SetEnvironmentVariableW("PATH", path)
 
 
 class MeshError(RuntimeError):
@@ -206,13 +230,13 @@ def _foam(cls_: str, location: str, obj: str, body: str) -> str:
             "}\n\n" + body)
 
 
-def _controldict(cfg: StackConfig, dz: float) -> str:
+def _controldict(cfg: StackConfig, dz: float, n_iters: int = N_ITERS) -> str:
     body = f"""\
 application     simpleFoam;
 startFrom       latestTime;
 startTime       0;
 stopAt          endTime;
-endTime         {N_ITERS};
+endTime         {n_iters};
 deltaT          1;
 writeControl    timeStep;
 writeInterval   500;
@@ -628,7 +652,8 @@ cat results.txt
 """
 
 
-def _case_readme(cfg: StackConfig, summary: dict, wings: list[str]) -> str:
+def _case_readme(cfg: StackConfig, summary: dict, wings: list[str],
+                 n_iters: int = N_ITERS) -> str:
     re_c = summary["re_main_chord"]
     bl = "yes" if summary["boundary_layer"] else "NO - refinement fallback"
     return f"""\
@@ -653,7 +678,7 @@ From Windows (the case must sit on a drive WSL can see):
 The script sources the newest OpenFOAM under /usr/lib/openfoam, converts
 the mesh (gmshToFoam), fixes patch types (frontAndBack -> empty, ground
 and wing patches -> wall), runs checkMesh, initializes with potentialFoam,
-then simpleFoam (steady, k-omega SST, up to {N_ITERS} iterations with
+then simpleFoam (steady, k-omega SST, up to {n_iters} iterations with
 residual stopping) and writes results.txt.
 
 RESULTS
@@ -687,12 +712,18 @@ CASE NOTES
 """
 
 
-def build_case(cfg: StackConfig, out_dir: Path, mesh_size: str = "medium") -> dict:
+def build_case(cfg: StackConfig, out_dir: Path, mesh_size: str = "medium",
+               n_iters: int = N_ITERS) -> dict:
     """Write a complete, ready-to-run OpenFOAM case into out_dir.
 
+    n_iters caps the simpleFoam iteration count (residual stopping usually
+    finishes earlier) — the in-app Docker verification runs pass it through.
     Returns a summary: cell count, y+ estimate, patch and file lists."""
     if mesh_size not in MESH_PRESETS:
         raise ValueError(f"mesh_size must be one of {sorted(MESH_PRESETS)}")
+    n_iters = int(n_iters)
+    if not (100 <= n_iters <= 20_000):
+        raise ValueError("n_iters must be between 100 and 20000")
     preset = MESH_PRESETS[mesh_size]
     design = geometry.build_stack(cfg)
     if any(e["intersects"] for e in design):
@@ -705,6 +736,7 @@ def build_case(cfg: StackConfig, out_dir: Path, mesh_size: str = "medium") -> di
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     with _gmsh_lock:
+        saved_path = _real_env_path()
         try:
             stats = _build_mesh(cfg, polys, out_dir / "mesh.msh", preset,
                                 min_clear_c)
@@ -712,6 +744,8 @@ def build_case(cfg: StackConfig, out_dir: Path, mesh_size: str = "medium") -> di
             raise
         except Exception as e:
             raise MeshError(str(e) or type(e).__name__)
+        finally:
+            _restore_env_path(saved_path)
 
     h1, u_tau = first_layer(cfg)
     # fallback meshes put the first cell center at half the isotropic wall size
@@ -720,6 +754,7 @@ def build_case(cfg: StackConfig, out_dir: Path, mesh_size: str = "medium") -> di
     wings = [f"wing_e{i+1}" for i in range(len(installed))]
     summary = {
         "mesh_size": mesh_size,
+        "n_iters": n_iters,
         "n_cells": stats["n_cells"],
         "n_bl_quads": stats["n_quads"],
         "boundary_layer": stats["bl_used"],
@@ -730,7 +765,7 @@ def build_case(cfg: StackConfig, out_dir: Path, mesh_size: str = "medium") -> di
                     "frontAndBack"],
     }
     files = {
-        "system/controlDict": _controldict(cfg, DZ_C * cfg.chord_m),
+        "system/controlDict": _controldict(cfg, DZ_C * cfg.chord_m, n_iters),
         "system/fvSchemes": _foam("dictionary", "system", "fvSchemes",
                                   _FVSCHEMES),
         "system/fvSolution": _foam("dictionary", "system", "fvSolution",
@@ -745,7 +780,7 @@ def build_case(cfg: StackConfig, out_dir: Path, mesh_size: str = "medium") -> di
         "0/omega": _field_omega(cfg),
         "0/nut": _FIELD_NUT,
         "run.sh": _run_sh(wings),
-        "README.txt": _case_readme(cfg, summary, wings),
+        "README.txt": _case_readme(cfg, summary, wings, n_iters),
         "case.foam": "",   # ParaView opens the case through this stub
     }
     for rel, text in files.items():

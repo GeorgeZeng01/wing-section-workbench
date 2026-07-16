@@ -6,7 +6,7 @@
 <title>Wing Section Studio</title>
 <link rel="icon" href="/static/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" href="/static/favicon.png">
-<link rel="stylesheet" href="/static/css/app.css?v=8">
+<link rel="stylesheet" href="/static/css/app.css?v=9">
 </head>
 <body>
 
@@ -206,6 +206,7 @@
       <button class="tab" data-tab="optimizer" role="tab">Optimizer</button>
       <button class="tab" data-tab="screener" role="tab">Airfoil screener</button>
       <button class="tab" data-tab="maps" role="tab">Maps</button>
+      <button class="tab" data-tab="rans" role="tab">RANS verify</button>
       <button class="tab" data-tab="export" role="tab">Export</button>
     </nav>
 
@@ -339,6 +340,36 @@
       <div id="map-allowance" class="note" style="color: var(--warning)" hidden></div>
     </div>
 
+    <div id="tab-rans" class="tab-page" role="tabpanel">
+      <div class="tab-controls">
+        <label class="field inline"><span class="f-label">Mesh</span>
+          <span class="f-wrap"><select id="rans-mesh" class="select-inline">
+            <option value="coarse" selected>Coarse (~15k cells, quickest)</option>
+            <option value="medium">Medium (~40k cells)</option>
+            <option value="fine">Fine (~90k cells, slow)</option>
+          </select><i></i></span></label>
+        <label class="field inline"
+               title="Upper bound on solver iterations. The run stops earlier on its own once residuals converge; on a loaded high-lift section it may instead settle into a bounded oscillation, and the result is then the mean of the last iterations.">
+          <span class="f-label">Max iterations</span>
+          <span class="f-wrap"><input id="rans-iters" type="number" step="100" min="100" max="20000" value="3000" style="width:70px"><i></i></span></label>
+        <button id="btn-rans-run" class="btn small primary" disabled>Verify with RANS</button>
+        <button id="btn-rans-cancel" class="btn small ghost" disabled>Cancel</button>
+        <span id="rans-note" class="note">checking Docker…</span>
+      </div>
+      <div class="progress" aria-hidden="true"><div id="rans-progress"></div></div>
+      <div id="rans-status" class="note">idle — runs the same 2D RANS truth
+        case the Export tab generates (simpleFoam + k-ω SST, moving ground) in
+        a local Docker container, then compares the converged section
+        coefficients against the panel-model estimate. Entirely optional: the
+        design workflow never requires it.</div>
+      <div class="chart-pair" style="margin-top:8px">
+        <div id="rans-conv" class="chart-host"></div>
+        <div id="rans-result"><div class="empty-note">No verification run yet.
+          Set up a section, then Verify with RANS — a coarse run typically
+          takes a few minutes.</div></div>
+      </div>
+    </div>
+
     <div id="tab-export" class="tab-page" role="tabpanel">
       <div class="tab-controls">
         <label class="field inline"><span class="f-label">Orientation</span>
@@ -384,7 +415,8 @@
           <p>Ready-to-run 2D RANS truth case: gmsh mesh with boundary layers
              and a moving ground, simpleFoam + k-ω SST, force coefficients
              extracted automatically. Run it in WSL — the case's README.txt
-             has the one-line command.</p>
+             has the one-line command — or run it without leaving the app
+             from the <b>RANS verify</b> tab (Docker).</p>
           <label class="field inline"><span class="f-label">Mesh</span>
             <span class="f-wrap"><select id="exp-cfd-mesh" class="select-inline">
               <option value="coarse">Coarse (~15k cells)</option>
@@ -434,7 +466,9 @@
     reduction — wings near the road shed much weaker tip vortices.
     Interference and support drag are not modeled.</p>
     <p class="note">This tool screens and optimizes starting geometry. Confirm
-    the shortlist with RANS (the repository's OpenFOAM pipeline) or tunnel data.</p>
+    the shortlist with RANS — the <b>RANS verify</b> tab runs the OpenFOAM
+    truth case in Docker and suggests the calibrated k<sub>g</sub> — or with
+    tunnel data.</p>
   </div>
   <form method="dialog"><button class="btn">Close</button></form>
 </dialog>
@@ -490,6 +524,6 @@
   </div>
 </template>
 
-<script type="module" src="/static/js/app.js?v=8"></script>
+<script type="module" src="/static/js/app.js?v=9"></script>
 </body>
 </html>

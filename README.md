@@ -51,8 +51,13 @@ redistributed here; download the Windows build (`xfoil.exe`, and optionally
 Everything except the XFOIL cross-check works without it — the app's default
 viscous data comes from the bundled NeuralFoil surrogate.
 
-**OpenFOAM (optional).** Only needed for the 2D RANS truth runs; see the
-OpenFOAM section below.
+**OpenFOAM (optional).** Only needed for the 2D RANS truth runs. Two ways to
+run them, both optional: the app's **RANS verify** tab runs the generated
+case in a local **Docker** container (Docker Desktop must be running; the
+first run pulls the official `opencfd/openfoam-run` image, ~1 GB, and the
+image is overridable via the `WSS_OPENFOAM_IMAGE` environment variable), or
+generate the case from **Export → OpenFOAM case** and run it in WSL — see
+the OpenFOAM section below.
 
 ## Layout
 

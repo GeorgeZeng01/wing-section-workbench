@@ -84,6 +84,63 @@ for c in cands:
         ok_apply = False
 check("candidate configs re-analyze to their claimed numbers", ok_apply)
 
+# hot-baseline regression: a design already loaded far past the absolute
+# 105%-of-CL_max band must still be matchable — the run may never come back
+# with LESS downforce than the start when the target asks for more. (The
+# absolute band did exactly that: every optimization of an aggressive design
+# lost downforce, because the search refused the baseline's loading level.)
+HOT = {**CFG, "stack_aoa_deg": 6.0}
+hot_base = analysis.analyze(geometry.StackConfig.from_dict(HOT),
+                            include_geometry=False)
+hot_dn = hot_base["forces"]["downforce_n"]
+hot_frac = max(e["loading_fraction"] for e in hot_base["elements"])
+hot_target = round(hot_dn * 1.05)
+job_h = optimizer.Job(HOT, {"target_downforce_n": hot_target,
+                            "budget": 600, "mode": "global"})
+job_h.run()
+snap_h = job_h.snapshot()
+full_h = (snap_h["result"] or {}).get("forces", {}).get("downforce_n")
+check("hot baseline is genuinely past the absolute load band",
+      hot_frac > 1.20, f"(max loading fraction {hot_frac})")
+check("optimizing a hot design does not lose downforce",
+      snap_h["state"] == "done" and full_h is not None
+      and full_h >= hot_dn - 2.0,
+      f"(baseline {hot_dn} N -> optimized {full_h} N)")
+check("hot design reaches an above-baseline target",
+      full_h is not None and abs(full_h - hot_target) <= 0.03 * hot_target,
+      f"(target {hot_target} N, got {full_h} N)")
+
+# explicit API bounds stay hard even when they exclude the baseline: the
+# widened search bounds only apply to DEFAULT bounds. Values OUTSIDE the
+# defaults exercise the widening for real (13 deg > default hi of 12,
+# 70 deg > deflection hi of 60).
+WIDE = {**CFG, "stack_aoa_deg": 13.0,
+        "elements": [CFG["elements"][0],
+                     {**CFG["elements"][1], "deflection_deg": 70.0}]}
+vars_hard = optimizer.build_variables(
+    WIDE, {"bounds": {"stack_aoa_deg": (-4.0, 4.0)}})
+aoa_hard = next(v for v in vars_hard if v["key"] == "stack_aoa_deg")
+vars_soft = optimizer.build_variables(WIDE, {})
+aoa_soft = next(v for v in vars_soft if v["key"] == "stack_aoa_deg")
+dfl_soft = next(v for v in vars_soft if v["key"] == "deflection_deg")
+check("explicit bounds stay hard, default bounds widen to the baseline",
+      aoa_hard["hi"] == 4.0 and aoa_soft["hi"] == 13.0
+      and dfl_soft["hi"] == 70.0,
+      f"(hard hi {aoa_hard['hi']}, widened aoa {aoa_soft['hi']}, "
+      f"defl {dfl_soft['hi']})")
+
+# an already-shaped design being re-optimized: its unwrapped shape seed
+# must be representable even when it sits outside the generic shape bounds
+SHAPED = {**CFG, "elements": [
+    {**CFG["elements"][0], "_shape_x0": [0.05, 0.0, -0.05, 0.62]},
+    CFG["elements"][1]]}
+vars_sh = optimizer.build_variables(SHAPED, {"opt_shape": True})
+b25 = next(v for v in vars_sh if v["key"] == "shape_b25" and v["elem"] == 0)
+ts = next(v for v in vars_sh if v["key"] == "shape_ts" and v["elem"] == 0)
+check("shape seeds outside generic bounds stay representable",
+      b25["hi"] >= 0.05 and ts["lo"] <= 0.62,
+      f"(b25 hi {b25['hi']}, ts lo {ts['lo']})")
+
 # determinism: identical inputs must give the identical result
 job2 = optimizer.Job(CFG, {"target_downforce_n": TARGET,
                            "budget": 400, "mode": "global"})

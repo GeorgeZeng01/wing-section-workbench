@@ -184,6 +184,41 @@ proper multi-objective (NSGA-style) Pareto set — rejected as overkill for
 one target + soft penalties; archive mining is free and keeps the
 single-objective machinery.
 
+**Soft-penalty bands are baseline-relative: the starting design is always
+penalty-free and representable.** The weight-40 load-envelope penalty
+(correction 4 above) fixed fantasy designs from healthy starts but
+introduced a worse failure: designs that already run past ~105 % of
+isolated CL_max — which includes shipped multi-element presets at higher
+stack angles and any aggressively loaded stack — could never be *matched*,
+so every optimization of such a design returned less downforce than the
+user started with (measured on the original model: 3-element preset,
+baseline 745 N, target 819 N → 573 N, 23 % *below* baseline). The analysis
+page reports those baselines' downforce as the headline number (warnings at
+most), so the optimizer refusing the same operating point contradicted the
+tool's own output. Now each job widens its soft bands once at start
+(`Job._baseline_allowance`): every element may carry
+`max(105 % CL_max, its own baseline loading + headroom)`, the realized
+ground-loading allowance likewise stretches to
+`max(2x CL_max, baseline + headroom)` per element (the hardening round's
+weight-25 ground penalty would otherwise re-open the same hole from the
+ground side), and slot gap/overlap bands stretch to include the baseline's
+achieved values; the default search bounds also stretch to include the
+baseline's variable values (explicit API bounds stay hard). From a healthy
+start nothing changes — the absolute envelope still bars separated-flow
+wandering; from a hot start the penalty now punishes getting *hotter than
+the baseline*, not matching it (regression: two-element at stack angle 6°,
+loading fraction 1.52, baseline 471 N, target +5 % → 492 N, no loss).
+Options considered: reverting the weight to 8 (re-opens the fantasy-design
+hole), hard-capping the estimate at CL_max in analysis (changes every
+reported number, not a bugfix), baseline-relative allowance (chosen — the
+guard becomes "do no harm" instead of "deny the baseline"). The regression
+suite pins the invariant: optimizing a hot design toward a higher target
+must never lose downforce. This work started on a parked WIP branch
+(`wip-optimizer-baseline`) written against the pre-hardening optimizer; it
+was reconciled here with the hardening round's eager bounds validation,
+ground-loading penalty and full-fidelity winner selection, and the branch
+is superseded.
+
 **Thorough mode: no early stop, wider population, multi-start full-res
 polish — reproducible by construction.** Testing surfaced non-reproducible
 drag between runs that should have landed in the same ballpark. Diagnosis:
@@ -705,6 +740,46 @@ strictness — the documented pitfall), converts and checks the mesh, runs
 the solver, and greps the final downforce-positive, main-chord-referenced
 coefficients into `results.txt`, ready to recalibrate `eta_visc`/`k_g`
 against.
+
+**In-app RANS verification runs the exported case in Docker — same case,
+same run.sh, one click, opt-in.** The exporter above made "RANS decides"
+possible but still asked the user to leave the app, open WSL and babysit a
+terminal. The RANS verify tab closes that loop: the server builds the
+identical case into `app_data/rans/<job>/`, runs it in a local Docker
+container, streams convergence out of `postProcessing/` (live Cl/Cd and a
+progress bar in the UI), and finishes with the tail-mean coefficients next
+to the panel-model estimate — plus the pinned `k_g` that would make the
+estimate reproduce the RANS sectional load (the model's own calibration
+knob, invertible in closed form because the saturation model is monotone in
+`k_g`), applied back to the config with one click. Runner options
+considered: (a) drive WSL directly (`wsl -d Ubuntu bash run.sh`) — free but
+distro-specific state the app cannot manage; (b) bundle an OpenFOAM build —
+gigabytes in the repo; (c) Docker with the official ESI images (chosen) —
+`opencfd/openfoam-*` ships the exact `/usr/lib/openfoam/openfoam*` layout
+`run.sh` already sources, so the SAME script runs verbatim in WSL and in
+the container (the Foundation images moved to `foamRun`/
+`momentumTransport` and cannot run the v2xxx-dialect case; the image is
+overridable via `WSS_OPENFOAM_IMAGE`). Deliberately opt-in and
+non-blocking: nothing in the design workflow requires it, the button only
+enables when Docker responds, one job runs at a time (the solver saturates
+every core it gets), runs are cancellable (`docker rm -f`), wall-clocked at
+4 h, and working directories are pruned to the newest few — they are
+verification artifacts, not exports. The 2D case's Cd is profile drag only,
+so the comparison pairs it with the panel stack's profile CD, never the
+induced-drag-bearing total. Cross-checked against the earlier WSL runs of
+the identical case: Docker (v2406 image) reports Cl 2.678 / Cd 0.222 on
+the coarse two-element baseline where WSL (v2506) reported 2.68 / 0.217 —
+the runners are interchangeable.
+
+Building this surfaced a latent process bug: gmsh's C runtime REPLACES the
+real Win32 process PATH during a mesh build (measured 1822 → 357 chars)
+without touching Python's `os.environ` snapshot, so every subprocess
+spawned afterwards — docker here, but also `explorer` behind the existing
+"Show in folder" button after a CFD export — failed to resolve.
+`build_case` now snapshots the real environment PATH (ctypes) before gmsh
+and restores it after; the regression suite meshes and asserts the PATH
+survived, and the docker runner additionally passes `env=os.environ` to
+every child as belt and braces.
 
 ## Known limitations
 

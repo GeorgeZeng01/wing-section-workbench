@@ -159,6 +159,21 @@ the studio's estimate and recalibrate the `k_g` / viscous-efficiency knobs
 against it. Each case's `README.txt` documents its exact numbers and
 conventions.
 
+### In-app verification (Docker)
+
+The **RANS verify** tab runs the same case without leaving the app: it
+builds the identical mesh and case, runs it in a local Docker container
+(official ESI image, `opencfd/openfoam-run` — the same `run.sh`, so WSL and
+Docker results are interchangeable), shows live solver convergence, and
+finishes with the RANS coefficients side by side with the studio estimate —
+including the pinned `k_g` that would make the estimate reproduce the RANS
+sectional load, applied with one click. Entirely opt-in: the button only
+enables when Docker Desktop is running, one run at a time, cancellable.
+Working cases land under `app_data/rans/` (the newest few are kept) with
+full logs and a ParaView-openable `case.foam`. The 2D case's drag is
+profile-only, so it is compared against the stack's profile CD, not the
+induced-drag-bearing total.
+
 ## Prediction model
 
 The panel solution is exact for inviscid flow; its ground-effect gain grows

@@ -333,6 +333,30 @@ check("low-Re polar reports clamp",
       and r_p.get("re_used") == 10000.0,
       f"(re_used={r_p.get('re_used') if r_p else s_p})")
 
+# RANS verification API surface — no run is ever started here (bad payloads
+# only), so the suite stays docker-free
+s_ra, r_ra = call("GET", "/api/rans/availability")
+check("rans availability reports a status either way",
+      s_ra == 200 and isinstance(r_ra.get("available"), bool)
+      and "image" in r_ra, f"(got {s_ra}: {r_ra})")
+s_rc0, r_rc0 = call("GET", "/api/rans/current")
+check("rans current reports no job on a fresh server",
+      s_rc0 == 200 and r_rc0.get("job_id") is None, f"(got {s_rc0}: {r_rc0})")
+s_rs, _ = call("GET", "/api/rans/no-such-job")
+check("unknown rans job -> 404", s_rs == 404, f"(got {s_rs})")
+s_rc, _ = call("POST", "/api/rans/no-such-job/cancel")
+check("cancel of unknown rans job -> 404", s_rc == 404, f"(got {s_rc})")
+s_rb, _ = call("POST", "/api/rans/start",
+               {"config": {**GOOD, "elements": ["hello"]}})
+check("rans start with broken config -> 422", s_rb == 422, f"(got {s_rb})")
+s_ri, _ = call("POST", "/api/rans/start", {"config": GOOD, "max_iters": 7})
+check("rans start with out-of-range iterations -> 422", s_ri == 422,
+      f"(got {s_ri})")
+s_rm, _ = call("POST", "/api/rans/start", {"config": GOOD,
+                                           "mesh_size": "ultra"})
+check("rans start with unknown mesh size -> 422", s_rm == 422,
+      f"(got {s_rm})")
+
 # XFOIL engine without xfoil.exe must be a clean failed-dependency error
 if not (Path(__file__).resolve().parents[2] / "xfoil" / "xfoil.exe").exists():
     s_x, r_x = call("POST", "/api/polar", {"spec": "naca0012", "re": 3e5,

@@ -325,6 +325,8 @@ def quick_objective_eval(cfg: StackConfig, model_size: str = "large") -> dict:
     cd_stack = 0.0
     load_excess = 0.0
     load_excess_ground = 0.0
+    fracs = []          # per-element free-air loading fractions — the
+    fracs_ground = []   # optimizer's baseline-relative bands need them
     for i, e in enumerate(design):
         cl_free_e = -free.elements[i]["Cy"] / e["chord_ratio"]
         cl_ground_e = -ground.elements[i]["Cy"] / e["chord_ratio"]
@@ -333,10 +335,12 @@ def quick_objective_eval(cfg: StackConfig, model_size: str = "large") -> dict:
         spec_v = e.get("airfoil_eff", e["airfoil"])
         lim = viscous.cl_limit(spec_v, re_e, cfg.ncrit, model_size)
         frac = cl_check / lim["CL_max"] if lim["CL_max"] > 1e-6 else 99.0
+        fracs.append(frac)
         load_excess += max(0.0, frac - 1.05) ** 2
         cl_op = cfg.viscous_efficiency * (
             cl_free_e + r_gain * (cl_ground_e - cl_free_e))
         frac_g = cl_op / lim["CL_max"] if lim["CL_max"] > 1e-6 else 99.0
+        fracs_ground.append(frac_g)
         load_excess_ground += max(0.0, frac_g / GROUND_CL_ALLOWANCE - 1.0) ** 2
         op = viscous.operating_point(spec_v, re_e,
                                      min(cl_op, 0.95 * lim["CL_max"]),
@@ -354,6 +358,8 @@ def quick_objective_eval(cfg: StackConfig, model_size: str = "large") -> dict:
         "c_ground": c_ground,
         "load_excess": load_excess,
         "load_excess_ground": load_excess_ground,
+        "fracs": fracs,
+        "fracs_ground": fracs_ground,
         "gaps": gaps,
         "overlaps": overlaps,
     }

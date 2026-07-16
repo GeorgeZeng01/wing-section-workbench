@@ -49,6 +49,13 @@ export const api = {
   exportCfd: (config, meshSize) =>
     request("POST", "/api/export/cfd/save", { config, mesh_size: meshSize }),
   exportReveal: (path) => request("POST", "/api/export/reveal", { path }),
+  ransAvailability: () => request("GET", "/api/rans/availability"),
+  ransCurrent: () => request("GET", "/api/rans/current"),
+  ransStart: (config, meshSize, maxIters) =>
+    request("POST", "/api/rans/start",
+            { config, mesh_size: meshSize, max_iters: maxIters }),
+  ransStatus: (id) => request("GET", `/api/rans/${id}`),
+  ransCancel: (id) => request("POST", `/api/rans/${id}/cancel`),
 };
 
 export async function downloadExport(fmt, config, options = {}) {
