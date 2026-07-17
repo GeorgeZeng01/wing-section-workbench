@@ -36,6 +36,7 @@ export const api = {
   analyze: (config) => request("POST", "/api/analyze", { config }),
   polar: (body) => request("POST", "/api/polar", body),
   optimize: (config, options) => request("POST", "/api/optimize", { config, options }),
+  optimizeCurrent: () => request("GET", "/api/optimize/current"),
   optimizeStatus: (id) => request("GET", `/api/optimize/${id}`),
   optimizeCancel: (id) => request("POST", `/api/optimize/${id}/cancel`),
   screen: (body) => request("POST", "/api/screen", body),

@@ -43,6 +43,7 @@ const state = {
   airfoilNames: {},           // spec -> display name
   customDat: {},              // spec -> dat text (for project save)
   optJob: null,
+  optTarget: null,            // target snapshotted when the run started
   optPoll: null,
   ransJob: null,
   ransPoll: null,
@@ -305,8 +306,14 @@ function wireAirfoilCombo(card, input, idx) {
         const b = document.createElement("button");
         b.type = "button";
         b.className = "af-item";
-        b.innerHTML = it.note
-          ? `${it.label}<small>${it.note}</small>` : it.label;
+        // it.label is an airfoil name that can originate from a shared
+        // project file — append it as text, never as markup
+        b.appendChild(document.createTextNode(it.label));
+        if (it.note) {
+          const small = document.createElement("small");
+          small.textContent = it.note;
+          b.appendChild(small);
+        }
         b.addEventListener("pointerdown", (ev) => {
           ev.preventDefault();
           selectAirfoil(idx, it.spec, it.label);
@@ -413,20 +420,31 @@ function sessionSnapshot() {
 }
 
 // the desktop shell serves on a fresh port (= new origin) every launch, so
-// localStorage rarely survives a restart — the server copy is what does
+// localStorage rarely survives a restart — the server copy is what does.
+// Both writers are gated on sessionReady (set once restoreSession finishes):
+// an edit landing inside the restore window would otherwise snapshot the
+// default template over the user's saved work.
 const persistServer = debounce(() => {
+  if (!sessionReady) return;
   api.sessionSave(sessionSnapshot()).catch(() => {});
 }, 800);
 
 const persistSession = debounce(() => {
+  if (!sessionReady) return;
   try {
     localStorage.setItem("wss-session", JSON.stringify(sessionSnapshot()));
   } catch { /* storage full/blocked — the server copy still covers restore */ }
   persistServer();
 }, 500);
 
-// debounced writes lose the last edits if the tab closes inside the window
+// debounced writes lose the last edits if the tab closes inside the window.
+// sessionReady gates the flush: before restoreSession() has finished, state
+// still holds the default template, and a pagehide in that window (close
+// the app right after opening it) would overwrite the user's saved work
+// with the blank starting state.
+let sessionReady = false;
 function flushSession() {
+  if (!sessionReady) return;
   try {
     const snap = sessionSnapshot();
     localStorage.setItem("wss-session", JSON.stringify(snap));
@@ -498,8 +516,15 @@ function buildViewportLegend() {
   state.config.elements.forEach((e, i) => {
     const s = document.createElement("span");
     s.className = "lg";
-    s.innerHTML = `<span class="sw" style="background:${SERIES[i]}"></span>` +
-      `E${i + 1} ${state.airfoilNames[e.airfoil] || e.airfoil}`;
+    // airfoil names/specs can come from a shared project file — build the
+    // node with textContent so a crafted name cannot inject markup (the
+    // swatch is the only trusted HTML here)
+    const sw = document.createElement("span");
+    sw.className = "sw";
+    sw.style.background = SERIES[i];
+    s.appendChild(sw);
+    s.appendChild(document.createTextNode(
+      ` E${i + 1} ${state.airfoilNames[e.airfoil] || e.airfoil}`));
     lg.appendChild(s);
   });
 }
@@ -646,6 +671,7 @@ document.querySelectorAll(".tab").forEach((t) => {
     if (t.dataset.tab === "polars") renderPolars();
     if (t.dataset.tab === "screener") prefillScreener();
     if (t.dataset.tab === "rans") refreshRansAvailability();
+    if (t.dataset.tab === "optimizer") reattachOptimizer();
   });
 });
 $("btn-goto-optimize").addEventListener("click", () => {
@@ -732,6 +758,28 @@ $("btn-xfoil").addEventListener("click", async () => {
 /* ---------------- optimizer tab ---------------- */
 
 $("btn-opt-run").addEventListener("click", startOptimization);
+
+// a reloaded page (or second window) re-attaches to a search it can no
+// longer see in its own state — the job id is server-side, same pattern
+// as the RANS tab
+async function reattachOptimizer() {
+  if (state.optJob) return;
+  try {
+    const cur = await api.optimizeCurrent();
+    // a run may have been started (Run clicked) while this GET was in flight
+    // — do not hijack it by attaching to a different, older job
+    if (state.optJob) return;
+    if (cur.job_id
+        && ["pending", "running", "finalizing"].includes(cur.state)) {
+      state.optJob = cur.job_id;
+      // keep any target snapshot we still hold (transient-outage re-attach in
+      // the same session); after a genuine reload it is already null
+      $("btn-opt-run").disabled = true;
+      $("btn-opt-cancel").disabled = false;
+      pollOptimizer();
+    }
+  } catch { /* rediscovery is best-effort */ }
+}
 $("btn-opt-cancel").addEventListener("click", async () => {
   if (state.optJob) { try { await api.optimizeCancel(state.optJob); } catch {} }
 });
@@ -741,9 +789,16 @@ $("ov-af").addEventListener("change", () => {
 });
 
 async function startOptimization() {
+  // disable BEFORE the request: a double-click on the button must not
+  // spawn two concurrent server-side search jobs
+  if ($("btn-opt-run").disabled) return;
+  $("btn-opt-run").disabled = true;
   const dragW = parseFloat($("opt-drag-w").value);
+  // snapshot the target: charts and hints must describe THIS run even if
+  // the target field is edited while it searches
+  const target = state.target;
   const options = {
-    target_downforce_n: state.target,
+    target_downforce_n: target,
     mode: $("opt-mode").value,
     budget: parseInt($("opt-budget").value, 10),
     // 0 is a legal weight ("ignore drag") — don't || it away
@@ -760,6 +815,7 @@ async function startOptimization() {
         options.opt_chords, options.opt_airfoils, options.opt_shape]
         .some(Boolean)) {
     toast("Enable at least one variable group.", "info");
+    $("btn-opt-run").disabled = false;
     return;
   }
   // deflections, positions and chords only exist on flaps; a single element
@@ -774,30 +830,35 @@ async function startOptimization() {
       "a flap — add an element, or enable stack angle, airfoil selection " +
       "or airfoil shape.";
     host.appendChild(d);
+    $("btn-opt-run").disabled = false;
     return;
   }
   try {
     const { job_id } = await api.optimize(state.config, options);
     state.optJob = job_id;
+    state.optTarget = target;
     state.optResult = null;
-    $("btn-opt-run").disabled = true;
     $("btn-opt-cancel").disabled = false;
     $("btn-opt-apply").disabled = true;
     pollOptimizer();
   } catch (e) {
     toast(`Could not start optimization: ${e.message}`);
+    $("btn-opt-run").disabled = false;
   }
 }
 
 function pollOptimizer() {
   clearInterval(state.optPoll);
+  let misses = 0;
   state.optPoll = setInterval(async () => {
     try {
       const s = await api.optimizeStatus(state.optJob);
+      misses = 0;
       renderOptimizer(s);
       // "finalizing" (best design re-analyzing) still counts as running
       if (["done", "failed", "cancelled"].includes(s.state)) {
         clearInterval(state.optPoll);
+        state.optJob = null;   // else reattachOptimizer is dead forever
         $("btn-opt-run").disabled = false;
         $("btn-opt-cancel").disabled = true;
         if (s.state === "failed") toast(`Optimization failed: ${s.error}`);
@@ -813,10 +874,17 @@ function pollOptimizer() {
         renderCandidates(s);
       }
     } catch (e) {
+      // a single failed poll (network blip, server hiccup) must not orphan
+      // a still-running CPU-bound search: ride out transient errors; only
+      // a definitive 404 or a persistent outage detaches
+      misses++;
+      if (e.status !== 404 && misses < 5) return;
       clearInterval(state.optPoll);
+      state.optJob = null;   // the promised tab re-attach needs this clear
       $("btn-opt-run").disabled = false;
       $("btn-opt-cancel").disabled = true;
-      toast(`Lost the optimization job: ${e.message}`);
+      toast(`Lost the optimization job: ${e.message} — reopen the ` +
+            `Optimizer tab to re-attach if it is still running.`);
     }
   }, 700);
 }
@@ -834,12 +902,13 @@ function renderOptimizer(s) {
   }
   $("opt-status").textContent = bits.join(" · ");
   if (s.history && s.history.length) {
+    const target = state.optTarget ?? state.target;
     lineChart($("opt-conv"), {
       series: [{ name: "downforce", color: SERIES[0],
                  x: s.history.map(h => h.eval),
                  y: s.history.map(h => h.downforce_n) }],
       xLabel: "evaluation", yLabel: "downforce [N]",
-      targetY: state.target, targetLabel: `target ${state.target} N`,
+      targetY: target, targetLabel: `target ${target} N`,
       height: 128,
     });
     lineChart($("opt-obj"), {
@@ -901,7 +970,7 @@ function renderOptHints(s) {
     if (x - v.lo < 0.03 * span) pinnedLo.push(nm);
     else if (v.hi - x < 0.03 * span) pinnedHi.push(nm);
   });
-  const target = state.target;
+  const target = state.optTarget ?? state.target;
   // same on-target tolerance the optimizer applies to candidates (3%, min 1 N)
   const hit = Math.abs(s.best.downforce_n - target) <= Math.max(0.03 * target, 1);
   let msg = null;
@@ -1046,6 +1115,7 @@ function renderCandidates(s) {
 
 function buildScreenerTargets() {
   const sel = $("scr-elem");
+  const prev = sel.value;   // rebuilding must not silently reset to E1
   sel.innerHTML = "";
   state.config.elements.forEach((e, i) => {
     const o = document.createElement("option");
@@ -1053,6 +1123,7 @@ function buildScreenerTargets() {
     o.textContent = `E${i + 1} ${roleName(i)}`;
     sel.appendChild(o);
   });
+  if (prev !== "" && +prev < state.config.elements.length) sel.value = prev;
 }
 
 // prefill must not clobber hand-edited values on every tab visit; switching
@@ -1086,15 +1157,27 @@ $("scr-elem").addEventListener("change", () => {
 
 $("btn-screen").addEventListener("click", async () => {
   const btn = $("btn-screen");
+  // a cleared field must not send NaN (serialized as null -> 422 with a
+  // pydantic error blob in the toast): fall back to sensible values
+  let re = parseFloat($("scr-re").value);
+  if (!Number.isFinite(re)) {
+    re = Math.round(elementRe(parseInt($("scr-elem").value || "0", 10)));
+  }
+  // the server requires Re > 1000 — clamp even the element fallback (a
+  // tiny/slow test section can sit below it)
+  re = Math.max(re, 1001);
+  $("scr-re").value = re;
+  let clRef = parseFloat($("scr-cl").value);
+  if (!Number.isFinite(clRef)) { clRef = 1.5; $("scr-cl").value = clRef; }
   busy(btn, true);
   $("scr-note").textContent = "screening the library…";
   try {
     // always fetch low-confidence rows too — the 50% cut is applied
     // client-side so hidden sections (often uploads) stay discoverable
     const res = await api.screen({
-      re: parseFloat($("scr-re").value),
+      re,
       ncrit: state.config.ncrit,
-      cl_ref: parseFloat($("scr-cl").value),
+      cl_ref: clRef,
       thickness_pct_min: parseFloat($("scr-tmin").value) || 0,
       thickness_pct_max: parseFloat($("scr-tmax").value) || 25,
       include_low_confidence: true,
@@ -1688,7 +1771,9 @@ $("file-project").addEventListener("change", async () => {
   if (!f) return;
   try {
     const p = JSON.parse(await f.text());
-    if (!p.config?.elements) throw new Error("not a project file");
+    if (!Array.isArray(p.config?.elements) || !p.config.elements.length) {
+      throw new Error("not a project file (no elements)");
+    }
     // re-register embedded custom airfoils; server may assign new ids
     const remap = {};
     for (const [spec, dat] of Object.entries(p.custom_airfoils || {})) {
@@ -1780,10 +1865,12 @@ async function boot() {
   viewport.setFrame("installed");
 
   const restored = await restoreSession();
+  sessionReady = true;   // flushes may persist state from here on
   writeConfigToForm();
   // draw the section, but leave analysis to the user — the results panel
   // explains the two actions
   refreshGeometry();
+  reattachOptimizer();   // a reload must not orphan a running search
 
   if (restored) {
     toast("Continuing where you left off — use Load preset… to start fresh.",

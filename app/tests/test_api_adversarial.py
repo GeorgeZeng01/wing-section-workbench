@@ -22,12 +22,18 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 BASE = os.environ.get("WSS_TEST_BASE", "http://127.0.0.1:8642")
 
 
+# proxy-free opener: an env/system HTTP proxy must not swallow the loopback
+# test traffic (it cannot reach 127.0.0.1), or every call would error or route
+# to the proxy instead of the scratch server
+_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
 def call(method, path, body=None, timeout=90):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(BASE + path, data=data, method=method,
                                  headers={"Content-Type": "application/json"})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with _opener.open(req, timeout=timeout) as r:
             return r.status, json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
         try:
@@ -58,6 +64,33 @@ def check(label, ok, extra=""):
 t0 = time.time()
 s, r = call("POST", "/api/analyze", {"config": GOOD})
 check("analyze happy path", s == 200, f"({time.time()-t0:.1f}s)")
+
+
+def call_h(method, path, body, extra_headers):
+    data = json.dumps(body).encode()
+    req = urllib.request.Request(BASE + path, data=data, method=method,
+                                 headers={"Content-Type": "application/json",
+                                          **extra_headers})
+    try:
+        with _opener.open(req, timeout=30) as rr:
+            return rr.status
+    except urllib.error.HTTPError as e:
+        return e.code
+
+
+# SECURITY: cross-site / non-loopback callers are rejected (DNS-rebinding
+# Host and cross-origin drive-by), same-origin loopback traffic is allowed
+check("cross-site Origin -> 403",
+      call_h("POST", "/api/analyze", {"config": GOOD},
+             {"Origin": "https://evil.example"}) == 403)
+check("non-loopback Host -> 403",
+      call_h("POST", "/api/analyze", {"config": GOOD},
+             {"Host": "evil.example"}) == 403)
+check("loopback Origin -> 200 (same-origin app traffic)",
+      call_h("POST", "/api/analyze", {"config": GOOD},
+             {"Origin": "http://127.0.0.1:9"}) == 200)
+check("absent Origin -> 200 (top-level navigation / CLI)",
+      call_h("POST", "/api/analyze", {"config": GOOD}, {}) == 200)
 
 # sign fix: +4 deg must beat -1 deg downforce
 _, r_hi = call("POST", "/api/analyze", {"config": {**GOOD, "stack_aoa_deg": 4}})
@@ -303,6 +336,58 @@ check("session save/load round-trip",
       s_sp == 200 and s_sg == 200
       and (r_sg.get("state") or {}).get("marker") == marker)
 
+# concurrent session saves must never 500 (the debounced autosave and the
+# pagehide beacon race routinely; two windows race constantly)
+import threading as _threading
+
+_conc_codes = []
+_conc_lock = _threading.Lock()
+
+
+def _hammer(n):
+    for k in range(n):
+        # a transient loopback connection reset (loaded machine) is not the
+        # race under test — retry once, then record a distinct code so the
+        # thread never dies silently short of its quota
+        for attempt in (1, 2):
+            try:
+                s_c, _ = call("POST", "/api/session",
+                              {"state": {"marker": f"c{k}", "config": GOOD}})
+                break
+            except Exception:
+                s_c = 599
+        with _conc_lock:
+            _conc_codes.append(s_c)
+
+
+_threads = [_threading.Thread(target=_hammer, args=(12,)) for _ in range(3)]
+for t in _threads:
+    t.start()
+for t in _threads:
+    t.join()
+check("36 concurrent session saves all succeed",
+      len(_conc_codes) == 36 and all(c == 200 for c in _conc_codes),
+      f"(codes {sorted(set(_conc_codes))})")
+
+# NaN/Infinity numeric options must 422 up front, not finish 'done' with a
+# garbage result (json.dumps emits the nonstandard NaN literal, which the
+# server-side parser accepts into the options dict)
+s_nan, _ = call("POST", "/api/optimize",
+                {"config": GOOD,
+                 "options": {"target_downforce_n": float("nan"),
+                             "budget": 40}})
+check("optimizer NaN target -> 422", s_nan == 422, f"(got {s_nan})")
+s_inf, _ = call("POST", "/api/optimize",
+                {"config": GOOD,
+                 "options": {"drag_weight": float("inf"), "budget": 40}})
+check("optimizer Infinity drag weight -> 422", s_inf == 422, f"(got {s_inf})")
+
+# job rediscovery endpoint: shape must hold whether or not a job exists
+s_oc, r_oc = call("GET", "/api/optimize/current")
+check("optimize current reports a job id field",
+      s_oc == 200 and "job_id" in r_oc and "state" in r_oc,
+      f"(got {s_oc}: {r_oc})")
+
 # CSV export must quote airfoil names containing commas
 comma_name = "acme, mk2"
 cc = airfoils.repaneled("naca0009", 40)[1].copy()
@@ -319,7 +404,7 @@ if s_cu == 200:
         BASE + "/api/export/csv",
         data=json.dumps({"config": csv_cfg}).encode(),
         headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=60) as r:
+    with _opener.open(req, timeout=60) as r:   # proxy-free, like call()
         text = r.read().decode()
     rows = list(_csv.reader(_io.StringIO(text)))
     body_ok = (rows[0][:3] == ["element", "role", "airfoil"]
@@ -330,6 +415,29 @@ if s_cu == 200:
 else:
     check("CSV quotes comma-containing airfoil names (upload failed)", False,
           f"(upload got {s_cu})")
+
+# SECURITY: a single-line ".dat"-looking dat_text must be treated as literal
+# content, never read as a filesystem path (would disclose arbitrary .dat
+# files off the disk). Point it at a real file that exists and confirm the
+# server did NOT read it.
+import tempfile as _tf
+import os as _os_sec
+_secret = _os_sec.path.join(_tf.gettempdir(), "wss_adv_secret.dat")
+with open(_secret, "w") as _fh:
+    _fh.write("TOPSECRET\n" + "\n".join(
+        f" {x:.4f} {y:.4f}" for x, y in
+        [(1, 0), (.5, .05), (0, 0), (.5, -.05), (1, 0),
+         (.6, .03), (.4, -.03), (.3, .02), (.2, -.02), (.1, .01), (.7, .0)]))
+try:
+    s_fr, r_fr = call("POST", "/api/airfoils/upload",
+                      {"name": "attack", "dat_text": _secret})
+    detail = (r_fr or {}).get("detail", "") if s_fr != 200 else ""
+    disclosed = "TOPSECRET" in json.dumps(r_fr or {})
+    check("path-like dat_text is not read from disk (no file disclosure)",
+          not disclosed and (s_fr == 422),
+          f"(status {s_fr}, disclosed {disclosed})")
+finally:
+    _os_sec.remove(_secret)
 
 # polar reports the Reynolds clamp instead of silently substituting
 s_p, r_p = call("POST", "/api/polar", {"spec": "naca0012", "re": 5000,

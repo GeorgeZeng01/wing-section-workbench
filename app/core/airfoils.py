@@ -60,7 +60,7 @@ def search_library(query: str = "", limit: int = 50) -> list[str]:
     return (starts + contains)[:limit]
 
 
-def read_dat(path_or_text, name_fallback="airfoil"):
+def read_dat(path_or_text, name_fallback="airfoil", *, allow_path=True):
     """Parse a Selig .dat (name line optional). Returns (name, (N,2) array).
 
     A coordinate line is exactly two numeric fields (parentheses around a
@@ -70,15 +70,26 @@ def read_dat(path_or_text, name_fallback="airfoil"):
     four-number plot-window line after the name, and several catalog files
     end with "a -> b" edit notes whose numeric fragments a laxer parser
     would append to the contour as garbage points.
+
+    allow_path: when True (internal callers passing a trusted path), a
+    newline-free ".dat"-suffixed string is read from disk. API callers pass
+    dat_text that must ALWAYS be treated as literal content — set False so a
+    crafted single-line ".dat" path can never make this read an arbitrary
+    file off the disk.
     """
     if isinstance(path_or_text, Path) or (
-        isinstance(path_or_text, str) and "\n" not in path_or_text
+        allow_path
+        and isinstance(path_or_text, str) and "\n" not in path_or_text
         and Path(path_or_text).suffix.lower() == ".dat"
     ):
-        text = Path(path_or_text).read_text(errors="replace")
+        # utf-8-sig: a BOM read through the locale codec becomes garbage
+        # glued to the first token, which silently drops the first
+        # coordinate of a headerless file
+        text = Path(path_or_text).read_text(encoding="utf-8-sig",
+                                            errors="replace")
         name_fallback = Path(path_or_text).stem
     else:
-        text = str(path_or_text)
+        text = str(path_or_text).lstrip("﻿")
     lines = text.splitlines()
     name = name_fallback
     pts = []
@@ -113,6 +124,30 @@ def read_dat(path_or_text, name_fallback="airfoil"):
             body = coords[1:]
             up, lo = body[:n_up], body[n_up:]
             coords = np.vstack([up[::-1], lo[1:]])
+    # a name line of exactly two numeric tokens ("63 412") parses as a
+    # coordinate; when that first pair sits wildly outside the rest of the
+    # contour it is a header artifact, not geometry (genuine first points —
+    # unit-chord TE, mm-scale TE, installed-position exports — all sit
+    # within the contour's own span)
+    if len(coords) > 10:
+        rest = coords[1:]
+        # span over BOTH axes: a thin section stored near-vertical (a flap
+        # deflected ~90 deg, re-imported from an installed-position export)
+        # has a tiny x-span but a large y-span, and measuring only x would
+        # flag its legitimate first coordinate as a header artifact
+        span = float(max(rest[:, 0].max() - rest[:, 0].min(),
+                         rest[:, 1].max() - rest[:, 1].min(), 1e-9))
+        d0 = max(abs(float(coords[0, 0]) - float(np.median(rest[:, 0]))),
+                 abs(float(coords[0, 1]) - float(np.median(rest[:, 1]))))
+        if d0 > 10.0 * span:
+            coords = rest
+    # exactly-duplicated consecutive points (present in some catalog files
+    # and uploads) survive upload validation but break the spline repanel
+    # much later, deep inside analysis — drop them at the door
+    if len(coords) > 1:
+        keep = np.ones(len(coords), bool)
+        keep[1:] = np.hypot(*np.diff(coords, axis=0).T) > 1e-10
+        coords = coords[keep]
     if len(coords) < 10:
         raise ValueError(f"{name}: only {len(coords)} coordinate pairs parsed")
     return name, coords

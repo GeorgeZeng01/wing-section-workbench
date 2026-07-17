@@ -10,7 +10,12 @@ inviscid model cannot see. The corrected estimate is
 
     C_est = eta_visc * [ C_f + G_real ]
     G_real = cap * tanh( k_g * (C_g - C_f) / cap ) * tanh( h/c / h_choke )
-    cap    = gain_cap_ratio * |C_f|
+    cap    = gain_cap_ratio * max(|C_f|, 0.1)
+
+(The 0.1 floor under |C_f| keeps the cap physical when the free-air load is
+near zero — a symmetric section at zero incidence still develops real
+downforce in ground effect, and a cap of "a few times nothing" would wrongly
+report zero for it.)
 
 Structure: k_g * (C_g - C_f) is the realized share of the inviscid gain
 (the calibrated behavior at ordinary ride heights, where the tanh terms are
@@ -60,6 +65,12 @@ from .geometry import StackConfig
 
 LOAD_WARN = 0.90
 LOAD_CRIT = 1.10
+# floor under the saturation cap's |C_f| reference: with the cap tied purely
+# to the free-air load, a symmetric section at zero incidence (C_f ~ 0) got
+# its entire — physically real — ground-effect gain crushed to zero. Below
+# this coefficient the cap reads "a few times a small but physical load"
+# instead of "a few times nothing".
+CAP_FLOOR_C = 0.1
 # realized ground operating CL beyond this multiple of the isolated CL_max
 # is outside what measured sections sustain near the ground — the screening
 # model is optimistic there
@@ -80,6 +91,13 @@ def ground_gain_factor(ride_height_c: float) -> float:
     return float(0.85 * np.tanh(1.4 / 0.85 * ride_height_c))
 
 
+def gain_cap(c_free: float, cfg: StackConfig) -> float:
+    """Saturation cap for the realized ground gain. One definition, shared
+    with the RANS runner's k_g inversion — the two must stay consistent or
+    a suggested k_g would not reproduce the RANS result it came from."""
+    return cfg.gain_cap_ratio * max(abs(c_free), CAP_FLOOR_C)
+
+
 def realized_gain(c_free: float, c_ground: float, cfg: StackConfig,
                   ) -> tuple[float, float, float]:
     """(G_real, k_g_used, realization_ratio r = G_real / (C_g - C_f)).
@@ -92,7 +110,7 @@ def realized_gain(c_free: float, c_ground: float, cfg: StackConfig,
     k_g = (float(cfg.k_g) if cfg.k_g is not None
            else ground_gain_factor(cfg.ride_height_c))
     g_inv = c_ground - c_free
-    cap = cfg.gain_cap_ratio * max(abs(c_free), 1e-9)
+    cap = gain_cap(c_free, cfg)
     choke = np.tanh(cfg.ride_height_c / cfg.choke_h_c)
     g_real = float(cap * np.tanh(k_g * g_inv / cap) * choke)
     r = g_real / g_inv if abs(g_inv) > 1e-12 else 0.0
@@ -209,6 +227,7 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
             "chord_mm": c_ratio * cfg.chord_mm,
             "deflection_deg": e["deflection_deg"],
             "Re": round(re_e),
+            "re_clamped": bool(re_e < viscous.RE_FLOOR),
             "Cl_free_inviscid": round(cl_free, 3),
             "Cl_checked": round(cl_check, 3),
             "Cl_operating": round(cl_op, 3),
@@ -227,6 +246,14 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
             "slot_overlap_pct": round(design[i].get("slot_overlap", np.nan) * 100, 2)
                 if i else None,
         })
+    clamped = [e["role"] for i, e in enumerate(design)
+               if cfg.element_re(i) < viscous.RE_FLOOR]
+    if clamped:
+        warnings.append(
+            f"{', '.join(clamped)}: Reynolds number below the surrogate's "
+            f"{viscous.RE_FLOOR:.0f} training floor — viscous data was "
+            f"evaluated at the floor, so CL_max and drag for these elements "
+            f"are extrapolations, not predictions.")
     if ground_hot:
         names = ", ".join(f"{role} ({fg:.1f}x)" for role, fg in ground_hot)
         warnings.append(
@@ -411,6 +438,8 @@ def _sweep_point(cfg: StackConfig, design: list[dict], installed: list[dict],
             ground_hot += 1
     if ground_hot:
         n_warnings += 1                           # combined allowance message
+    if any(cfg.element_re(i) < viscous.RE_FLOOR for i in range(len(design))):
+        n_warnings += 1                           # combined Re-floor caveat
 
     drag_profile_n = q * area * cd_stack
     drag_induced, _ = induced_drag_n(downforce_n, cfg, installed)

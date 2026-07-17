@@ -381,16 +381,25 @@ class Job:
         self.baseline_config = copy.deepcopy(config)
         # validate the numeric options eagerly: a bogus budget or target is a
         # client error the API should 422, not a background-thread crash
-        for key, default in (("target_downforce_n", 200.0),
-                             ("drag_weight", 0.10)):
+        import math as _math
+        for key, default, lo, hi in (
+                ("target_downforce_n", 200.0, -1e6, 1e6),
+                ("drag_weight", 0.10, 0.0, 10.0)):
             try:
-                float(options.get(key, default))
+                v = float(options.get(key, default))
             except (TypeError, ValueError):
                 raise ValueError(f"options[{key!r}] must be a number")
+            # NaN/Infinity survive float() and would poison every objective
+            # evaluation into a garbage "done" result
+            if not (_math.isfinite(v) and lo <= v <= hi):
+                raise ValueError(f"options[{key!r}] must be a finite number "
+                                 f"in {lo}..{hi}")
         try:
-            int(options.get("budget", 1500))
+            budget = int(options.get("budget", 1500))
         except (TypeError, ValueError):
             raise ValueError("options['budget'] must be an integer")
+        if not (1 <= budget <= 200_000):
+            raise ValueError("options['budget'] must be between 1 and 200000")
         # the UI shipped "refine" as the local mode's value for a while and
         # anything non-"global" used to fall through to the refinement path,
         # so the eager validation below must keep accepting it as an alias
@@ -417,10 +426,26 @@ class Job:
             from . import shaping
             for e in self.config.get("elements", []):
                 a = str(e.get("airfoil", ""))
-                if a.lower().startswith("shape:"):
+                al = a.lower()
+                if al.startswith("shape:"):
                     b, ts, base = shaping.parse(a)
                     e["airfoil"] = base
                     e["_shape_x0"] = [*b, ts]
+                elif al.startswith("mfg:"):
+                    # an explicit mfg: layer can wrap a shape: layer
+                    # (mfg:...:shape:...:base); strip the inner shape and
+                    # re-seed, keeping the mfg wrapper on the un-shaped base —
+                    # else apply_vector would stack a second shape: layer and
+                    # the resolver would reject the nested spec
+                    from . import manufacturing as mfg_mod
+                    try:
+                        mode, gap_c, mbase = mfg_mod.parse(a)
+                    except ValueError:
+                        continue
+                    if str(mbase).lower().startswith("shape:"):
+                        b, ts, sbase = shaping.parse(mbase)
+                        e["airfoil"] = mfg_mod.derived_spec(sbase, gap_c, mode)
+                        e["_shape_x0"] = [*b, ts]
         self.options = options
         self.state = "pending"     # pending | running | finalizing | done |
                                    # failed | cancelled
@@ -720,6 +745,7 @@ class Job:
         self._full_panels = int(self.config.get("n_panels_per_side") or 70)
         self._opt_panels = min(self._full_panels, base_panels)
         cancelled = False
+        coarse_best = None   # survives a cancel raised inside the refinement
         try:
             self._baseline_allowance()
             if any(v["key"] == "airfoil_idx" for v in self.variables):
@@ -819,6 +845,12 @@ class Job:
                 # finalized result/candidates beside it
                 self.phase = "finalizing"
                 self.state = "finalizing"
+                if self.best is None and coarse_best is not None:
+                    # cancelled mid-refinement, after the full-fidelity phase
+                    # cleared the working best: the coarse-search winner is
+                    # still a real design — return it instead of nothing
+                    with self._lock:
+                        self.best = coarse_best
                 if self.best is not None:
                     best_cfg = apply_vector(self.config, self.variables,
                                             np.array(self.best["x"]),
@@ -905,3 +937,23 @@ def start(config: dict, options: dict) -> str:
 def get(job_id: str) -> Job | None:
     with _jobs_lock:
         return _jobs.get(job_id)
+
+
+def current() -> dict:
+    """The active (or, failing that, most recent) job — lets a reloaded UI
+    re-attach to a running search instead of orphaning it.
+
+    Optimizer jobs can overlap (a reload orphans one while the user starts
+    another), so the MOST RECENT active job is returned — re-attaching to the
+    oldest would leave the run the user actually cares about unmonitored."""
+    with _jobs_lock:
+        jobs = list(_jobs.values())
+    active = [j for j in jobs if j.state in ("pending", "running",
+                                             "finalizing")]
+    if active:
+        j = max(active, key=lambda j: j.t_start or 0)
+        return {"job_id": j.id, "state": j.state}
+    if jobs:
+        last = max(jobs, key=lambda j: j.t_start or 0)
+        return {"job_id": last.id, "state": last.state}
+    return {"job_id": None, "state": None}

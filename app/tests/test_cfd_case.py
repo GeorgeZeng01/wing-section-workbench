@@ -127,8 +127,19 @@ def main():
                   "simpleFoam", "writeCellCentres", "coefficient.dat",
                   "results.txt")))
 
+        check("run.sh resets a previously-run case to a clean start",
+              "resetting the case to a clean start" in text
+              and text.index("resetting the case") < text.index("gmshToFoam"))
+
         check("bad mesh_size is rejected",
               _raises(lambda: cfd.build_case(CFG, tmp / "x", "ultra")))
+
+        # a validated config can still be too tall for the fixed CFD box —
+        # refuse with a clear error instead of meshing a broken domain
+        import dataclasses as _dc
+        too_tall = _dc.replace(CFG, chord_mm=50.0, ride_height_mm=400.0)
+        check("section outside the CFD domain is rejected before meshing",
+              _raises(lambda: cfd.build_case(too_tall, tmp / "y", "coarse")))
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

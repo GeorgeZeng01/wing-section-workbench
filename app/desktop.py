@@ -77,10 +77,16 @@ def _start_server(port: int):
 
 def _wait_healthy(port: int, timeout: float = 25.0) -> bool:
     url = f"http://127.0.0.1:{port}/api/health"
+    # proxy-free opener: the default one honors http_proxy/system proxies,
+    # which routes the loopback probe to a corporate proxy that cannot reach
+    # this machine's 127.0.0.1 — the launcher would then report "server did
+    # not start" forever although the server is up
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}))
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=1.5) as r:
+            with opener.open(url, timeout=1.5) as r:
                 if r.status == 200:
                     return True
         except Exception:

@@ -303,6 +303,14 @@ def effective_spec(cfg: StackConfig, i: int) -> str:
     spec = cfg.elements[i].airfoil
     if cfg.manufacturing is None:
         return spec
+    # an element that already carries its own explicit "mfg:" treatment (a
+    # scripting/API path) wins over the global manufacturing block — wrapping
+    # it in a second mfg: layer would double-open the TE and produce an
+    # invalid nested "mfg:...:mfg:..." spec. Check anywhere in the chain, not
+    # just the head: the optimizer's opt_shape re-wrap yields
+    # "shape:...:mfg:...:base", where the mfg: layer is not the outer one.
+    if "mfg:" in str(spec).lower():
+        return spec
     from . import manufacturing as mfg_mod
     gap_c = cfg.manufacturing.te_gap_mm / element_chord_mm(cfg, i)
     return mfg_mod.derived_spec(spec, gap_c, cfg.manufacturing.te_mode)

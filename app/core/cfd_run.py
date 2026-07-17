@@ -97,12 +97,42 @@ def _runs_dir() -> Path:
     return base / "rans"
 
 
+_docker_exe_cached: str | None = None
+
+
+def _docker_exe() -> str:
+    """Absolute path to the docker CLI.
+
+    Windows CreateProcess resolves a bare "docker" through the LIVE process
+    PATH — which gmsh replaces wholesale while a mesh is being built (see
+    cfd._real_env_path), so a concurrent availability/cancel call during
+    that window would fail with FileNotFoundError even though docker is
+    installed. Resolving to an absolute path once (falling back to the real
+    Win32 PATH if the snapshot is already clobbered) makes every docker
+    launch independent of the live PATH."""
+    global _docker_exe_cached
+    if _docker_exe_cached:
+        return _docker_exe_cached
+    import shutil as _shutil
+    exe = _shutil.which("docker")
+    if exe is None and sys.platform == "win32":
+        from . import cfd
+        real = cfd._real_env_path()
+        if real:
+            exe = _shutil.which("docker", path=real)
+    if exe:
+        _docker_exe_cached = exe
+        return exe
+    return "docker"   # unresolvable: let the subprocess raise cleanly
+
+
 def _docker(args: list[str], timeout: float) -> subprocess.CompletedProcess:
     # env passed explicitly: os.environ is Python's pristine snapshot, and
     # the real process environment may have been clobbered by gmsh (see
     # cfd._real_env_path) — belt and braces on top of cfd's restore
-    return subprocess.run(["docker", *args], capture_output=True, text=True,
-                          timeout=timeout, creationflags=_CREATE_NO_WINDOW,
+    return subprocess.run([_docker_exe(), *args], capture_output=True,
+                          text=True, timeout=timeout,
+                          creationflags=_CREATE_NO_WINDOW,
                           env={**os.environ})
 
 
@@ -227,7 +257,7 @@ def suggested_k_g(cl_rans: float, c_free: float, c_ground: float,
     None when the RANS result sits outside the model's reachable range
     (saturated cap, no inviscid gain, or k_g outside (0, 1])."""
     g_inv = c_ground - c_free
-    cap = cfg.gain_cap_ratio * max(abs(c_free), 1e-9)
+    cap = analysis.gain_cap(c_free, cfg)   # same cap the estimate uses
     choke = math.tanh(cfg.ride_height_c / cfg.choke_h_c)
     if abs(g_inv) < 1e-9 or choke < 1e-9 or cfg.viscous_efficiency < 1e-9:
         return None
@@ -438,7 +468,7 @@ class RansJob:
             # minutes and cancel must stay responsive throughout
             pull_log = self.case_dir / "log.pull"
             with open(pull_log, "wb") as fh:
-                pull = _popen(["docker", "pull", _image()], stdout=fh,
+                pull = _popen([_docker_exe(), "pull", _image()], stdout=fh,
                               stderr=subprocess.STDOUT,
                               creationflags=_CREATE_NO_WINDOW,
                               env={**os.environ})
@@ -472,7 +502,10 @@ class RansJob:
         with self._lock:
             self.phase = "starting container"
         log_path = self.case_dir / "log.docker"
-        cmd = ["docker", "run", "--rm", "--name", self._container,
+        # the pid label lets the orphan sweep tell a crashed server's
+        # leftover apart from a live run owned by ANOTHER app instance
+        cmd = [_docker_exe(), "run", "--rm", "--name", self._container,
+               "--label", f"wss.pid={os.getpid()}",
                "-v", f"{self.case_dir}:/case", "-w", "/case",
                "--entrypoint", "/bin/bash", _image(), "run.sh"]
         with open(log_path, "wb") as log_fh:
@@ -676,23 +709,62 @@ _jobs: dict[str, RansJob] = {}
 _jobs_lock = threading.Lock()
 
 
-def _sweep_orphan_containers(active_names: set[str]) -> None:
-    """Force-remove wss-rans-* containers this process does not own.
+def _pid_alive(pid: int) -> bool:
+    """Is a process with this id still running on this machine?"""
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        handle = k32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFO
+        if not handle:
+            return False
+        try:
+            code = ctypes.c_ulong()
+            ok = k32.GetExitCodeProcess(handle, ctypes.byref(code))
+            return bool(ok) and code.value == 259    # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
+def _sweep_orphan_containers(active_names: set[str]) -> set[str]:
+    """Force-remove wss-rans-* containers whose owning server is gone.
 
     The one-job-at-a-time guard and the run-dir pruning are process-local;
     a server restart mid-solve would otherwise leave a full-CPU container
     running unsupervised (--rm only cleans up after it finishes on its own)
-    and later prune the case directory out from under it."""
+    and later prune the case directory out from under it. Containers whose
+    recorded owner pid is still alive belong to ANOTHER app instance and
+    are left untouched — killing a neighbour's live solve is worse than
+    tolerating a shared machine. Returns the names left running that this
+    process does not own."""
+    live_others: set[str] = set()
     try:
-        r = _docker(["ps", "--filter", "name=wss-rans-",
-                     "--format", "{{.Names}}"], 15)
+        r = _docker(["ps", "--filter", "name=wss-rans-", "--format",
+                     '{{.Names}}\t{{.Label "wss.pid"}}'], 15)
         if r.returncode != 0:
-            return
-        for name in r.stdout.split():
-            if name.startswith("wss-rans-") and name not in active_names:
-                _docker(["rm", "-f", name], 30)
+            return live_others
+        for line in r.stdout.splitlines():
+            parts = line.strip().split("\t")
+            name = parts[0] if parts else ""
+            if not name.startswith("wss-rans-") or name in active_names:
+                continue
+            try:
+                owner = int(parts[1]) if len(parts) > 1 and parts[1] else 0
+            except ValueError:
+                owner = 0
+            if owner and owner != os.getpid() and _pid_alive(owner):
+                live_others.add(name)
+                continue
+            _docker(["rm", "-f", name], 30)
     except Exception:
         pass   # sweeping is best-effort; docker may simply be down
+    return live_others
 
 
 def _reap_at_exit() -> None:
@@ -709,38 +781,57 @@ def _reap_at_exit() -> None:
 atexit.register(_reap_at_exit)
 
 
-def _prune_run_dirs(active: set[Path]) -> None:
+def _prune_run_dirs(active: set[Path],
+                    live_other_names: set[str] = frozenset()) -> None:
     """Keep the newest KEEP_RUN_DIRS finished run directories; a solve can
     write hundreds of MB of fields, and verification runs are working
-    artifacts, not user exports."""
+    artifacts, not user exports. Directories backing another instance's
+    live container are never pruned out from under it."""
     root = _runs_dir()
+    protected = {name[len("wss-rans-"):] for name in live_other_names}
     if not root.is_dir():
         return
     dirs = sorted((d for d in root.iterdir() if d.is_dir()),
                   key=lambda d: d.stat().st_mtime, reverse=True)
     for d in dirs[KEEP_RUN_DIRS:]:
-        if d.resolve() not in active:
+        if d.resolve() not in active and d.name not in protected:
             shutil.rmtree(d, ignore_errors=True)
 
 
 def start(config: dict, mesh_size: str = "coarse",
           n_iters: int = cfd.N_ITERS) -> str:
+    job = RansJob(config, mesh_size, n_iters)   # validates eagerly
     with _jobs_lock:
         for j in _jobs.values():
             if j.state in ("pending", "running"):
                 raise RuntimeError(
                     "a RANS verification is already running — cancel it or "
                     "wait for it to finish")
-        job = RansJob(config, mesh_size, n_iters)
-        _sweep_orphan_containers({j._container for j in _jobs.values()}
-                                 | {job._container})
-        _prune_run_dirs({j.case_dir.resolve() for j in _jobs.values()}
-                        | {job.case_dir.resolve()})
+        # claim the slot under the lock so two concurrent starts cannot both
+        # pass the guard; the slow docker housekeeping happens OUTSIDE the
+        # lock — holding it through CLI calls would stall every status,
+        # cancel and current request whenever the daemon is slow
         done_ids = [k for k, j in _jobs.items()
                     if j.state in ("done", "failed", "cancelled")]
         for k in done_ids[:-4]:
             _jobs.pop(k, None)
         _jobs[job.id] = job
+        active_names = {j._container for j in _jobs.values()}
+        active_dirs = {j.case_dir.resolve() for j in _jobs.values()}
+    try:
+        live_others = _sweep_orphan_containers(active_names)
+        if live_others:
+            with _jobs_lock:
+                _jobs.pop(job.id, None)
+            raise RuntimeError(
+                "a RANS verification started by another app window or "
+                "instance is still running — cancel it there or wait for "
+                "it to finish")
+        _prune_run_dirs(active_dirs, live_others)
+    except RuntimeError:
+        raise
+    except Exception:
+        pass   # housekeeping is best-effort
     threading.Thread(target=job.run, name=f"rans-{job.id}",
                      daemon=True).start()
     return job.id

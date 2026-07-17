@@ -126,7 +126,8 @@ def main():
     # ---- 5. .dat parser vs hostile catalog formats ----
     name, c = airfoils.read_dat(
         "NC090\n -2.0  3.0  -2.5  3.5\n 1.0 0.0\n 0.5 0.05\n 0.0 0.0\n"
-        " 0.5 -0.05\n 1.0 0.0\n" + " 0.7 0.02\n" * 6, "t")
+        " 0.5 -0.05\n 1.0 0.0\n"
+        + "".join(f" {0.70 + 0.01 * i:.2f} 0.02\n" for i in range(6)), "t")
     check("MSES plot-window header is not a coordinate",
           not (c[:, 0] == -2.0).any())
     for spec, t_lo, t_hi in (("tasopt-c090", 0.085, 0.095),
@@ -140,12 +141,51 @@ def main():
               and t_lo <= info["max_thickness"] <= t_hi,
               f"(t={info['max_thickness']:.4f})")
     # trailing "a -> b" edit notes must not become contour points
+    # (12, not 13: the fixture's "1.0 0.0" repeat is an exact consecutive
+    # duplicate, which the parser now drops — see the dedup check below)
     _, junk = airfoils.read_dat(
         "foo\n1.0 0.0\n0.5 0.1\n0.0 0.0\n0.5 -0.1\n1.0 0.0\n"
         + "\n".join(f"{x:.2f} {0.05*(1-x):.3f}" for x in np.linspace(1, 0, 8))
         + "\nmodif  0.99993 -> 1.00000\n0.00000 0.00102 -> 0.00001 0.00102\n",
         "t")
-    check("trailing edit notes ignored", len(junk) == 13, f"({len(junk)} pts)")
+    check("trailing edit notes ignored", len(junk) == 12, f"({len(junk)} pts)")
+
+    # ---- 5b. parser regressions: BOM, duplicates, numeric headers ----
+    base = airfoils.naca_coords("0012", 12)
+    body = "\n".join(f" {x:.6f} {y:.6f}" for x, y in base)
+    _, cb = airfoils.read_dat("﻿" + body, "t")   # headerless, BOM first
+    check("UTF-8 BOM does not swallow the first coordinate",
+          len(cb) == len(base) and abs(cb[0, 0] - base[0, 0]) < 1e-9,
+          f"({len(cb)} of {len(base)} pts)")
+    # ...and through the FILE branch, which decodes with the locale codec
+    # unless read_dat asks for utf-8-sig — the branch the fix targets
+    import tempfile as _tf
+    with _tf.TemporaryDirectory(dir=ROOT) as _td:
+        _fp = Path(_td) / "bom_check.dat"
+        _fp.write_bytes(b"\xef\xbb\xbf" + body.encode("utf-8"))
+        _, cbf = airfoils.read_dat(_fp)
+        check("UTF-8 BOM handled on the file-read branch too",
+              len(cbf) == len(base) and abs(cbf[0, 0] - base[0, 0]) < 1e-9,
+              f"({len(cbf)} of {len(base)} pts)")
+    lines = [f" {x:.6f} {y:.6f}" for x, y in base]
+    lines.insert(5, lines[5])   # exact consecutive duplicate
+    _, cd = airfoils.read_dat("dup\n" + "\n".join(lines), "t")
+    check("consecutive duplicate points dropped at parse",
+          len(cd) == len(base), f"({len(cd)} pts)")
+    _, ch = airfoils.read_dat("63 412\n" + body, "t")
+    check("two-numeric-token name line is a header, not geometry",
+          len(ch) == len(base) and float(ch[:, 0].max()) < 2.0,
+          f"({len(ch)} pts, x_max {ch[:, 0].max():.1f})")
+    # a thin section stored near-vertical (a ~90 deg flap re-imported from an
+    # installed-position export) must keep ALL its points — the wild-header
+    # drop measures span over both axes, not x alone
+    th = np.radians(89.0)
+    R = np.array([[np.cos(th), -np.sin(th)], [np.sin(th), np.cos(th)]])
+    vert = airfoils.naca_coords("0004", 100) @ R.T
+    _, cv = airfoils.read_dat(
+        "vert\n" + "\n".join(f" {x:.6f} {y:.6f}" for x, y in vert), "t")
+    check("near-vertical thin section keeps its first coordinate",
+          len(cv) == len(vert), f"({len(cv)} of {len(vert)} pts)")
 
     # ---- 6. normalize(): measurement fidelity ----
     info = airfoils.geometry_info(airfoils.naca_coords("2412"))
@@ -177,13 +217,55 @@ def main():
     op = viscous.operating_point("s1223", 3e5, 5.0, 7.0, "large")
     check("operating point clamps high with flag",
           op["clamped"] and op["clamped_high"] and not op["clamped_low"])
+    # CL −3 is far below anything on the grid: the clamp-low flag MUST fire
+    # and the alpha must sit at the grid's bottom edge (the old disjunction
+    # 'clamped_low or alpha > −8.1' was vacuously true for any alpha)
     op2 = viscous.operating_point("s1223", 3e5, -3.0, 7.0, "large")
     check("operating point flags the low grid edge",
-          op2["clamped_low"] or op2["alpha"] > -8.1,
-          f"(alpha {op2['alpha']:.1f})")
+          op2["clamped_low"] and not op2["clamped_high"]
+          and abs(op2["alpha"] - (-8.0)) < 0.51,
+          f"(alpha {op2['alpha']:.1f}, clamped_low {op2['clamped_low']})")
     row = screener.metrics_for("s1223", 3e5, 7.0)
     check("screener rows carry the CL_max lower-bound flag",
           row is not None and "CL_max_lower_bound" in row)
+
+    # boundary filtering: a section whose thickness is exactly the bound must
+    # pass (float noise in the exact-thickness compare must not exclude it)
+    all_rows = screener.screen(3e5, 7.0, thickness_pct_min=0.0,
+                               thickness_pct_max=25.0)
+    if all_rows:
+        t_at = max(r["thickness_pct"] for r in all_rows
+                   if r["thickness_pct"] <= 12.0)
+        kept = screener.screen(3e5, 7.0, thickness_pct_min=0.0,
+                               thickness_pct_max=t_at)
+        check("section at exactly the thickness bound is not filtered out",
+              any(abs(r["thickness_pct"] - t_at) < 1e-9 for r in kept),
+              f"(bound {t_at}%, {len(kept)} kept)")
+
+    # ---- 7b. model-shape regressions ----
+    # cap floor: a symmetric section at zero incidence has C_free ~ 0, but
+    # its ground-effect downforce is real — the saturation cap must not
+    # crush the whole estimate to zero
+    cfg0 = geometry.StackConfig.from_dict({
+        **DEFAULT, "stack_aoa_deg": 0.0,
+        "elements": [{"airfoil": "naca0012", "chord_ratio": 1.0}]})
+    r0 = analysis.analyze(cfg0, include_geometry=False)
+    c0 = r0["coefficients"]
+    check("symmetric section at zero incidence keeps a real ground gain",
+          c0["C_downforce_inviscid_ground"] > 0.1
+          and c0["C_downforce_estimated"] > 0.02,
+          f"(inviscid {c0['C_downforce_inviscid_ground']}, "
+          f"est {c0['C_downforce_estimated']})")
+    # sub-floor Reynolds numbers must be flagged, not silently clamped
+    cfg_lo = geometry.StackConfig.from_dict({
+        **DEFAULT, "chord_mm": 20, "speed_ms": 0.5})
+    r_lo = analysis.analyze(cfg_lo, include_geometry=False)
+    check("sub-floor Reynolds number is flagged and warned about",
+          r_lo["elements"][0]["re_clamped"]
+          and any("training floor" in w for w in r_lo["warnings"]),
+          f"(Re {r_lo['elements'][0]['Re']})")
+    check("normal Reynolds numbers carry no clamp flag",
+          not r0["elements"][0]["re_clamped"])
 
     # ---- 8. filesystem .dat cache staleness ----
     import tempfile
@@ -285,6 +367,22 @@ def main():
     dn_v = [p["downforce_n"] for p in sw_v["points"]]
     check("downforce increases monotonically with speed",
           all(a < b for a, b in zip(dn_v, dn_v[1:])), f"({dn_v})")
+
+    # sweep n_warnings must match analyze() at the same point, including the
+    # sub-floor-Reynolds caveat (a small chord at low speed drops under the
+    # surrogate floor) — the map must not understate model-validity warnings
+    cfg_sm = geometry.StackConfig.from_dict({
+        **DEFAULT, "chord_mm": 100, "n_panels_per_side": 40,
+        "elements": [{"airfoil": "s1223", "chord_ratio": 1.0}]})
+    sw_lo = analysis.sweep(cfg_sm, "speed_ms", [1.0, 15.0])
+    import dataclasses as _dc
+    a_lo = analysis.analyze(_dc.replace(cfg_sm, speed_ms=1.0),
+                            include_geometry=False)
+    check("sweep n_warnings counts the sub-floor-Re caveat like analyze()",
+          sw_lo["points"][0]["n_warnings"] == len(a_lo["warnings"])
+          and any("training floor" in w for w in a_lo["warnings"]),
+          f"(sweep {sw_lo['points'][0]['n_warnings']} vs "
+          f"analyze {len(a_lo['warnings'])})")
 
     print(f"\n{sum(results)}/{len(results)} model/data checks passed")
     return all(results)

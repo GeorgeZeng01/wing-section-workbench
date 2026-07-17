@@ -223,7 +223,12 @@ def solve(element_coords: list[np.ndarray], alpha_deg: float = 0.0,
 def solve_pair(element_coords: list[np.ndarray], alpha_deg: float = 0.0,
                ref_chord: float = 1.0) -> tuple[PanelSolution, PanelSolution]:
     """(free_air, ground) solutions sharing panelization and base influence
-    matrices — cheaper than two independent solve() calls."""
+    matrices — cheaper than two independent solve() calls. Same contract as
+    solve(ground=True): the ground half is only physical at alpha_deg=0."""
+    if abs(alpha_deg) > 1e-9:
+        raise ValueError("solve_pair requires alpha_deg=0 (the image plane "
+                         "is only a ground plane for a parallel freestream) "
+                         "— rotate the geometry instead")
     geo, eval_pts, infl = _base_matrices(element_coords)
     free = _assemble_and_solve(geo, *infl, alpha_deg, ref_chord)
     ground_infl = _image_matrices(geo, eval_pts, infl)

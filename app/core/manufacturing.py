@@ -82,6 +82,10 @@ def parse(spec: str) -> tuple[str, float, str]:
     gap_c = float(gap_s)
     if not (0.0 < gap_c <= GAP_C_MAX):
         raise ValueError(f"TE gap {gap_c} out of range in {spec!r}")
+    # anywhere, not just the head: a shape: wrapper between two mfg: layers
+    # would otherwise smuggle a second TE treatment past geometry._validate
+    if "mfg:" in base.lower():
+        raise ValueError(f"nested mfg: specs are not allowed: {spec!r}")
     return mode, gap_c, base
 
 

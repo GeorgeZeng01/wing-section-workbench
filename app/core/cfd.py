@@ -114,13 +114,20 @@ def _closed_poly_m(coords_c: np.ndarray, chord_m: float) -> tuple[np.ndarray, bo
 
 
 def _build_mesh(cfg: StackConfig, polys: list[tuple[np.ndarray, bool]],
-                msh_path: Path, preset: dict, min_clear_c: float) -> dict:
+                msh_path: Path, preset: dict, min_clear_c: float,
+                saved_path: str | None = None) -> dict:
     import gmsh
     c = cfg.chord_m
     h1, _ = first_layer(cfg)
     # interruptible would install a SIGINT handler — illegal outside the
     # main thread, and the server calls this from a worker pool
     gmsh.initialize(interruptible=False)
+    # the PATH clobber happens inside initialize(): restore immediately so
+    # the broken-PATH window is milliseconds, not the whole meshing run —
+    # concurrent threads launch subprocesses (docker probes, Show in folder)
+    # and must not see the gutted PATH. finalize() clobbers again; the
+    # caller's finally restores after that too.
+    _restore_env_path(saved_path)
     try:
         gmsh.option.setNumber("General.Terminal", 0)
         gmsh.model.add("wing_section")
@@ -261,7 +268,8 @@ functions
         rhoInf          {cfg.rho:g};
         liftDir         (0 -1 0);   // installed frame: Cl downforce-positive
         dragDir         (1 0 0);
-        CofR            (0 0 0);    // main-element leading edge
+        CofR            (0 0 0);    // ground point below the main LE (x=0);
+                                    // Cl/Cd are CofR-independent
         pitchAxis       (0 0 1);
         magUInf         {cfg.speed_ms:g};
         lRef            {cfg.chord_m:g};        // main chord
@@ -612,6 +620,18 @@ fi
 source "$BASHRC"
 set -e
 
+# Rerun safety: a second run on a finished (or crashed) case would otherwise
+# continue from latestTime — potentialFoam would overwrite the solved fields
+# and simpleFoam would exit immediately at endTime, regenerating results.txt
+# from stale data. Reset to a clean start instead: every run of this script
+# is a full, reproducible solve.
+if ls -d [0-9]*.[0-9]* [1-9]* postProcessing 2>/dev/null | grep -q .; then
+    echo "== previous run detected - resetting the case to a clean start"
+    rm -rf postProcessing processor* constant/polyMesh
+    find . -maxdepth 1 -regextype posix-extended -type d \
+        -regex '\./[0-9]+(\.[0-9]+)?' ! -name 0 -exec rm -rf {{}} +
+fi
+
 echo "== gmshToFoam"
 gmshToFoam mesh.msh > log.gmshToFoam 2>&1
 # gmshToFoam types every patch as a generic 'patch': the z-planes must be
@@ -685,7 +705,9 @@ The script sources the newest OpenFOAM under /usr/lib/openfoam, converts
 the mesh (gmshToFoam), fixes patch types (frontAndBack -> empty, ground
 and wing patches -> wall), runs checkMesh, initializes with potentialFoam,
 then simpleFoam (steady, k-omega SST, up to {n_iters} iterations with
-residual stopping) and writes results.txt.
+residual stopping) and writes results.txt. Rerunning the script resets
+the case to a clean start first (previous time directories and
+postProcessing are removed), so every run is a full, reproducible solve.
 
 RESULTS
 -------
@@ -736,6 +758,19 @@ def build_case(cfg: StackConfig, out_dir: Path, mesh_size: str = "medium",
         raise ValueError("elements intersect — open the slots before meshing")
     installed = geometry.install_stack(design, cfg.ride_height_c)
     polys = [_closed_poly_m(e["coords"], cfg.chord_m) for e in installed]
+    # the domain is a fixed box (Y_TOP_C chords tall): a validated config can
+    # still push the section out of it (e.g. a huge ride height on a small
+    # chord), which would produce a broken or impossible mesh — refuse with a
+    # clear message instead
+    y_top_c = max(e["coords"][:, 1].max() for e in installed)
+    x_lo_c = min(e["coords"][:, 0].min() for e in installed)
+    x_hi_c = max(e["coords"][:, 0].max() for e in installed)
+    if y_top_c > 0.75 * Y_TOP_C or x_lo_c < -0.5 * X_UP_C \
+            or x_hi_c > 0.5 * X_DOWN_C:
+        raise ValueError(
+            f"the installed section (top at {y_top_c:.2f} chords above the "
+            f"ground) does not fit the CFD domain ({Y_TOP_C:g} chords tall) "
+            f"with clearance — reduce the ride height relative to the chord")
     min_clear_c = min([cfg.ride_height_c]
                       + [e["slot_gap"] for e in installed if "slot_gap" in e])
 
@@ -745,7 +780,7 @@ def build_case(cfg: StackConfig, out_dir: Path, mesh_size: str = "medium",
         saved_path = _real_env_path()
         try:
             stats = _build_mesh(cfg, polys, out_dir / "mesh.msh", preset,
-                                min_clear_c)
+                                min_clear_c, saved_path)
         except MeshError:
             raise
         except Exception as e:

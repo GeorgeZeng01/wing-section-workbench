@@ -79,7 +79,10 @@ def parse(spec: str) -> tuple[list[float], float, str]:
     if not (np.isfinite(ts) and TS_LIMIT[0] <= ts <= TS_LIMIT[1]):
         raise ValueError(f"thickness scale out of {TS_LIMIT} in {spec!r}")
     base = parts[5]
-    if base.lower().startswith("shape:"):
+    # anywhere, not just the head: an mfg: wrapper between two shape: layers
+    # ("shape:...:mfg:...:shape:...:af") would otherwise smuggle a second,
+    # stacked shape modification past this guard
+    if "shape:" in base.lower():
         raise ValueError("nested shape: specs are not allowed")
     return b, ts, base
 

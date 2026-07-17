@@ -103,6 +103,34 @@ spec_c = mfg.derived_spec("custom:my-foil", 0.005, "truncate")
 check("base specs containing ':' survive parsing",
       mfg.parse(spec_c)[2] == "custom:my-foil")
 
+# a shape: wrapper between two mfg: layers must not smuggle in a second TE
+# treatment (direct nesting is caught by geometry validation already)
+try:
+    mfg.parse("mfg:thicken:0.0030:shape:+0.001:0:0:1.0:"
+              "mfg:thicken:0.0030:s1223")
+    check("nested mfg via shape wrapper rejected", False)
+except ValueError:
+    check("nested mfg via shape wrapper rejected", True)
+# ...while mfg-around-shape (the legitimate build-time layering) still parses
+check("mfg wrapping a shaped section still parses",
+      mfg.parse("mfg:thicken:0.0030:shape:+0.001:0:0:1.0:s1223")[2]
+      == "shape:+0.001:0:0:1.0:s1223")
+
+# a raw mfg: element spec + the global manufacturing block must NOT stack a
+# second mfg layer (that produced an invalid mfg:...:mfg:... spec that failed
+# analysis) — effective_spec respects the explicit per-element treatment
+cfg_rawmfg = geometry.StackConfig.from_dict({
+    **BASE,
+    "elements": [{"airfoil": "mfg:thicken:0.004:s1223", "chord_ratio": 1.0}],
+    "manufacturing": {"te_gap_mm": 1.2, "te_mode": "thicken"}})
+eff = geometry.effective_spec(cfg_rawmfg, 0)
+r_rawmfg = analysis.analyze(cfg_rawmfg, include_geometry=False)
+check("raw mfg element + manufacturing block does not double-wrap",
+      eff == "mfg:thicken:0.004:s1223"
+      and eff.lower().count("mfg:") == 1
+      and r_rawmfg["forces"]["downforce_n"] > 0,
+      f"(eff {eff}, {r_rawmfg['forces']['downforce_n']} N)")
+
 name, rp = airfoils.repaneled(spec, 70)
 check("mfg spec resolves + repanels, gap survives repaneling",
       "(mfg)" in name and abs(mfg.te_gap(rp) - gap_c) < 1e-6,
@@ -230,8 +258,12 @@ cfg_waist = geometry.StackConfig.from_dict(
                        "min_thickness_mm": 0}})
 rep_tw = geometry.geometry_report(cfg_waist)
 e_tw = rep_tw["design"][0]["mfg"]
+# e377 IS thinner than 2 mm over most of its aft: the waist must be flagged
+# AND warned about (the old equivalence also passed if a regression made
+# truncate stop leaving a waist silently)
 check("truncate: remaining waist is measured and warned about",
-      (not e_tw["waist_ok"]) == any("waists to" in w for w in rep_tw["warnings"]),
+      (not e_tw["waist_ok"])
+      and any("waists to" in w for w in rep_tw["warnings"]),
       f"(waist_ok {e_tw['waist_ok']}, min aft {e_tw['min_aft_thickness_mm']} mm)")
 
 # truncate mode also solves end-to-end

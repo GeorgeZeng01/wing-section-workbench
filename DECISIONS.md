@@ -865,6 +865,76 @@ and restores it after; the regression suite meshes and asserts the PATH
 survived, and the docker runner additionally passes `env=os.environ` to
 every child as belt and braces.
 
+## Pre-release hardening
+
+A pre-release round drove three successive adversarial review passes over the
+whole tool — each pass targeting the code the previous pass had just changed —
+followed by a security audit of the application's attack surface. Forty-one
+functional defects were confirmed and fixed; the test suite grew to ~290
+checks, and every fix below is pinned by a regression.
+
+**Concurrency and lifecycle correctness.** The session store wrote through a
+single shared temp file, so the debounced autosave racing the page-close
+beacon (or a second window) could raise a Windows sharing violation and lose
+the final save; each writer now uses a pid/thread-unique temp file with a
+short replace retry. The optimizer's re-attach path was rebuilt to match the
+RANS tab's: a reloaded page (or a second window) rediscovers a running search
+through a new `/api/optimize/current` endpoint that returns the *most recent*
+active job, a single failed status poll no longer orphans a still-running
+search, cancelling during the final refinement phase now returns the coarse
+winner instead of nothing, and a completed job clears its handle so the tab
+can re-attach again. The RANS runner labels its containers with the owning
+process id so the orphan sweep force-removes only leftovers from a crashed
+server and never a live run started by another window, and its one-job guard
+now claims the slot under the lock while doing the slow Docker housekeeping
+outside it, so status and cancel stay responsive.
+
+**Windows subprocess robustness.** gmsh replaces the real Win32 process PATH
+during a mesh build; a prior round restored it afterwards, but a concurrent
+Docker call *during* the build still saw the gutted PATH, and Windows resolves
+a bare `docker` through the live PATH regardless of the child's environment.
+The runner now resolves `docker` to an absolute path once and restores the
+PATH immediately after gmsh initialises (milliseconds, not the whole build).
+The desktop launcher's health probe and the test harness now use a
+proxy-free opener — an environment or system HTTP proxy was routing the
+loopback probe away from the server, so the app reported "server did not
+start" on proxied machines although it was up.
+
+**Parser and model edge cases.** `.dat` parsing now handles a UTF-8 BOM on
+the file-read path (the locale codec glued it to the first coordinate),
+drops exactly-duplicated consecutive points at the door instead of failing
+deep in the spline repanel, and rejects a two-number name line while keeping
+a genuine first coordinate of a near-vertically stored contour (the
+header-artifact test measures span over both axes). The ground-gain cap is
+floored at a small `|C_free|` so a symmetric section at zero incidence keeps
+its real ground-effect load instead of collapsing to zero, and one cap
+definition is now shared between the estimate and the RANS k_g inversion so a
+suggested k_g always reproduces the run it came from. Sub-floor Reynolds
+numbers are flagged in both the analysis and the operating-map warning count.
+The layered-spec generators (manufacturing TE prep, shape refinement) were
+made idempotent so they never emit a doubly-wrapped `mfg:`/`shape:` spec that
+the resolver would reject — the earlier fix had tightened the resolver's
+guards, which then rejected specs the app itself generated.
+
+**Security.** The tool is a single-user local application, so the audit was
+scoped to a hostile web page reaching the loopback server and to malicious
+input files. Two DOM-XSS sinks were closed: a shared project file controls
+airfoil display names and element specs, which were written to `innerHTML` in
+the viewport legend and the airfoil-search dropdown; both now build their
+nodes with `textContent`, so a crafted name renders as inert text. The upload
+endpoint passed its `dat_text` to a parser that treats a newline-free
+`.dat`-suffixed string as a filesystem path, bypassing the project-root
+containment check that guards the resolver — API input is now always parsed
+as literal content. As defence in depth on top of the existing Host-header
+allowlist (which blocks DNS-rebinding) and the JSON-only request bodies
+(which reject non-preflighted cross-site POSTs), the server now also rejects
+any request carrying a present, non-loopback `Origin`; same-origin loopback
+traffic and top-level navigations, which carry a loopback Origin or none, are
+unaffected. The subprocess, generated-`run.sh`, and OpenFOAM case-file
+surfaces were audited and found clean: every subprocess call passes an
+argument list, and every case-file interpolation is a number or a
+server-generated patch name, never a user string.
+
 ## Known limitations
 
 Documented, not fixed. The custom-airfoil registry lives in server memory

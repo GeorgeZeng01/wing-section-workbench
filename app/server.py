@@ -43,19 +43,42 @@ async def _track_activity(request, call_next):
     return await call_next(request)
 
 
+def _hostname(value: str) -> str:
+    """The bare host of a Host/Origin value: strip scheme, port and (for
+    IPv6) keep the bracketed literal."""
+    v = value.strip().lower()
+    if "://" in v:
+        v = v.split("://", 1)[1]
+    v = v.split("/", 1)[0]          # drop any path
+    if v.startswith("["):
+        return v.split("]", 1)[0] + "]"
+    return v.rsplit(":", 1)[0] if ":" in v else v
+
+
 @app.middleware("http")
 async def _local_host_only(request, call_next):
-    """Reject requests whose Host header is not a loopback name.
+    """Reject requests that are not same-origin loopback traffic.
 
-    The server binds to 127.0.0.1, but a hostile web page can still reach it
-    via DNS rebinding (a domain that resolves to 127.0.0.1 keeps the
-    attacker's Host header). Pinning the Host closes that hole."""
-    raw = (request.headers.get("host") or "").lower()
-    host = (raw.split("]")[0] + "]") if raw.startswith("[") \
-        else raw.rsplit(":", 1)[0]
+    Two defenses, both against a hostile web page trying to drive this local
+    server from the user's browser:
+
+    * Host allowlist — the server binds 127.0.0.1, but a DNS-rebinding page
+      (a domain that re-resolves to 127.0.0.1) keeps the attacker's Host
+      header, so pinning the Host to a loopback name closes that hole.
+    * Origin allowlist — a cross-site page's requests carry its own Origin.
+      The JSON-only request bodies and the absent CORS headers already stop
+      the realistic cross-site POST, but rejecting any present non-loopback
+      Origin is cheap defense-in-depth and makes the boundary explicit.
+      Same-origin traffic carries a loopback Origin (or none, for top-level
+      navigations), so this never touches the app's own requests.
+    """
+    from fastapi.responses import JSONResponse
+    host = _hostname(request.headers.get("host") or "")
     if host not in _LOCAL_HOSTS:
-        from fastapi.responses import JSONResponse
         return JSONResponse({"detail": "forbidden host"}, status_code=403)
+    origin = request.headers.get("origin")
+    if origin and _hostname(origin) not in _LOCAL_HOSTS:
+        return JSONResponse({"detail": "forbidden origin"}, status_code=403)
     return await call_next(request)
 
 
@@ -166,7 +189,10 @@ def airfoil_geometry(spec: str):
 @app.post("/api/airfoils/upload")
 def upload_airfoil(body: UploadBody):
     try:
-        name, coords = airfoils.read_dat(body.dat_text, body.name)
+        # dat_text is untrusted request content — never let a single-line
+        # ".dat"-looking value be interpreted as a filesystem path to read
+        name, coords = airfoils.read_dat(body.dat_text, body.name,
+                                         allow_path=False)
         coords = airfoils.normalize(coords)
         if len(coords) > 800:
             raise ValueError(f"{len(coords)} points — limit is 800")
@@ -274,6 +300,14 @@ def optimize_start(body: OptimizeBody):
         # errors, whatever exception type they surface as
         raise HTTPException(422, detail=str(e))
     return {"job_id": job_id}
+
+
+@app.get("/api/optimize/current")
+def optimize_current():
+    """Active/most-recent optimizer job id — a reloaded page re-attaches
+    through this instead of orphaning a CPU-bound search it can no longer
+    see or cancel. Declared before /api/optimize/{job_id}."""
+    return optimizer.current()
 
 
 @app.get("/api/optimize/{job_id}")
@@ -399,7 +433,12 @@ _EXPORT_TYPES = {
     "zip": ("application/zip", "zip"),
 }
 
-EXPORTS_DIR = Path(__file__).resolve().parents[1] / "exports"
+# WSS_EXPORTS_DIR override: test servers must not drop files into the real
+# exports folder (same isolation contract as WSS_DATA_DIR for the session)
+import os as _os_env
+
+EXPORTS_DIR = Path(_os_env.environ.get(
+    "WSS_EXPORTS_DIR", Path(__file__).resolve().parents[1] / "exports"))
 
 
 def _export_bytes(fmt: str, body: ExportBody) -> tuple[bytes, str, str]:
@@ -615,13 +654,28 @@ def session_get():
 def session_put(body: SessionBody):
     import json as _json
     import os as _os
+    import time as _time
     data = _json.dumps(body.state)
     if len(data) > SESSION_MAX_BYTES:
         raise HTTPException(422, detail="session state too large to persist")
     SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tmp = SESSION_FILE.with_suffix(".json.tmp")
-    tmp.write_text(data, encoding="utf-8")
-    _os.replace(tmp, SESSION_FILE)
+    # unique tmp per writer: concurrent saves (debounced autosave racing the
+    # pagehide beacon) must not collide on a shared tmp name, and os.replace
+    # on Windows can transiently fail while another writer holds the target
+    tmp = SESSION_FILE.with_name(
+        f".session.{_os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_text(data, encoding="utf-8")
+        for attempt in range(4):
+            try:
+                _os.replace(tmp, SESSION_FILE)
+                break
+            except PermissionError:
+                if attempt == 3:
+                    raise
+                _time.sleep(0.05 * (attempt + 1))
+    finally:
+        tmp.unlink(missing_ok=True)
     return {"ok": True, "bytes": len(data)}
 
 

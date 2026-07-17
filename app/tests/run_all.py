@@ -33,10 +33,12 @@ def free_port() -> int:
 
 
 def wait_healthy(base: str, timeout: float = 30.0) -> bool:
+    # proxy-free: a system/env proxy must not swallow the loopback probe
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(f"{base}/api/health", timeout=2) as r:
+            with opener.open(f"{base}/api/health", timeout=2) as r:
                 if r.status == 200:
                     return True
         except Exception:
@@ -58,10 +60,12 @@ def main() -> int:
     # /api/session and must never clobber the real working state
     import tempfile
     scratch_data = tempfile.mkdtemp(prefix="wss_test_data_")
+    scratch_exports = tempfile.mkdtemp(prefix="wss_test_exports_")
     server = subprocess.Popen(
         [PY, "-m", "uvicorn", "app.server:app", "--port", str(port),
          "--log-level", "warning"],
-        cwd=ROOT, env={**os.environ, "WSS_DATA_DIR": scratch_data})
+        cwd=ROOT, env={**os.environ, "WSS_DATA_DIR": scratch_data,
+                       "WSS_EXPORTS_DIR": scratch_exports})
     try:
         if not wait_healthy(base):
             print("FAIL  scratch server did not become healthy")
@@ -77,6 +81,9 @@ def main() -> int:
             server.wait(timeout=10)
         except subprocess.TimeoutExpired:
             server.kill()
+        import shutil
+        shutil.rmtree(scratch_data, ignore_errors=True)
+        shutil.rmtree(scratch_exports, ignore_errors=True)
 
     print("\n" + "=" * 50)
     if failed:

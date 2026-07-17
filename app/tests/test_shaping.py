@@ -40,7 +40,10 @@ check("base specs containing ':' survive parsing",
 
 for bad in ("shape:9:0:0:1.0:s1223",          # bump out of range
             "shape:+0.001:+0.001:+0.001:5.0:s1223",   # ts out of range
-            "shape:+0.001:0:0:1.0:shape:+0.001:0:0:1.0:s1223"):  # nested
+            "shape:+0.001:0:0:1.0:shape:+0.001:0:0:1.0:s1223",   # nested
+            # nested with an mfg: wrapper hiding the second shape: layer
+            "shape:+0.001:0:0:1.0:mfg:thicken:0.0030:"
+            "shape:+0.001:0:0:1.0:s1223"):
     try:
         shaping.parse(bad)
         check(f"hostile spec rejected ({bad[:28]}…)", False)
@@ -117,11 +120,16 @@ check("optimizer runs with shape variables",
       and all(k in shape_keys for k in optimizer.SHAPE_KEYS),
       f"({snap['state']}, {snap['n_eval']} evals)")
 bc = snap["best_config"]
-check("best config carries applicable (possibly shaped) airfoils",
-      all(isinstance(e["airfoil"], str) and
-          geometry.StackConfig.from_dict(
-              {**cfg_d, "elements": [dict(x) for x in bc["elements"]]})
-          for e in bc["elements"]))
+try:
+    _cfg_bc = geometry.StackConfig.from_dict(
+        {**cfg_d, "elements": [dict(x) for x in bc["elements"]]})
+    _bc_valid = all(isinstance(e["airfoil"], str) for e in bc["elements"])
+except Exception as _exc:
+    _bc_valid, _exc_msg = False, str(_exc)
+else:
+    _exc_msg = ""
+check("best config validates and carries string airfoil specs",
+      _bc_valid, f"({_exc_msg})")
 
 # re-optimizing a shaped design seeds from (and does not nest) the shape
 cfg_re = {**cfg_d, "elements": [
@@ -135,6 +143,30 @@ check("re-optimizing a shaped design seeds from its parameters",
       job2.config["elements"][0]["airfoil"] == "s1223"
       and abs(x0[i_b80] - 0.009) < 1e-9,
       f"(x0[b80] = {x0[i_b80]})")
+
+# an mfg: layer wrapping a shape: layer + opt_shape must strip the inner
+# shape (keeping the mfg wrapper on the un-shaped base) so apply_vector never
+# stacks a second shape: layer that the resolver would reject
+# manufacturing ON is the load-bearing case: effective_spec must NOT add a
+# second mfg layer to the re-shaped "shape:...:mfg:...:base" apply_vector
+# emits, or every objective evaluation raises "nested mfg:" and the run fails
+cfg_ms = {**cfg_d,
+          "manufacturing": {"te_gap_mm": 1.2, "te_mode": "thicken"},
+          "elements": [
+              {**cfg_d["elements"][0],
+               "airfoil": "mfg:thicken:0.004:shape:+0.002:0:0:1.0:s1223"},
+              cfg_d["elements"][1]]}
+job3 = optimizer.Job(cfg_ms, {"target_downforce_n": 250, "budget": 120,
+                              "mode": "local", "opt_shape": True})
+unwrapped = job3.config["elements"][0]["airfoil"]
+job3.run()
+snap3 = job3.snapshot()
+check("mfg-wrapped shape + manufacturing re-optimizes with no eval errors",
+      "shape:" not in unwrapped and unwrapped.lower().startswith("mfg:")
+      and snap3["state"] == "done" and snap3["n_eval"] > 0
+      and snap3["n_error"] == 0,
+      f"(unwrapped {unwrapped}, {snap3['state']}, "
+      f"{snap3['n_eval']} evals, {snap3['n_error']} errors)")
 
 print(f"\n{sum(results)}/{len(results)} shaping checks passed")
 sys.exit(0 if all(results) else 1)

@@ -33,6 +33,10 @@ def _metrics_row(spec: str, re: float, ncrit: float, cl_ref: float,
         return None
     return {
         "spec": spec,
+        # exact thickness kept beside the display-rounded one: the filter
+        # must compare against the optimizer's buildable floor unrounded,
+        # or boundary sections slip through / get dropped by 0.05 %c
+        "_thickness_exact": float(info["max_thickness"] * 100),
         "CL_max": round(m["CL_max"], 3),
         # polar still climbing at the last analyzed angle: CL_max is a
         # lower bound, not a stall value — surfaced so consumers can say so
@@ -76,7 +80,13 @@ def screen(re: float, ncrit: float = 9.0, cl_ref: float = 1.5,
             if len(_cache) >= _MAX_CACHE:
                 _cache.pop(next(iter(_cache)))
             _cache[key] = rows
+    # epsilon on both bounds: _thickness_exact = 100 * (already-rounded value)
+    # carries ~1e-15 float noise, so a section at exactly the user's bound
+    # (e.g. 7.0 % typed against a 7.000000000000001 value) would be dropped
+    _te = 1e-6
     out = [r for r in rows
-           if thickness_pct_min <= r["thickness_pct"] <= thickness_pct_max
+           if thickness_pct_min - _te <= r.get("_thickness_exact",
+                                                r["thickness_pct"])
+           <= thickness_pct_max + _te
            and (include_low_confidence or r["confidence"] >= 0.5)]
     return out
