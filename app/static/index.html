@@ -6,7 +6,7 @@
 <title>Wing Section Studio</title>
 <link rel="icon" href="/static/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" href="/static/favicon.png">
-<link rel="stylesheet" href="/static/css/app.css?v=9">
+<link rel="stylesheet" href="/static/css/app.css?v=10">
 </head>
 <body>
 
@@ -141,13 +141,9 @@
   <!-- ============ viewport ============ -->
   <section class="panel viewport-panel" aria-label="Section drawing">
     <div class="vp-toolbar">
-      <div class="seg" role="group" aria-label="View orientation">
-        <button id="frame-installed" class="seg-btn active"
-                title="How the wing runs on the car: inverted, above the road. Analysis always uses this orientation.">As driven</button>
-        <button id="frame-design" class="seg-btn"
-                title="Mirror view with lift up — the orientation airfoil catalogs and CAD sketches use. Same geometry, just flipped for viewing.">Upright</button>
-      </div>
-      <span id="frame-note" class="frame-note"></span>
+      <span class="frame-note"
+            title="How the wing runs on the car: inverted, above the road. Analysis always uses this orientation. Exports can still be written in the upright catalog/CAD convention — see the Export tab.">
+        As driven — inverted above the road</span>
       <label class="check"><input id="vp-dims" type="checkbox" checked> Dimensions</label>
       <button id="vp-fit" class="btn tiny ghost" title="Fit drawing to view">Fit</button>
       <span class="vp-nav-hint">scroll to zoom · drag to pan</span>
@@ -159,8 +155,8 @@
         <b>Starting template loaded</b> — a proven two-element section, drawn
         the way it runs on the car: <i>inverted</i>, suction side toward the
         road. Edit the elements on the left, set your target, then
-        <b>Analyze section</b>. The <b>Upright</b> toggle above only flips the
-        view for catalog-style viewing.
+        <b>Analyze section</b>. Exports can also be written upright
+        (catalog/CAD convention) from the Export tab.
         <button id="vp-hint-close" class="btn tiny">Got it</button>
       </div>
     </div>
@@ -235,10 +231,12 @@
           <div class="fields two-col">
             <label class="field"><span class="f-label">Target</span>
               <span class="f-wrap"><input id="opt-target" type="number" step="10" value="250"><i>N</i></span></label>
-            <label class="field"><span class="f-label">Search</span>
+            <label class="field"
+                   title="Global explores the whole variable space (differential evolution) before polishing — use it to find the best design for a target. Refine current skips the exploration and improves the design you have from where it is (Nelder–Mead) — quicker, stays in the same basin, ideal after small manual edits.">
+              <span class="f-label">Search</span>
               <span class="f-wrap"><select id="opt-mode" class="select-inline">
-                <option value="global">Global</option>
-                <option value="refine">Refine current</option>
+                <option value="global">Global (explore, then polish)</option>
+                <option value="local">Refine current design</option>
               </select><i></i></span></label>
             <label class="field"
                    title="Fast/Standard stop as soon as the target is reached — quick, but repeated runs can land in different drag basins. Thorough explores the whole search space before refining (takes minutes) and converges to the same lowest-drag design on every run.">
@@ -349,9 +347,9 @@
             <option value="fine">Fine (~90k cells, slow)</option>
           </select><i></i></span></label>
         <label class="field inline"
-               title="Upper bound on solver iterations. The run stops earlier on its own once residuals converge; on a loaded high-lift section it may instead settle into a bounded oscillation, and the result is then the mean of the last iterations.">
+               title="Upper bound only — the run stops on its own as soon as the force history flattens (or residuals converge), so a generous cap costs nothing when the solve behaves. Fine meshes on heavily loaded sections can genuinely need many thousands of iterations; a run that hits this cap while still trending is reported as not converged.">
           <span class="f-label">Max iterations</span>
-          <span class="f-wrap"><input id="rans-iters" type="number" step="100" min="100" max="20000" value="3000" style="width:70px"><i></i></span></label>
+          <span class="f-wrap"><input id="rans-iters" type="number" step="100" min="100" max="20000" value="10000" style="width:70px"><i></i></span></label>
         <button id="btn-rans-run" class="btn small primary" disabled>Verify with RANS</button>
         <button id="btn-rans-cancel" class="btn small ghost" disabled>Cancel</button>
         <span id="rans-note" class="note">checking Docker…</span>
@@ -367,6 +365,19 @@
         <div id="rans-result"><div class="empty-note">No verification run yet.
           Set up a section, then Verify with RANS — a coarse run typically
           takes a few minutes.</div></div>
+      </div>
+      <div id="rans-flow" style="margin-top:10px" hidden>
+        <div class="tab-controls">
+          <span class="f-label">Flow field</span>
+          <div class="seg" role="group" aria-label="Flow field quantity">
+            <button id="rans-flow-umag" class="seg-btn active">Velocity</button>
+            <button id="rans-flow-cp" class="seg-btn">Pressure (Cp)</button>
+          </div>
+          <span id="rans-flow-note" class="note">same view as the drawing:
+            as driven, ground at the bottom, flow left to right</span>
+        </div>
+        <img id="rans-flow-img" alt="RANS section flow field"
+             style="max-width:100%; border:1px solid #2a3550; border-radius:6px">
       </div>
     </div>
 
@@ -524,6 +535,6 @@
   </div>
 </template>
 
-<script type="module" src="/static/js/app.js?v=9"></script>
+<script type="module" src="/static/js/app.js?v=10"></script>
 </body>
 </html>

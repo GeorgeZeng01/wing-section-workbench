@@ -439,6 +439,11 @@ def part_i(made):
         "Export to DXF, Selig .dat, XYZ points, CSV, SVG, and a JSON "
         "manifest, in both the installed and upright orientations — plus a "
         "ready-to-run OpenFOAM 2D RANS case.",
+        "Verify a finished design against genuine RANS CFD without leaving "
+        "the application: one click runs the OpenFOAM case in a local "
+        "Docker container, watches it converge, compares the result with "
+        "the estimate, renders the flow field, and offers the calibration "
+        "factor that reconciles the two.",
     ]))
 
     # 2 Workflow
@@ -480,15 +485,18 @@ def part_i(made):
          "drag tiles, per-element loading meters, and plain-language "
          "warnings."),
         ("Detail tabs", "Pressure distributions, section polars, the "
-         "optimizer, the airfoil screener, and export."),
+         "optimizer, the airfoil screener, operating maps, RANS "
+         "verification, and export."),
     ]))
     s.append(callout(
-        "Two orientations, one geometry",
-        "The drawing shows the wing the way it runs on the car — inverted, "
-        "above the road — because that is the orientation the analysis uses. "
-        "The <b>Upright</b> toggle mirrors it into the convention airfoil "
-        "catalogs and CAD sketches use. Both are exact rigid transforms of "
-        "the same section; nothing about the physics changes."))
+        "One drawing orientation: as driven",
+        "The drawing always shows the wing the way it runs on the car — "
+        "inverted, above the road — because that is the orientation the "
+        "analysis uses. CAD output is a separate choice: the Export tab "
+        "writes files in either the installed frame or the upright "
+        "convention airfoil catalogs and CAD sketches use. Both are exact "
+        "rigid transforms of the same section; nothing about the physics "
+        "changes."))
 
     # 4 Configure
     s.append(heading("Step 1 — Configure the section"))
@@ -590,6 +598,23 @@ def part_i(made):
         "configuration with one click — so build-tolerance and packaging "
         "trade-offs stay visible instead of being hidden inside a single "
         "number."))
+    s.append(h3("Search modes"))
+    s.append(kv_table([
+        ("Global (explore, then polish)", "Explores the whole variable "
+         "space with an evolutionary search before refining the best find — "
+         "use it to discover the best design for a target, wherever it "
+         "lives."),
+        ("Refine current design", "Skips the exploration and improves the "
+         "configured design from where it stands. Quicker, and it stays in "
+         "the same design basin — the right tool after small manual edits, "
+         "or to re-tighten a design toward its target."),
+    ]))
+    s.append(body(
+        "Either way, the starting design is always reachable: the search "
+        "bounds and the health penalties widen automatically to include the "
+        "configuration you started from, so optimizing an already-aggressive "
+        "design can only improve on it, never hand back less than you had "
+        "(Part II, <i>The optimizer</i>)."))
     s.append(h3("Effort and reproducibility"))
     s.append(kv_table([
         ("Fast / Standard", "Stop as soon as the target is reached cleanly — "
@@ -752,13 +777,14 @@ def part_i(made):
         "thickness per element."))
 
     # 11 Maps + RANS handoff
-    s.append(heading("Operating maps and the RANS handoff"))
+    s.append(heading("Operating maps and RANS verification"))
     s.append(body(
         "Two closing tools round out the workflow. The operating maps show "
         "how a finished design behaves away from its design point — a wing "
-        "tuned at one ride height rides at many — and the OpenFOAM export "
-        "hands a shortlisted section to a genuine RANS solver for "
-        "confirmation."))
+        "tuned at one ride height rides at many — and the RANS tools hand a "
+        "shortlisted section to a genuine Navier–Stokes solver for "
+        "confirmation, either with one click inside the application or as "
+        "an exported case."))
     s.append(h3("Operating maps"))
     s.append(body(
         f"The {B('Maps')} tab (beside the Airfoil screener) sweeps the "
@@ -785,29 +811,71 @@ def part_i(made):
         "an element past twice its isolated stall limit are flagged beneath "
         "the charts: the model is optimistic there, so treat those downforce "
         "values as upper bounds."))
-    s.append(h3("The OpenFOAM handoff"))
+    s.append(h3("The RANS case"))
     s.append(body(
-        "Everything this tool reports screens and ranks; RANS decides. The "
-        f"{B('OpenFOAM case')} card in the Export tab writes a complete, "
-        "ready-to-run two-dimensional RANS case for the current section: a "
-        "mesh with boundary layers resolved down to the wall on the wing "
-        "surfaces and on the ground beneath the wing, the steady "
+        "Everything this tool reports screens and ranks; RANS decides. Both "
+        "verification paths use the same complete, two-dimensional case "
+        "built from the current section: a mesh with boundary layers "
+        "resolved down to the wall on the wing surfaces, the steady "
         "k–ω&nbsp;SST setup, a ground plane moving at the freestream speed "
         "(the road, in the wing's frame), and automatic force-coefficient "
         "extraction. The reported lift coefficient is downforce-positive and "
         "referenced to the main chord — directly comparable to the "
-        "coefficients this guide has used throughout."))
+        "coefficients this guide has used throughout. Its drag coefficient "
+        "is the section's profile drag only: induced drag is a "
+        "three-dimensional effect a section case cannot see, so it is "
+        "compared against the estimate's profile share, never the total."))
     s.append(kv_table([
         ("Coarse (~15k cells)", "A first look — does the flow stay attached, "
-         "is the case healthy. Runs in minutes."),
-        ("Medium (~40k cells)", "The default; the standard confirmation run "
-         "for a shortlisted design."),
+         "is the case healthy. Converges in about a minute."),
+        ("Medium (~40k cells)", "The standard confirmation run for a "
+         "shortlisted design; typically a few minutes."),
         ("Fine (~90k cells)", "Final numbers, and the grid-sensitivity check "
-         "for a design you intend to commit to."),
+         "for a design you intend to commit to. Heavily loaded sections can "
+         "need many thousands of iterations here — let it run."),
     ]))
+    s.append(h3("In-app verification — the RANS verify tab"))
     s.append(body(
-        "The workflow: generate the case (it lands in the exports folder "
-        "like any other export), then run it from the case folder under "
+        f"The {B('RANS verify')} tab runs the case without leaving the "
+        "application. It needs Docker Desktop running (the button says so "
+        "when it is not; the first run downloads the official OpenFOAM "
+        "image, about a gigabyte, once). Press "
+        f"{B('Verify with RANS')}: the tab meshes the current section, "
+        "starts the solver in a container, and streams live convergence — "
+        "iteration count, lift and drag, and the lift history charted "
+        "against the panel estimate. The run stops itself as soon as the "
+        "force history is statistically flat (or the solver's residuals "
+        "converge first), so the generous iteration cap is an upper bound, "
+        "not a duration."))
+    s.append(body(
+        "A finished run reports the RANS coefficients — the mean over the "
+        "settled tail of the history, with the residual oscillation as a "
+        "±&nbsp;band — beside the panel estimate, the equivalent downforce "
+        "at the wing's reference area, and the drag comparison. If the run "
+        "hit its iteration cap while the lift was still trending, the "
+        "result is labelled "
+        f"{B('NOT CONVERGED')} in plain terms: the numbers are a "
+        "mid-transient snapshot, and the remedy — raise the cap and rerun — "
+        "is stated with it."))
+    s.append(body(
+        "Two more things arrive with the result. First, the "
+        f"{B('suggested ground-gain factor')}: the pinned calibration value "
+        "that would make the estimate reproduce the RANS sectional lift at "
+        "this operating point, applied to the configuration with one click "
+        "— the calibration loop of section 14, closed with real data. It is "
+        "only offered from a converged run. Second, the "
+        f"{B('flow field')}: the solved section flow rendered in the same "
+        "as-driven view as the drawing — velocity magnitude with "
+        "streamlines, or pressure coefficient — which shows at a glance "
+        "what the coefficients cannot: whether the slots are flowing, where "
+        "the venturi works, and whether the flap system is separated (the "
+        "usual reason RANS and the attached-flow screening estimate "
+        "disagree on an aggressive design)."))
+    s.append(h3("The exported case (WSL)"))
+    s.append(body(
+        f"The {B('OpenFOAM case')} card in the Export tab writes the same "
+        "case into the exports folder for manual runs, other machines, or "
+        "post-processing in ParaView. Run it from the case folder under "
         "WSL — the one-time OpenFOAM installation is described in the "
         "repository README:"))
     s.append(code("wsl -d Ubuntu -- bash run.sh"))
@@ -815,10 +883,11 @@ def part_i(made):
         "The script prepares the OpenFOAM environment, converts and checks "
         "the mesh, runs the solver, and writes the final coefficients to "
         f"{C('results.txt')}; each case's {C('README.txt')} records its "
-        "exact numbers and conventions. Compare the RANS downforce with the "
-        "estimate here, and re-tune the calibration factors (section 14) "
-        "against it — closing exactly the loop those factors were built "
-        "for."))
+        "exact numbers and conventions. The in-app and WSL paths execute "
+        "the identical script and agree with each other; compare either "
+        "result with the estimate here and re-tune the calibration factors "
+        "(section 14) against it — closing exactly the loop those factors "
+        "were built for."))
     return s
 
 
@@ -1171,6 +1240,19 @@ def part_ii(made):
         "loading penalty is weighted so that an honest miss of the target "
         "beats a design that only reaches it by driving an element deep into "
         "stall."))
+    s.append(body(
+        "Every soft band is widened once per run so the starting design's "
+        "own operating point is penalty-free, and the default search bounds "
+        "stretch to include its variable values. The reason is a "
+        "do-no-harm contract: the analysis page reports an aggressive "
+        "design's downforce as the headline number, so an optimizer that "
+        "refuses that same operating point could only ever return less than "
+        "the user already has. From a healthy start nothing changes — the "
+        "absolute envelope still bars the search from wandering into "
+        "separated-flow loading; from a hot start the penalty punishes "
+        "getting hotter than the baseline, not matching it. Bounds set "
+        "explicitly through the API, and the manufacturing thickness floor, "
+        "remain hard limits."))
     s.append(h3("Search, candidates, and reproducibility"))
     s.append(body(
         "The search is a seeded global phase (differential evolution) "
@@ -1204,11 +1286,16 @@ def part_ii(made):
     s.append(body(
         "The repository ships regression suites that exercise the solver "
         "physics, the manufacturing geometry (including the thickness floor "
-        "and plate detection), the optimizer (including determinism and "
-        "Thorough reproducibility), the shape system, and the API's failure "
+        "and plate detection), the optimizer (including determinism, "
+        "Thorough reproducibility, and the do-no-harm baseline contract), "
+        "the RANS runner (convergence verdicts, calibration gating, the "
+        "flow-field pipeline), the shape system, and the API's failure "
         "behaviour under hostile input. They run from a single command and "
         "form the contract the application is held to; every figure in Part "
-        "II of this guide is generated from the same core the suites test."))
+        "II of this guide is generated from the same core the suites test. "
+        "The RANS case itself is cross-checked two ways: the identical case "
+        "solved in the container and under WSL reports the same "
+        "coefficients."))
     s.append(callout(
         "What the numbers are for",
         "Treat every downforce and drag figure as a screening and ranking "

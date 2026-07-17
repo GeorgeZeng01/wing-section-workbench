@@ -83,6 +83,18 @@ check("empty data parses to empty lists", d["iters"] == [])
 d = cfd_run.parse_coefficient_dat("# Time Cd Cl\n1 0.5 1.0\nbroken row x\n2 0.6 1.2\n")
 check("malformed rows are skipped, not fatal", d["cl"] == [1.0, 1.2])
 
+d = cfd_run.drift([1.0] * 2000)
+check("drift on a flat history is ~0", d is not None and d < 1e-12)
+ramp = [2.0 + 0.001 * i for i in range(3000)]
+d = cfd_run.drift(ramp)
+check("drift on the measured climbing case is far above the stop bar",
+      d is not None and d > 0.05, f"({d})")
+check("drift needs enough rows to judge", cfd_run.drift([1.0] * 100) is None)
+cyc = [3.0 + (0.2 if i % 2 else -0.2) for i in range(3000)]
+d = cfd_run.drift(cyc)
+check("a bounded limit cycle counts as flat", d is not None
+      and d < cfd_run.FORCE_STOP_CL_TOL, f"({d})")
+
 m, s, n = cfd_run._tail_stats([1.0] * 600 + [2.0] * 500)
 check("tail stats average the last 500 rows", m == 2.0 and s == 0.0 and n == 500)
 m, s, n = cfd_run._tail_stats([5.0] * 50 + [1.0] * 50)
@@ -230,6 +242,157 @@ check("container failure -> failed with exit code in the error",
 job_c = run_fake_job(rc=0, cancel_after=0.0)
 check("cancellation lands in a terminal cancelled state",
       job_c.state == "cancelled", f"({job_c.state})")
+
+# ---- convergence verdict + graceful stop ----
+
+def finalize_with(cl_rows, n_iters, force_stop=False):
+    job = cfd_run.RansJob(CFG_D, "coarse", n_iters)
+    cdir = job.case_dir / "postProcessing" / "forceCoeffs1" / "0"
+    cdir.mkdir(parents=True, exist_ok=True)
+    lines = ["# Time Cd Cd(f) Cd(r) Cl Cl(f) Cl(r)"]
+    lines += [f"{i + 1} 0.2 0.1 0.1 {v:.5f} 1 1"
+              for i, v in enumerate(cl_rows)]
+    (cdir / "coefficient.dat").write_text("\n".join(lines) + "\n")
+    job.t_start = time.time()
+    job._force_stop = force_stop
+    job._finalize()
+    return job.result
+
+
+ramp_r = finalize_with([2.0 + 0.001 * i for i in range(3000)], 3000)
+check("cap-limited trending run is reported NOT converged",
+      ramp_r and ramp_r["converged"] is False
+      and ramp_r["stop_reason"] == "iteration cap reached"
+      and ramp_r["cl_drift"] > 0.05,
+      f"({ramp_r and (ramp_r['converged'], ramp_r['stop_reason'])})")
+check("no k_g calibration is offered from an unconverged run",
+      ramp_r and ramp_r["suggested_k_g"] is None)
+
+# a force stop that demonstrably took effect: the solver quit below the cap
+flat_r = finalize_with([2.0] * 500 + [3.2] * 2000, 3000, force_stop=True)
+check("force-stopped run (below cap) is reported converged",
+      flat_r and flat_r["converged"] is True
+      and flat_r["stop_reason"] == "force history converged")
+
+# a writeNow that the solver silently never noticed: the run went all the
+# way to the cap with a drifting tail — the verdict must judge the history,
+# not trust the request
+ghost_r = finalize_with([2.0 + 0.001 * i for i in range(3000)], 3000,
+                        force_stop=True)
+check("ineffective writeNow at the cap is NOT trusted as converged",
+      ghost_r and ghost_r["converged"] is False
+      and ghost_r["stop_reason"] == "iteration cap reached"
+      and ghost_r["suggested_k_g"] is None,
+      f"({ghost_r and (ghost_r['converged'], ghost_r['stop_reason'])})")
+
+early_r = finalize_with([2.5] * 1500, 3000)
+check("residual-stopped run (below cap) is reported converged",
+      early_r and early_r["converged"] is True
+      and early_r["stop_reason"] == "residuals converged"
+      and early_r["residual_stop"] is True)
+
+job_g = cfd_run.RansJob(CFG_D, "coarse", 3000)
+sysd = job_g.case_dir / "system"
+sysd.mkdir(parents=True, exist_ok=True)
+(sysd / "controlDict").write_text(
+    "stopAt          endTime;\nendTime         3000;\n", encoding="utf-8")
+ok = job_g._request_graceful_stop()
+txt = (sysd / "controlDict").read_text()
+check("graceful stop flips controlDict to writeNow",
+      ok and "stopAt          writeNow;" in txt and "endTime;" not in txt)
+check("graceful stop is refused when already flipped",
+      job_g._request_graceful_stop() is False)
+job_g._restore_controldict()
+txt = (sysd / "controlDict").read_text()
+check("finalize restores the retained case to a runnable state",
+      "stopAt          endTime;" in txt and "writeNow" not in txt)
+
+job_f = cfd_run.RansJob(CFG_D, "coarse", 5000)
+job_f.iteration = 2500
+job_f._cl_drift, job_f._cd_drift = 0.001, 0.005
+check("force-converged detector fires on flat histories",
+      job_f._force_converged())
+job_f._cl_drift = 0.02
+check("force-converged detector holds while Cl still trends",
+      not job_f._force_converged())
+job_f._cl_drift, job_f.iteration = 0.001, 1500
+check("force-converged detector never judges the startup transient",
+      not job_f._force_converged())
+
+# the decay-then-recover startup (the usual potentialFoam-initialized shape
+# on a separated case) has a mean-crossing where naive half-windows cancel;
+# the transient-excluded decision drift must stay above the stop bar there
+DECAY = ([3.5 - (i / 400) for i in range(400)]
+         + [2.5 + 0.0007 * i for i in range(1700)])
+d_naive = cfd_run.drift(DECAY)
+d_decision = cfd_run.drift(DECAY[cfd_run.FORCE_STOP_SKIP:])
+check("transient exclusion defeats the decay-then-recover false positive",
+      d_naive is not None and d_decision is not None
+      and d_decision > cfd_run.FORCE_STOP_CL_TOL,
+      f"(naive {d_naive:.4f}, decision {d_decision:.4f})")
+
+# ---- flow-field post-processing ----
+
+from app.core import foam_post  # noqa: E402
+
+SCALAR_FIELD = """\
+FoamFile
+{
+    class       volScalarField;
+    object      p;
+}
+internalField   nonuniform List<scalar>
+3
+(
+1.5
+-2.5
+0.75
+)
+;
+"""
+v = foam_post.parse_internal_field(SCALAR_FIELD)
+check("scalar field parses", list(v) == [1.5, -2.5, 0.75])
+
+VECTOR_FIELD = SCALAR_FIELD.replace("List<scalar>", "List<vector>").replace(
+    "1.5\n-2.5\n0.75", "(1 2 3)\n(4 5 6)\n(7 8 9)").replace(
+    "volScalarField", "volVectorField")
+v = foam_post.parse_internal_field(VECTOR_FIELD)
+check("vector field parses", v.shape == (3, 3) and v[1][2] == 6.0)
+
+try:
+    foam_post.parse_internal_field("internalField   uniform (15 0 0);\n")
+    check("uniform field is rejected", False)
+except foam_post.PostError:
+    check("uniform field is rejected", True)
+
+flow_case = Path(_TMP) / "flow_case"
+for tname in ("500", "3000"):
+    td = flow_case / tname
+    td.mkdir(parents=True, exist_ok=True)
+    import numpy as _np
+    xs, ys = _np.meshgrid(_np.linspace(-0.2, 0.8, 40),
+                          _np.linspace(0.005, 0.35, 24))
+    pts = _np.column_stack([xs.ravel(), ys.ravel(),
+                            _np.full(xs.size, 0.0175)])
+    def _vec_file(obj, rows):
+        body = "\n".join(f"({r[0]:.6g} {r[1]:.6g} {r[2]:.6g})" for r in rows)
+        return (f"FoamFile{{class volVectorField; object {obj};}}\n"
+                f"internalField   nonuniform List<vector> \n{len(rows)}\n"
+                f"(\n{body}\n)\n;\n")
+    (td / "C").write_text(_vec_file("C", pts))
+    u = _np.column_stack([_np.full(pts.shape[0], 15.0),
+                          _np.zeros(pts.shape[0]), _np.zeros(pts.shape[0])])
+    (td / "U").write_text(_vec_file("U", u))
+    (td / "p").write_text(
+        "FoamFile{class volScalarField; object p;}\n"
+        "internalField   nonuniform List<scalar> \n"
+        f"{pts.shape[0]}\n(\n" +
+        "\n".join("0.0" for _ in range(pts.shape[0])) + "\n)\n;\n")
+check("latest_time_dir picks 3000 over 500 (numeric, not lexicographic)",
+      foam_post.latest_time_dir(flow_case).name == "3000")
+png = foam_post.flow_png(flow_case, CFG, "umag")
+check("flow field renders a PNG", png[:8] == b"\x89PNG\r\n\x1a\n"
+      and len(png) > 20_000, f"({len(png)} bytes)")
 
 # ---- registry: one at a time, rediscovery ----
 

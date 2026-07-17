@@ -253,6 +253,13 @@ check("unknown airfoil export -> 422 (not 500)", s_ex == 422, f"(got {s_ex})")
 s_op, _ = call("POST", "/api/optimize", {"config": bad_cfg, "options": {}})
 check("unknown airfoil optimize -> 422 up front", s_op == 422, f"(got {s_op})")
 
+# "refine" is the UI's historical name for local mode — it must start, not 422
+s_rf, r_rf = call("POST", "/api/optimize", {
+    "config": GOOD, "options": {"target_downforce_n": 250, "budget": 150,
+                                "mode": "refine"}})
+check("optimizer mode 'refine' accepted as alias for 'local'",
+      s_rf == 200 and "job_id" in (r_rf or {}), f"(got {s_rf})")
+
 # malformed optimizer options are client errors, not background-job failures
 for label, opts in (("budget string", {"budget": "lots"}),
                     ("bogus mode", {"mode": "psychic"}),
@@ -356,6 +363,10 @@ s_rm, _ = call("POST", "/api/rans/start", {"config": GOOD,
                                            "mesh_size": "ultra"})
 check("rans start with unknown mesh size -> 422", s_rm == 422,
       f"(got {s_rm})")
+s_rf1, _ = call("GET", "/api/rans/no-such-job/flow")
+check("flow view of unknown job -> 404", s_rf1 == 404, f"(got {s_rf1})")
+s_rf2, _ = call("GET", "/api/rans/no-such-job/flow?field=vorticity")
+check("flow view with unknown field -> 422", s_rf2 == 422, f"(got {s_rf2})")
 
 # XFOIL engine without xfoil.exe must be a clean failed-dependency error
 if not (Path(__file__).resolve().parents[2] / "xfoil" / "xfoil.exe").exists():

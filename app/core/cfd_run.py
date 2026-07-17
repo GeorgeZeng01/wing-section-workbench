@@ -54,6 +54,34 @@ MAX_WALL_S = 4 * 3600         # hard stop — a fine mesh at full iterations
                               # fits comfortably; anything longer is hung
 KEEP_RUN_DIRS = 4             # finished run directories retained on disk
 
+# Force-based convergence: residualControl alone under-serves this case —
+# heavily loaded fine meshes can iterate for thousands of steps with the
+# lift STILL CLIMBING at a steady rate (measured: +0.49 Cl per 500
+# iterations at the old 3000 cap on a 96k-cell stack — the reported tail
+# mean was mid-transient, not a result). The runner therefore watches the
+# force history itself: when the half-window means of Cl and Cd agree
+# within the tolerances below, it flips controlDict to `stopAt writeNow`
+# (runTimeModifiable; ESI builds re-check by mtime each step, which
+# propagates through the bind mount) and the solver writes and exits
+# cleanly. Runs that hit the iteration cap while still drifting are
+# reported as NOT converged, and no k_g calibration is offered from them.
+#
+# Three defenses against premature verdicts, each closing a measured hole:
+# the first FORCE_STOP_SKIP rows are excluded from every drift decision (a
+# decay-then-recover startup — the usual potentialFoam-initialized shape on
+# a separated high-lift case — has a mean-crossing where the half-window
+# means cancel while the run still trends); the minimum iteration gate is
+# SKIP + 2*WINDOW so both half-windows are fully post-transient before the
+# detector may fire; and the criterion must hold on several CONSECUTIVE
+# polls, so a single noise minimum cannot trigger the stop.
+FORCE_STOP_SKIP = 500         # rows never included in a drift decision
+FORCE_STOP_WINDOW = 800       # half-window size (rows) for the drift means
+FORCE_STOP_MIN_ITERS = FORCE_STOP_SKIP + 2 * FORCE_STOP_WINDOW   # = 2100
+FORCE_STOP_POLLS = 3          # consecutive flat polls before stopping
+FORCE_STOP_CL_TOL = 0.003     # relative Cl drift between half-windows
+FORCE_STOP_CD_TOL = 0.010     # Cd converges last; keep a looser bar
+CONVERGED_CL_TOL = 0.006      # post-hoc verdict for cap-limited runs
+
 _CREATE_NO_WINDOW = 0x08000000 if sys.platform == "win32" else 0
 
 
@@ -163,6 +191,19 @@ def parse_coefficient_dat(text: str) -> dict:
     return {"iters": iters, "cd": cd, "cl": cl}
 
 
+def drift(vals: list[float], window: int = FORCE_STOP_WINDOW) -> float | None:
+    """Relative disagreement between the means of the last two half-windows
+    — ~0 once the history is flat (a bounded limit cycle averages out), and
+    of the order of the per-window climb rate while still trending. None
+    until enough rows exist to judge."""
+    w = min(window, len(vals) // 2)
+    if w < 100:
+        return None
+    m1 = sum(vals[-2 * w:-w]) / w
+    m2 = sum(vals[-w:]) / w
+    return abs(m2 - m1) / max(abs(m2), 0.05)
+
+
 def _tail_stats(vals: list[float], n: int = TAIL_MEAN_ROWS
                 ) -> tuple[float, float, int]:
     """(mean, population std, rows used) over the tail of the history —
@@ -227,6 +268,10 @@ class RansJob:
         self._container = f"wss-rans-{self.id}"
         self._cancel = threading.Event()
         self._lock = threading.Lock()
+        self._cl_drift: float | None = None   # latest half-window drifts
+        self._cd_drift: float | None = None
+        self._flat_polls = 0                  # consecutive flat polls
+        self._force_stop = False              # runner requested writeNow
 
     # ---- progress plumbing ----
 
@@ -276,9 +321,53 @@ class RansJob:
             self.iteration = int(data["iters"][-1])
             self.latest = hist[-1]
             self.history = hist
-            self.phase = "solving"
+            if not self._force_stop:
+                # keep the "writing final fields" label during the drain
+                self.phase = "solving"
+            # decision drifts exclude the startup transient entirely
+            self._cl_drift = drift(data["cl"][FORCE_STOP_SKIP:])
+            self._cd_drift = drift(data["cd"][FORCE_STOP_SKIP:])
 
     # ---- runner ----
+
+    def _force_converged(self) -> bool:
+        return (self.iteration >= FORCE_STOP_MIN_ITERS
+                and self._cl_drift is not None
+                and self._cl_drift < FORCE_STOP_CL_TOL
+                and self._cd_drift is not None
+                and self._cd_drift < FORCE_STOP_CD_TOL)
+
+    def _request_graceful_stop(self) -> bool:
+        """Flip controlDict to `stopAt writeNow` — the solver notices at the
+        next time step (runTimeModifiable, mtime-checked), writes the fields
+        and exits 0, so run.sh still extracts results normally."""
+        cd_path = self.case_dir / "system" / "controlDict"
+        try:
+            text = cd_path.read_text(encoding="utf-8")
+            if "stopAt          endTime;" not in text:
+                return False
+            tmp = cd_path.with_suffix(".tmp")
+            tmp.write_text(text.replace("stopAt          endTime;",
+                                        "stopAt          writeNow;", 1),
+                           encoding="utf-8", newline="\n")
+            os.replace(tmp, cd_path)
+            return True
+        except OSError:
+            return False
+
+    def _restore_controldict(self) -> None:
+        """Undo the writeNow flip once the solver has exited — the retained
+        case must stay runnable as-is (a manual WSL rerun of a flipped case
+        would stop after a single iteration)."""
+        cd_path = self.case_dir / "system" / "controlDict"
+        try:
+            text = cd_path.read_text(encoding="utf-8")
+            if "stopAt          writeNow;" in text:
+                cd_path.write_text(text.replace("stopAt          writeNow;",
+                                                "stopAt          endTime;", 1),
+                                   encoding="utf-8", newline="\n")
+        except OSError:
+            pass
 
     def _kill_container(self, timeout: float = 60) -> None:
         """Force-remove the solver container, retrying once — a cancel can
@@ -314,6 +403,11 @@ class RansJob:
             self.phase = "meshing"
         self.case_dir.mkdir(parents=True, exist_ok=True)
         try:
+            import json
+            # the exact config this case was built from — makes a retained
+            # run dir diagnosable long after the job left the registry
+            (self.case_dir / "config.json").write_text(
+                json.dumps(self.config, indent=1), encoding="utf-8")
             mesh = cfd.build_case(self.cfg, self.case_dir,
                                   self.mesh_size, self.n_iters)
             with self._lock:
@@ -400,6 +494,21 @@ class RansJob:
                     self._poll_progress()
                     if rc is not None:
                         break
+                    # a single flat poll can be a noise minimum — require
+                    # the criterion to persist before stopping the solver.
+                    # (The docker client is still alive during run.sh's
+                    # post-solve steps, so a stop requested in that window
+                    # is a no-op on an already-exited solver — harmless,
+                    # and the finalize verdict re-checks the outcome.)
+                    if not self._force_stop:
+                        self._flat_polls = (self._flat_polls + 1
+                                            if self._force_converged() else 0)
+                        if (self._flat_polls >= FORCE_STOP_POLLS
+                                and self._request_graceful_stop()):
+                            self._force_stop = True
+                            with self._lock:
+                                self.phase = ("force-converged — writing "
+                                              "final fields")
                     if time.time() - self.t_start > MAX_WALL_S:
                         self._kill_container()
                         try:
@@ -434,6 +543,8 @@ class RansJob:
         self._finalize()
 
     def _finalize(self) -> None:
+        if self._force_stop:
+            self._restore_controldict()
         self._poll_progress()   # pick up the final rows (sets phase itself)
         with self._lock:
             self.phase = "extracting results"
@@ -454,6 +565,23 @@ class RansJob:
         cd_mean, cd_std, _ = _tail_stats(data["cd"])
         n_run = int(data["iters"][-1])
 
+        # convergence verdict: what stopped the run, and is the force
+        # history actually flat? A cap-limited run with a drifting tail is
+        # a transient snapshot, not a result — say so, loudly. The drift
+        # excludes the startup transient, same as the stop decision.
+        cl_drift = drift(data["cl"][FORCE_STOP_SKIP:])
+        if self._force_stop and n_run < self.n_iters:
+            # the request demonstrably took effect (the solver quit early)
+            converged, stop_reason = True, "force history converged"
+        elif n_run < self.n_iters:
+            converged, stop_reason = True, "residuals converged"
+        else:
+            # ran to the cap — including the case where a writeNow request
+            # was silently never noticed by the solver: judge the history,
+            # not the request
+            converged = cl_drift is not None and cl_drift < CONVERGED_CL_TOL
+            stop_reason = "iteration cap reached"
+
         # panel-model numbers for the same config, full pipeline
         panel = None
         panel_error = None
@@ -469,8 +597,11 @@ class RansJob:
                 "k_g_used": co["k_ground_realization"],
                 "downforce_n": fo["downforce_n"],
             }
-            suggestion = suggested_k_g(cl_mean, panel["c_free"],
-                                       panel["c_ground"], self.cfg)
+            # a calibration constant fitted to a mid-transient Cl would be
+            # confidently wrong — only converged runs may suggest one
+            if converged:
+                suggestion = suggested_k_g(cl_mean, panel["c_free"],
+                                           panel["c_ground"], self.cfg)
         except Exception as e:
             # the RANS numbers stand on their own; say why the comparison
             # column is missing instead of leaving it blank
@@ -486,7 +617,12 @@ class RansJob:
                 "cd_rans_std": round(cd_std, 5),
                 "tail_rows": n_tail,
                 "n_iters_run": n_run,
-                "residual_stop": n_run < self.n_iters,
+                "residual_stop": (n_run < self.n_iters
+                                  and not self._force_stop),
+                "converged": converged,
+                "stop_reason": stop_reason,
+                "cl_drift": round(cl_drift, 5) if cl_drift is not None
+                            else None,
                 "downforce_n_at_rans_cl": round(
                     q * area * cl_mean * self.cfg.efficiency_3d, 1),
                 "panel": panel,
@@ -507,6 +643,8 @@ class RansJob:
                        - (self.t_start or time.time()))
             if self.state in ("done", "failed", "cancelled"):
                 progress = 1.0
+            elif self._force_stop:
+                progress = 0.97   # converged; the solver is writing out
             elif self.iteration:
                 progress = min(0.97, 0.05 + 0.92 * self.iteration
                                / max(self.n_iters, 1))

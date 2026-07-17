@@ -6,6 +6,7 @@ Run:  .venv\\Scripts\\python.exe -m uvicorn app.server:app --port 8642
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 
 import numpy as np
@@ -125,7 +126,9 @@ class CfdExportBody(BaseModel):
 class RansStartBody(BaseModel):
     config: dict
     mesh_size: Literal["coarse", "medium", "fine"] = "coarse"
-    max_iters: int = Field(default=3000, ge=100, le=20000)
+    # generous default: the runner stops on its own the moment the force
+    # history flattens, so the cap only matters for runs that need it
+    max_iters: int = Field(default=10000, ge=100, le=20000)
 
 
 def _err_detail(e: BaseException) -> str:
@@ -338,6 +341,42 @@ def rans_cancel(job_id: str):
         raise HTTPException(404, detail="unknown job")
     job.cancel()
     return {"ok": True}
+
+
+@app.get("/api/rans/{job_id}/flow")
+def rans_flow(job_id: str, field: str = "umag"):
+    """The solved section flow as a PNG — rendered once, cached in the
+    case directory."""
+    from .core import cfd_run, foam_post
+    if field not in ("umag", "cp"):
+        raise HTTPException(422, detail="field must be 'umag' or 'cp'")
+    job = cfd_run.get(job_id)
+    if job is None:
+        raise HTTPException(404, detail="unknown job")
+    if job.state != "done":
+        raise HTTPException(409, detail="the run has not finished")
+    png = job.case_dir / f"flow_{field}.png"
+    if png.is_file():
+        return Response(content=png.read_bytes(), media_type="image/png")
+    try:
+        data = foam_post.flow_png(job.case_dir, job.cfg, field)
+    except foam_post.PostError as e:
+        raise HTTPException(422, detail=str(e))
+    except (OSError, ValueError, KeyError) as e:
+        # a deleted case dir, a malformed field file — client-visible
+        # conditions, not server faults
+        raise HTTPException(422, detail=f"flow rendering failed: {e}")
+    # publish atomically: a concurrent request must never read a torn file
+    # (renders are serialized inside foam_post; both writers produce the
+    # same image, so last-write-wins is fine)
+    import os as _os
+    tmp = png.with_name(f".{png.name}.{_os.getpid()}.{threading.get_ident()}")
+    try:
+        tmp.write_bytes(data)
+        _os.replace(tmp, png)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+    return Response(content=data, media_type="image/png")
 
 
 # ---------- screener ----------

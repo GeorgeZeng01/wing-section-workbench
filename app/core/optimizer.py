@@ -391,8 +391,14 @@ class Job:
             int(options.get("budget", 1500))
         except (TypeError, ValueError):
             raise ValueError("options['budget'] must be an integer")
+        # the UI shipped "refine" as the local mode's value for a while and
+        # anything non-"global" used to fall through to the refinement path,
+        # so the eager validation below must keep accepting it as an alias
+        if options.get("mode") == "refine":
+            options = {**options, "mode": "local"}
         if options.get("mode", "global") not in ("global", "local"):
-            raise ValueError("options['mode'] must be 'global' or 'local'")
+            raise ValueError("options['mode'] must be 'global' or 'local' "
+                             "('refine' is accepted as an alias for 'local')")
         # every element spec must resolve NOW — a job whose every evaluation
         # would fail (e.g. a custom airfoil lost to a server restart) must be
         # rejected up front, not finish 'done' with nothing to show

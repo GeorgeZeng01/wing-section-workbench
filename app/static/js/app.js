@@ -504,19 +504,8 @@ function buildViewportLegend() {
   });
 }
 
-$("frame-installed").addEventListener("click", () => setFrame("installed"));
-$("frame-design").addEventListener("click", () => setFrame("design"));
-const FRAME_NOTES = {
-  installed: "inverted above the road — the orientation the analysis uses",
-  upright: "mirror view, lift up — how catalogs and CAD sketches draw airfoils",
-};
-function setFrame(f) {
-  viewport.setFrame(f);
-  $("frame-installed").classList.toggle("active", f === "installed");
-  $("frame-design").classList.toggle("active", f === "design");
-  $("frame-note").textContent =
-    f === "installed" ? FRAME_NOTES.installed : FRAME_NOTES.upright;
-}
+// the viewport always draws as driven (inverted, ground at y = 0) — the
+// orientation the analysis uses; upright output lives in the Export tab
 $("vp-dims").addEventListener("change", (e) => viewport.setDims(e.target.checked));
 $("vp-fit").addEventListener("click", () => viewport.fit());
 
@@ -1325,6 +1314,7 @@ async function refreshRansAvailability() {
         const s = await api.ransStatus(cur.job_id);
         renderRans(s);
         renderRansResult(s);
+        showRansFlow(s.id);
       }
     } catch { /* rediscovery is best-effort */ }
   }
@@ -1363,7 +1353,7 @@ async function startRansVerify() {
   try {
     const { job_id } = await api.ransStart(
       state.config, $("rans-mesh").value,
-      Number.isFinite(iters) ? Math.min(Math.max(iters, 100), 20000) : 3000);
+      Number.isFinite(iters) ? Math.min(Math.max(iters, 100), 20000) : 10000);
     state.ransJob = job_id;
     // the target line must describe the config THIS run solves, not
     // whatever the form says later — snapshot the estimate at start
@@ -1372,6 +1362,7 @@ async function startRansVerify() {
     $("btn-rans-run").disabled = true;
     $("btn-rans-cancel").disabled = false;
     $("rans-conv").innerHTML = "";   // previous run's chart is not this run
+    $("rans-flow").hidden = true;
     $("rans-result").innerHTML =
       '<div class="empty-note">Verification running…</div>';
     pollRans();
@@ -1407,7 +1398,10 @@ function pollRans() {
             '<div class="empty-note">Run cancelled — the partial case was ' +
             'kept for inspection.</div>';
         }
-        if (s.state === "done") renderRansResult(s);
+        if (s.state === "done") {
+          renderRansResult(s);
+          showRansFlow(s.id);
+        }
       }
     } catch (e) {
       // a lost poll must not orphan the run: the job keeps solving
@@ -1466,11 +1460,22 @@ function renderRansResult(s) {
     ["Profile Cd — panel stack", p ? (+p.cd_profile).toFixed(4) : "–"],
     ["Downforce at RANS Cl", `${r.downforce_n_at_rans_cl} N`],
     ["Downforce — panel estimate", p ? `${p.downforce_n} N` : "–"],
-    ["Iterations", `${r.n_iters_run}` +
-      (r.residual_stop ? " (residuals converged)" : ` (max; tail mean of ${r.tail_rows})`)],
+    ["Iterations", `${r.n_iters_run} (${r.stop_reason}; tail mean of ${r.tail_rows})`],
   ];
   host.innerHTML = rows.map(([k, v]) =>
     `<div class="kv"><span>${k}</span><b>${v}</b></div>`).join("");
+  if (!r.converged) {
+    const w = document.createElement("div");
+    w.className = "warning-item crit";
+    w.textContent = `NOT CONVERGED — the lift history was still trending ` +
+      `when the iteration cap ended the run` +
+      (r.cl_drift != null ? ` (Cl drift ${(r.cl_drift * 100).toFixed(1)}% ` +
+        `per window)` : ``) +
+      `. The numbers above are a mid-transient snapshot, not a result: ` +
+      `raise Max iterations and rerun. No k_g calibration is offered from ` +
+      `an unconverged run.`;
+    host.appendChild(w);
+  }
   if (!p && r.panel_error) {
     const w = document.createElement("div");
     w.className = "warning-item";
@@ -1504,6 +1509,53 @@ function renderRansResult(s) {
     ParaView-openable <code>case.foam</code>).`;
   host.appendChild(note);
 }
+
+/* flow-field view: the solved section rendered server-side from the final
+   OpenFOAM fields, in the same as-driven orientation as the drawing */
+let ransFlowId = null;
+let ransFlowUrl = null;   // objectURL of the currently shown image
+let ransFlowSeq = 0;
+
+async function showRansFlow(jobId, field = "umag") {
+  ransFlowId = jobId;
+  const seq = ++ransFlowSeq;
+  $("rans-flow").hidden = false;
+  $("rans-flow-umag").classList.toggle("active", field === "umag");
+  $("rans-flow-cp").classList.toggle("active", field === "cp");
+  const img = $("rans-flow-img");
+  const note = $("rans-flow-note");
+  note.textContent = "rendering the flow field…";
+  img.style.opacity = "0.4";
+  // fetched (not img.src) so a failure can show the server's actual reason
+  try {
+    const res = await fetch(`/api/rans/${jobId}/flow?field=${field}`);
+    if (seq !== ransFlowSeq) return;   // a newer request owns the panel
+    if (!res.ok) {
+      let detail = res.statusText;
+      try { detail = (await res.json()).detail || detail; } catch {}
+      note.textContent = `flow field unavailable: ${detail}`;
+      img.style.opacity = "";
+      return;
+    }
+    const url = URL.createObjectURL(await res.blob());
+    if (ransFlowUrl) URL.revokeObjectURL(ransFlowUrl);
+    ransFlowUrl = url;
+    img.src = url;
+    img.style.opacity = "";
+    note.textContent = "same view as the drawing: as driven, ground at " +
+      "the bottom, flow left to right";
+  } catch (e) {
+    if (seq === ransFlowSeq) {
+      note.textContent = `flow field unavailable: ${e.message}`;
+      img.style.opacity = "";
+    }
+  }
+}
+
+$("rans-flow-umag").addEventListener("click", () =>
+  ransFlowId && showRansFlow(ransFlowId, "umag"));
+$("rans-flow-cp").addEventListener("click", () =>
+  ransFlowId && showRansFlow(ransFlowId, "cp"));
 
 /* ---------------- export tab ---------------- */
 
@@ -1725,7 +1777,7 @@ async function boot() {
   // the desktop launcher's browser fallback reads request activity as "the
   // tab is still open" — keep a heartbeat independent of the status dot
   setInterval(() => { fetch("/api/health").catch(() => {}); }, 60000);
-  setFrame("installed");
+  viewport.setFrame("installed");
 
   const restored = await restoreSession();
   writeConfigToForm();

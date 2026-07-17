@@ -631,6 +631,12 @@ potentialFoam -writephi > log.potentialFoam 2>&1
 echo "== simpleFoam"
 simpleFoam > log.simpleFoam 2>&1
 
+# cell-centre coordinates beside the final U/p fields: the app's flow-field
+# view (and any external plotting) reads the 2D section straight from them
+echo "== postProcess (cell centres for the flow view)"
+postProcess -func writeCellCentres -latestTime > log.postProcess 2>&1 || \
+    echo "writeCellCentres failed - flow view unavailable (see log.postProcess)"
+
 COEF=$(ls -1 postProcessing/forceCoeffs1/*/coefficient.dat 2>/dev/null | tail -1)
 if [ -z "$COEF" ]; then
     echo "ERROR: simpleFoam wrote no force coefficients - see log.simpleFoam" >&2

@@ -771,6 +771,90 @@ the identical case: Docker (v2406 image) reports Cl 2.678 / Cd 0.222 on
 the coarse two-element baseline where WSL (v2506) reported 2.68 / 0.217 —
 the runners are interchangeable.
 
+**Force-based convergence: the runner watches the lift history and stops
+the solver itself; cap-limited trending runs are labelled NOT CONVERGED
+and may not calibrate anything.** Field report: a fine-mesh (96k-cell)
+three-element run reached the old 3000-iteration cap with Cl still
+climbing +0.49 per 500 iterations (pressure residual 3.1e-3 against the
+5e-5 stop target — the mesh was healthy and the solve stable, just far
+from finished), yet the tab presented the tail mean of a ramp as the
+result and offered a k_g calibrated to it. Residual control alone
+under-serves loaded high-lift cases: they converge in forces long before
+residuals, or need far more iterations than any fixed default. Now the
+poller computes the relative disagreement between the last two
+half-window means of Cl and Cd (drift); once flat past a minimum
+iteration count it flips the case's controlDict to `stopAt writeNow`
+(runTimeModifiable is already on, and ESI builds re-check by mtime, which
+propagates through the bind mount) so the solver writes final fields and
+exits cleanly through run.sh's extraction. Results carry an explicit
+verdict — force history converged / residuals converged / iteration cap
+reached — plus the drift value; the UI shouts NOT CONVERGED with the
+remedy, and `suggested k_g` is only computed from converged runs. The
+default iteration cap rose to 10000: with self-stopping, the cap is an
+upper bound, not a duration. Options considered: OpenFOAM's runTimeControl
+function object (same idea, but dictionary plumbing per case and no
+say-why-it-stopped reporting on the app side), raising relaxation factors
+(risks the very divergence the schemes were tuned against), host-side
+drift watcher (chosen — one implementation serves every case, and the
+runner already reads the force history every second).
+
+Hardening applied after an adversarial review of the detector: the drift
+decision EXCLUDES the first 500 rows outright (a decay-then-recover
+startup — the usual potentialFoam-initialized shape on a separated case —
+has a mean-crossing where naive half-windows cancel and a premature stop
+would have been labelled converged; reproduced numerically and pinned in
+the suite), the minimum gate is skip + two full windows, the criterion
+must hold on three consecutive polls, and the finalize verdict checks the
+OUTCOME rather than the request — a writeNow the solver never noticed
+(the run reached the cap anyway) is judged by its history, never trusted.
+A force-stopped case's controlDict is restored to `endTime` afterwards so
+the retained case stays manually runnable. Measured end-to-end: the
+two-element coarse case force-stops at ~2,200 iterations in a bounded
+limit cycle (Cl 2.71 ± 0.15); the fine three-element case that motivated
+all of this converges at ~11,000 iterations to Cl 8.62 ± 0.07 — its
+3,000-iteration snapshot had been 21 % low, and the graceful stop was
+validated live against the real solver through the bind mount.
+
+**Flow-field view: the solved section rendered in-app, no ParaView.** The
+cases are one cell thick, so the internal field IS the cross-section:
+run.sh ends with `postProcess -func writeCellCentres`, and the app parses
+the ASCII C/U/p fields from the final time directory, interpolates onto a
+regular grid (element interiors masked), and renders velocity magnitude
+with streamlines or Cp — in the same as-driven orientation as the
+drawing, PNG cached in the case directory, served from
+/api/rans/{id}/flow. Rendering the diagnosed fine case made the
+"inconsistent with the studio" report self-explanatory in one image: the
+flap system was fully separated (a large recirculating wake), which the
+attached-flow screening model cannot represent — precisely the class of
+disagreement the truth runs exist to expose. Options considered: shipping
+a ParaView macro (external dependency, manual steps), VTK sampling in
+Python (a heavyweight dependency for a 2D slice), parsing the ASCII
+fields directly (chosen — ~40 lines of parser, matplotlib is already a
+dependency). Rendering uses the object-oriented matplotlib API (no pyplot
+global state — the endpoint runs on the server's thread pool) behind a
+render lock, and the PNG cache is published atomically (temp file +
+rename) so concurrent requests can never read a torn image.
+
+**Optimizer mode "refine" is accepted as an alias for "local".** The UI
+had shipped `mode: "refine"` since the mode selector existed; before the
+hardening round any non-"global" value silently fell through to the
+refinement path, so it worked by accident. The hardening round's eager
+options validation then rejected it — every "Refine current" start
+422'd. The UI now sends the canonical "local", and the validator maps
+"refine" to "local" permanently: saved automation scripts and older
+sessions keep working, and the error message names the alias. (A
+regression pins the alias; the lesson — when adding validation to a
+lenient path, inventory what the lenient path was actually accepting —
+is the durable part.)
+
+**The viewport's Upright toggle is gone; orientation is an export
+property.** The drawing now always shows the section as driven (the
+orientation every number is computed in). The toggle's only real use —
+catalog/CAD-convention output — lives where it always did, in the Export
+tab's orientation choice. Two rounds of user feedback read the toggle as
+a mystery switch; a view mode that changes nothing about the physics but
+looks like it might is UI surface with negative value.
+
 Building this surfaced a latent process bug: gmsh's C runtime REPLACES the
 real Win32 process PATH during a mesh build (measured 1822 → 357 chars)
 without touching Python's `os.environ` snapshot, so every subprocess

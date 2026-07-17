@@ -90,6 +90,11 @@ def main():
               f"(y+ {summary['y_plus_est']}, h1 {summary['first_layer_mm']} mm)")
 
         cd = (case / "system/controlDict").read_text()
+        # the RANS runner's graceful stop rewrites this exact token — the
+        # two must never drift apart
+        check("controlDict carries the stopAt token the runner rewrites",
+              "stopAt          endTime;" in cd
+              and "runTimeModifiable true;" in cd)
         fc = cd[cd.index("forceCoeffs"):]
         check("controlDict forceCoeffs is downforce-positive on the wing",
               "liftDir         (0 -1 0);" in fc
@@ -119,7 +124,8 @@ def main():
                   "entry0/ground/type -set wall",
                   "entry0/wing_e1/type -set wall",
                   "entry0/wing_e2/type -set wall",
-                  "simpleFoam", "coefficient.dat", "results.txt")))
+                  "simpleFoam", "writeCellCentres", "coefficient.dat",
+                  "results.txt")))
 
         check("bad mesh_size is rejected",
               _raises(lambda: cfd.build_case(CFG, tmp / "x", "ultra")))
