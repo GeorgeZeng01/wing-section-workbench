@@ -43,6 +43,28 @@ async def _track_activity(request, call_next):
     return await call_next(request)
 
 
+# Generous cap, comfortably above the 4 MB session state and 500 KB .dat
+# upload. Rejects an oversized body before the whole thing is buffered and
+# JSON-parsed into memory (the per-field caps and the session-size check both
+# run only AFTER a full parse, so they can't bound the parse itself).
+MAX_BODY_BYTES = 16_000_000
+
+
+@app.middleware("http")
+async def _limit_body_size(request, call_next):
+    cl = request.headers.get("content-length")
+    if cl is not None:
+        try:
+            too_big = int(cl) > MAX_BODY_BYTES
+        except ValueError:
+            too_big = False
+        if too_big:
+            from fastapi.responses import JSONResponse
+            return JSONResponse({"detail": "request body too large"},
+                                status_code=413)
+    return await call_next(request)
+
+
 def _hostname(value: str) -> str:
     """The bare host of a Host/Origin value: strip scheme, port and (for
     IPv6) keep the bracketed literal."""
@@ -103,7 +125,7 @@ class UploadBody(BaseModel):
 
 
 class PolarBody(BaseModel):
-    spec: str
+    spec: str = Field(min_length=1, max_length=200)
     re: float = Field(gt=1e3, lt=1e9)
     ncrit: float = Field(default=9.0, ge=0.1, le=20)
     model_size: str = "xlarge"

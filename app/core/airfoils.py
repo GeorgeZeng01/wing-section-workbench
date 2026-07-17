@@ -109,6 +109,12 @@ def read_dat(path_or_text, name_fallback="airfoil", *, allow_path=True):
         # anything else (MSES plot-window line, "->" edit notes, separators
         # like "1.0000 ......") is not contour data
     coords = np.asarray(pts, dtype=float)
+    # reject non-finite coordinates at the door: "nan"/"inf" tokens parse
+    # cleanly via float() but would be stored as a custom airfoil and then
+    # poison every downstream solve (and break JSON rendering -> a 500)
+    if coords.size and not np.isfinite(coords).all():
+        raise ValueError(f"{name}: coordinates contain non-finite "
+                         f"values (nan/inf)")
     # Lednicer format: a leading (n_upper, n_lower) count pair, then both
     # surfaces LE->TE. Only re-stitch when the first pair really is a count
     # pair — near-integers >= 2 whose sum matches the remaining rows —
@@ -217,6 +223,18 @@ def restore_custom(snapshot: dict[str, list]) -> None:
             _custom[k] = {"name": k, "coords": np.asarray(pts, float)}
 
 
+def _is_unc_path(s: str) -> bool:
+    """True for a UNC share path (``\\\\host\\share\\...`` or ``//host/share/...``).
+    Probing such a path with os.stat / Path.exists / Path.resolve opens an
+    outbound SMB session that authenticates with — and thereby leaks — the
+    user's NetNTLM credentials, so a UNC spec must be refused before any
+    filesystem operation touches it. Absolute and drive-qualified paths are
+    NOT rejected here: a legitimate in-project ".dat" may be given as an
+    absolute path, and the project-root / database-dir containment checks in
+    resolve() already confine those to safe locations."""
+    return s.strip().replace("/", "\\").startswith("\\\\")
+
+
 def resolve(spec: str) -> tuple[str, np.ndarray]:
     """Any airfoil spec -> (display_name, unit-chord Selig coords)."""
     s = str(spec).strip()
@@ -239,6 +257,16 @@ def resolve(spec: str) -> tuple[str, np.ndarray]:
         # series fall through — dozens of them ship in the UIUC database
         return f"NACA {low[4:]}", naca_coords(low[4:])
 
+    # A UNC spec must never reach a filesystem probe: os.stat/exists on
+    # \\host\share opens an outbound SMB session that leaks NetNTLM
+    # credentials. Reject it lexically before any .exists()/.stat()/.resolve().
+    # (Absolute/drive and "../" traversal specs are contained instead by the
+    # relative_to() checks below, which keep legitimate in-project .dat paths
+    # working while refusing out-of-tree reads.)
+    if _is_unc_path(s):
+        raise KeyError(f"airfoil {spec!r} not found (not custom/naca/.dat/"
+                       f"UIUC name)")
+
     p = Path(s)
     if p.suffix.lower() == ".dat" and p.exists():
         # specs come in over the local HTTP API: keep the filesystem branch
@@ -251,6 +279,15 @@ def resolve(spec: str) -> tuple[str, np.ndarray]:
                            f"folder — upload the .dat instead")
         return read_dat(p)
 
+    # a UIUC library name is a bare stem — never a path. Refuse any spec that
+    # carries a separator or ".." before touching the disk, so the appended
+    # ".dat" can't turn "../../secret" (or a drive path) into an out-of-tree
+    # read. A purely lexical guard keeps this hot path filesystem-I/O-free
+    # (every library-airfoil lookup reaches here); all 2174 bundled names are
+    # bare stems, so nothing legitimate is rejected.
+    if "/" in low or "\\" in low or ".." in low:
+        raise KeyError(f"airfoil {spec!r} not found (not custom/naca/.dat/"
+                       f"UIUC name)")
     dat = database_dir() / f"{low}.dat"
     if dat.exists():
         _, coords = read_dat(dat)
@@ -306,6 +343,10 @@ def spec_cache_token(spec: str) -> int:
     for prefix in ("mfg:", "shape:"):
         if s.lower().startswith(prefix):
             s = s.split(":", {"mfg:": 3, "shape:": 5}[prefix])[-1].strip()
+    # never stat a UNC path — os.stat on \\host\share opens an outbound SMB
+    # session (NetNTLM leak). resolve() rejects UNC specs anyway.
+    if _is_unc_path(s):
+        return 0
     p = Path(s)
     if p.suffix.lower() == ".dat":
         try:
