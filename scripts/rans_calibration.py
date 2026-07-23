@@ -63,8 +63,18 @@ def baseline_config(ride_height_mm: float, aoa: float = 0.0,
 
 def run_one(ride: float, mesh: str, iters: int, label: str,
             aoa: float = 0.0, defl: float = 12.0,
-            speed: float = 15.0) -> dict:
-    cfg = baseline_config(ride, aoa, defl, speed)
+            speed: float = 15.0, config: dict | None = None) -> dict:
+    """One RANS run. `config` (e.g. an optimizer winner under Stage 2
+    badge validation) overrides the built baseline entirely; the logged
+    ride/aoa/defl/speed columns are then read back out of it."""
+    cfg = config if config is not None else baseline_config(
+        ride, aoa, defl, speed)
+    if config is not None:
+        ride = float(cfg.get("ride_height_mm", ride))
+        aoa = float(cfg.get("stack_aoa_deg", 0.0))
+        defl = float(cfg["elements"][1].get("deflection_deg", 0.0)) \
+            if len(cfg.get("elements", [])) > 1 else 0.0
+        speed = float(cfg.get("speed_ms", 15.0))
     t0 = time.time()
     row = {"timestamp_utc": datetime.now(timezone.utc).isoformat(
                timespec="seconds"),
@@ -124,8 +134,9 @@ def append_row(row: dict) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--rides", nargs="+", type=float, required=True,
-                    help="ride heights in mm, one run each")
+    ap.add_argument("--rides", nargs="+", type=float, default=None,
+                    help="ride heights in mm, one run each "
+                         "(required unless --config is given)")
     ap.add_argument("--mesh", default="coarse",
                     choices=["coarse", "medium", "fine"])
     ap.add_argument("--iters", type=int, default=10000)
@@ -134,12 +145,32 @@ def main() -> int:
     ap.add_argument("--defl", type=float, default=12.0,
                     help="flap deflection in degrees")
     ap.add_argument("--speed", type=float, default=15.0)
+    ap.add_argument("--config", default=None,
+                    help="JSON config file: run this exact stack instead of "
+                         "the built baseline (one run; --rides ignored)")
     args = ap.parse_args()
 
     avail = cfd_run.availability()
     if not avail.get("available"):
         print(f"RANS unavailable: {avail.get('detail')}")
         return 1
+
+    if args.config:
+        import json
+        cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
+        label = f"{args.label}-{Path(args.config).stem}-{args.mesh}"
+        row = run_one(0.0, args.mesh, args.iters, label, config=cfg)
+        append_row(row)
+        if row["state"] == "done":
+            print(f"RESULT {label}: cl {row.get('cl_rans')} vs C_est "
+                  f"{row.get('c_est_panel')} (Δ {row.get('delta_cl_pct')}%), "
+                  f"{row.get('stop_reason')}", flush=True)
+            return 0
+        print(f"FAILED {label}: {row.get('state')} — {row.get('error')}",
+              flush=True)
+        return 2
+    if not args.rides:
+        ap.error("--rides is required unless --config is given")
 
     failures = 0
     for ride in args.rides:
