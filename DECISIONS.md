@@ -1032,6 +1032,24 @@ built for. Penalty weights stay as shipped (they bias search toward
 trustworthy equals; the badge + RANS verify carries the honesty burden) —
 the data to revisit them is in `docs/calibration/runs.csv`.
 
+**The validity map generalizes as two orthogonal axes, each owned by an
+existing mechanism.** A second campaign leg re-measured the 25/30 mm
+pair at three off-baseline configs and the 60 mm point at 25 m/s. On
+healthy designs (loading budget green) the ride-height map holds across
+speeds: optimistic below the choke (−19 %/−12 % at h/c 0.071), honest at
+0.086 (−0 %/+6 %), conservative mid-height (+67 %/+57 % at 0.171). On
+designs past the 90 % loading warning line, the estimate measured
+−23…−30 % optimistic at *both* heights — the Smith budget's warning
+threshold is empirically where RANS optimism switches on, so the map's
+wording now states that loading warnings trump the bands. A second
+seeded Stage 2 pair replicated both badge classes: clean winners
+−14.2 %/−14.4 %, flagged winners −41.7 %/−36.5 % — and in both pairs
+the flagged design delivered less absolute downforce than the clean one
+despite claiming 31–40 % more. Alternative considered: folding loading
+into the banded map (a 2-D validity surface) — rejected as false
+precision from four configs; the two existing mechanisms already carry
+the message at the right granularity.
+
 ## Known limitations
 
 Documented, not fixed. The custom-airfoil registry lives in server memory

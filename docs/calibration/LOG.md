@@ -254,7 +254,26 @@ and both are now RANS-measured:
    budget*; loading warnings trump the bands, and the wording in the
    app and guide now says so.
 
-## 2026-07-23 — Stage 1 closed: `meshchk-h40-fine` confirms the boundary
+## 2026-07-23 — Leg B: conservative band generalizes; Stage 2 replicates
+
+`gen-h60-fine-v25` (healthy config, h/c 0.171 at 25 m/s): Cl 5.641 ±
+0.009 vs C_est 3.601 — **+56.6 %**, beside the baseline's +67.2 % at
+15 m/s. The mid-height conservatism holds across Reynolds number on
+healthy designs; the blue band stands as drawn.
+
+Stage 2 replication, second seeded pair at the same validated height:
+
+| winner | badge | Δ (pair 1) | Δ (pair 2) |
+|--------|-------|-----------:|-----------:|
+| clean   | none       | −14.2 % | −14.4 % |
+| flagged | near stall | −41.7 % | −36.5 % |
+
+Both rows replicate. The clean-winner over-claim is stable to within
+0.2 points (~−14 % for on-budget optimizer winners at 30 mm); flagged
+winners over-claim 2.5–3× that, and in both pairs the flagged design —
+claiming 31–40 % more downforce than the clean one — delivered less
+(3.69 vs 3.78 RANS Cl in pair 2, 3.48 vs 3.66 in pair 1). The badge's
+verdict is not just directionally right; its magnitude is repeatable.
 
 Cl 3.718 ± 0.044 vs C_est 3.754 — **Δ −1.0 %, implied k_g 0.154 vs
 curve 0.158: a third validated point.** Final fine-fidelity map of the
