@@ -42,6 +42,15 @@ def curve(h_c, a, s):
     return a * np.tanh(s / a * np.asarray(h_c, float))
 
 
+def curve_logistic(h_c, k, m, w):
+    """Convex-onset candidate: k / (1 + exp(-((h/c) - m) / w)).
+
+    Near-zero realization below the onset midpoint m, saturating at k —
+    the shape the Stage 1 sweep measured and the concave tanh cannot
+    take."""
+    return k / (1.0 + np.exp(-(np.asarray(h_c, float) - m) / w))
+
+
 def main() -> int:
     rows = list(csv.DictReader(LOG_CSV.open(encoding="utf-8")))
     pts = []
@@ -71,25 +80,36 @@ def main() -> int:
     fit = least_squares(lambda x: curve(h, *x) - k, x0=[0.85, 1.4],
                         bounds=([1e-3, 1e-3], [1.0, 10.0]))
     a, s = fit.x
+    fit_l = least_squares(lambda x: curve_logistic(h, *x) - k,
+                          x0=[0.85, 0.20, 0.04],
+                          bounds=([0.05, 0.01, 0.005], [1.0, 0.60, 0.30]))
+    kl, ml, wl = fit_l.x
 
-    print(f"fit over {len(coarse)} coarse points: "
+    print(f"tanh fit over {len(coarse)} coarse points: "
           f"k_g(h/c) = {a:.3f} * tanh({s:.3f}/{a:.3f} * h/c)   "
           f"(current: 0.850 * tanh(1.400/0.850 * h/c))")
-    print(f"{'label':24} {'h/c':>6} {'k_imp':>6} {'k_cur':>6} {'k_fit':>6} "
-          f"{'Cl_rans':>8} {'dCest_cur%':>10} {'dCest_fit%':>10}")
+    print(f"logistic fit: k_g(h/c) = {kl:.3f} / "
+          f"(1 + exp(-((h/c) - {ml:.3f}) / {wl:.3f}))")
+    print(f"{'label':30} {'h/c':>6} {'k_imp':>6} {'k_cur':>6} {'k_fit':>6} "
+          f"{'k_log':>6} {'Cl_rans':>8} {'dcur%':>7} {'dfit%':>7} "
+          f"{'dlog%':>7}")
     for p in pts:
         k_cur = float(curve(p["h_c"], 0.85, 1.4))
         k_fit = float(curve(p["h_c"], a, s))
+        k_log = float(curve_logistic(p["h_c"], kl, ml, wl))
         e_cur = c_est(k_cur, p["c_free"], p["c_ground"], p["h_c"])
         e_fit = c_est(k_fit, p["c_free"], p["c_ground"], p["h_c"])
+        e_log = c_est(k_log, p["c_free"], p["c_ground"], p["h_c"])
         d_cur = (e_cur / p["cl_rans"] - 1) * 100
         d_fit = (e_fit / p["cl_rans"] - 1) * 100
-        print(f"{p['label']:24} {p['h_c']:6.3f} {p['k_imp']:6.3f} "
-              f"{k_cur:6.3f} {k_fit:6.3f} {p['cl_rans']:8.3f} "
-              f"{d_cur:+10.1f} {d_fit:+10.1f}")
-    resid = curve(h, a, s) - k
-    print(f"fit residual (k_g units): max |r| {np.abs(resid).max():.3f}, "
-          f"rms {np.sqrt((resid ** 2).mean()):.3f}")
+        d_log = (e_log / p["cl_rans"] - 1) * 100
+        print(f"{p['label']:30} {p['h_c']:6.3f} {p['k_imp']:6.3f} "
+              f"{k_cur:6.3f} {k_fit:6.3f} {k_log:6.3f} {p['cl_rans']:8.3f} "
+              f"{d_cur:+7.1f} {d_fit:+7.1f} {d_log:+7.1f}")
+    for name, res in (("tanh", curve(h, a, s) - k),
+                      ("logistic", curve_logistic(h, kl, ml, wl) - k)):
+        print(f"{name} residual (k_g units): max |r| "
+              f"{np.abs(res).max():.3f}, rms {np.sqrt((res ** 2).mean()):.3f}")
     return 0
 
 
