@@ -197,3 +197,14 @@ Fine-mesh re-reads of the sweep points:
 Open point queued: `meshchk-h40-fine` completes the racing band
 (25/30/40) and settles whether the choke-warning boundary at h/c 0.08
 needs to move.
+
+## 2026-07-23 — Stage 1 closed: `meshchk-h40-fine` confirms the boundary
+
+Cl 3.718 ± 0.044 vs C_est 3.754 — **Δ −1.0 %, implied k_g 0.154 vs
+curve 0.158: a third validated point.** Final fine-fidelity map of the
+racing band: −19 % at h/c 0.071, −0 % at 0.086, −1 % at 0.114, +67 % at
+0.171 — the model is essentially exact through the core racing band
+(30–40 mm on the 350 mm chord), optimistic only below the choke onset,
+conservative above ~50 mm. The `HC_CHOKE_OPTIMISM = 0.08` boundary sits
+exactly in the measured gap (broken at 0.071, validated at 0.086); no
+adjustment needed. Stage 1 verdict stands as recorded above.
