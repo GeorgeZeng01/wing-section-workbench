@@ -240,6 +240,7 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
             "CD_profile": round(op["CD"], 5),
             "alpha_equiv_deg": round(op["alpha"], 2),
             "cd_lookup_capped": drag_capped,
+            "cl_max_at_grid_edge": bool(lim.get("at_grid_edge")),
             "nf_confidence": round(lim["confidence"], 3),
             "slot_gap_pct": round(design[i].get("slot_gap", np.nan) * 100, 2)
                 if i else None,
@@ -354,6 +355,9 @@ def quick_objective_eval(cfg: StackConfig, model_size: str = "large") -> dict:
     load_excess_ground = 0.0
     fracs = []          # per-element free-air loading fractions — the
     fracs_ground = []   # optimizer's baseline-relative bands need them
+    confidences = []    # NeuralFoil confidence at CL_max, per element — the
+    at_grid_edge = []   # optimizer's trust penalty reads these instead of
+    cd_capped = []      # discarding them
     for i, e in enumerate(design):
         cl_free_e = -free.elements[i]["Cy"] / e["chord_ratio"]
         cl_ground_e = -ground.elements[i]["Cy"] / e["chord_ratio"]
@@ -373,6 +377,10 @@ def quick_objective_eval(cfg: StackConfig, model_size: str = "large") -> dict:
                                      min(cl_op, 0.95 * lim["CL_max"]),
                                      cfg.ncrit, model_size)
         cd_stack += op["CD"] * e["chord_ratio"]
+        confidences.append(float(lim["confidence"]))
+        at_grid_edge.append(bool(lim.get("at_grid_edge")))
+        cd_capped.append(bool(op["clamped_high"]
+                              or cl_op > 0.95 * lim["CL_max"]))
 
     drag_induced, _ = induced_drag_n(downforce_n, cfg, installed)
     gaps = [e.get("slot_gap") for e in design[1:]]
@@ -387,6 +395,9 @@ def quick_objective_eval(cfg: StackConfig, model_size: str = "large") -> dict:
         "load_excess_ground": load_excess_ground,
         "fracs": fracs,
         "fracs_ground": fracs_ground,
+        "confidences": confidences,
+        "at_grid_edge": at_grid_edge,
+        "cd_capped": cd_capped,
         "gaps": gaps,
         "overlaps": overlaps,
     }

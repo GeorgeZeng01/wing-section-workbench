@@ -71,6 +71,13 @@ check("each candidate carries an applicable config + analysis summary",
       all(c["config"].get("elements") and c["summary"] is not None
           and np.isfinite(c["summary"]["downforce_n"]) for c in cands))
 
+check("candidates expose the viscous-trust flags",
+      all(c["summary"] is not None
+          and 0.0 < c["summary"]["confidence_min"] <= 1.0
+          and isinstance(c["summary"]["low_confidence"], bool)
+          and isinstance(c["summary"]["near_stall"], bool) for c in cands),
+      f"(conf_min {[c['summary'] and c['summary']['confidence_min'] for c in cands]})")
+
 # configs must round-trip through the analysis pipeline (what Apply does)
 from app.core import analysis, geometry  # noqa: E402
 ok_apply = True
@@ -140,6 +147,68 @@ ts = next(v for v in vars_sh if v["key"] == "shape_ts" and v["elem"] == 0)
 check("shape seeds outside generic bounds stay representable",
       b25["hi"] >= 0.05 and ts["lo"] <= 0.62,
       f"(b25 hi {b25['hi']}, ts lo {ts['lo']})")
+
+# ---- viscous-trust penalty ------------------------------------------------
+# quick_objective_eval must surface the confidence signals it computes, and
+# the objective must charge for leaning on them — without touching a clean
+# stack. The mild seed design (deflection 12, aoa 0) is genuinely clean; the
+# hot CFG above is not (its main element's drag lookup is capped), which is
+# exactly why the penalty is baseline-relative.
+SEED_CLEAN = {**CFG, "stack_aoa_deg": 0.0,
+              "elements": [CFG["elements"][0],
+                           {**CFG["elements"][1], "deflection_deg": 12}]}
+ev_clean = analysis.quick_objective_eval(
+    geometry.StackConfig.from_dict(SEED_CLEAN))
+check("quick eval returns per-element confidence + flags",
+      len(ev_clean["confidences"]) == 2 and len(ev_clean["at_grid_edge"]) == 2
+      and len(ev_clean["cd_capped"]) == 2
+      and all(0.0 < c <= 1.0 for c in ev_clean["confidences"]),
+      f"(conf {[round(c, 3) for c in ev_clean['confidences']]})")
+check("clean stack pays no trust penalty",
+      optimizer._confidence_penalty(ev_clean) == 0.0)
+
+_flagged = {"confidences": [0.2, 0.9], "fracs": [0.95, 0.30],
+            "at_grid_edge": [True, False], "cd_capped": [False, False]}
+_expect = (optimizer.CONF_WEIGHT
+           * ((optimizer.CONF_FLOOR - 0.2) / optimizer.CONF_FLOOR) ** 2
+           + optimizer.FLAG_BUMP)
+check("low-confidence + at-grid-edge loaded element is penalized",
+      abs(optimizer._confidence_penalty(_flagged) - _expect) < 1e-12,
+      f"(penalty {optimizer._confidence_penalty(_flagged):.3f})")
+check("flags on an UNloaded element cost nothing",
+      optimizer._confidence_penalty(
+          {"confidences": [0.9, 0.9], "fracs": [0.3, 0.2],
+           "at_grid_edge": [True, True], "cd_capped": [True, True]}) == 0.0)
+
+# the objective must actually include the net (baseline-relative) penalty:
+# stub the evaluation so the two calls differ only in the trust signals
+_orig_eval = optimizer.analysis.quick_objective_eval
+try:
+    _base_ev = {"feasible": True, "downforce_n": TARGET, "drag_n": 10.0,
+                "c_est": 2.0, "c_ground": 3.0, "load_excess": 0.0,
+                "load_excess_ground": 0.0, "fracs": [0.8, 0.4],
+                "fracs_ground": [1.0, 0.5], "gaps": [0.015],
+                "overlaps": [0.03], "confidences": [0.9, 0.9],
+                "at_grid_edge": [False, False], "cd_capped": [False, False]}
+    job_p = optimizer.Job(CFG, {"target_downforce_n": TARGET, "budget": 100})
+    job_p._opt_panels = 50
+    job_p.t_start = __import__("time").time()
+    x0 = optimizer.initial_vector(job_p.config, job_p.variables, {})
+
+    optimizer.analysis.quick_objective_eval = lambda cfg, **kw: dict(_base_ev)
+    job_p.objective(x0)
+    pen_clean = job_p.archive[-1]["penalty"]
+
+    optimizer.analysis.quick_objective_eval = lambda cfg, **kw: {
+        **_base_ev, "confidences": [0.2, 0.9], "fracs": [0.95, 0.4],
+        "at_grid_edge": [True, False]}
+    job_p.objective(x0)
+    pen_flagged = job_p.archive[-1]["penalty"]
+finally:
+    optimizer.analysis.quick_objective_eval = _orig_eval
+check("objective charges the trust penalty (and only the flagged design)",
+      pen_clean == 0.0 and abs(pen_flagged - _expect) < 1e-9,
+      f"(clean {pen_clean}, flagged {pen_flagged:.3f})")
 
 # determinism: identical inputs must give the identical result
 job2 = optimizer.Job(CFG, {"target_downforce_n": TARGET,

@@ -935,6 +935,59 @@ surfaces were audited and found clean: every subprocess call passes an
 argument list, and every case-file interpolation is a number or a
 server-generated patch name, never a user string.
 
+## Optimizer guardrails
+
+**Manufacturing guard on Optimize: warn, don't default-on.** With TE prep
+off (the default), the optimizer tuned knife-edge trailing edges whose flow
+changes once the wing is made buildable. Clicking Optimize with prep off now
+raises a dialog — "Enable & optimize" (turns on thicken/1.2 mm and runs) or
+"Optimize anyway" (remembered for the session). The alternative, defaulting
+manufacturing ON in the seed config, was rejected: it silently shifts every
+default-template number the app has ever shown, prep parameters are
+workshop-specific (a 3D-printed wing wants a different TE than a layup), and
+the failure being fixed is specific to optimization — the guard interposes
+exactly there, with consent. Warn-only also keeps existing sessions and
+presets bit-identical.
+
+**The optimizer now pays for leaning on data the model itself distrusts.**
+Each evaluation already computed per-element NeuralFoil confidence, the
+grid-edge flag (polar never stalled by the last analyzed angle, so CL_max is
+a lower bound — the self-referential cap that shape refinement can inflate
+by adding camber), and the capped-drag-lookup flag; all three were discarded.
+`quick_objective_eval` now returns them and the objective adds a soft trust
+penalty: quadratic growth as confidence falls below 0.5 (the screener's own
+bar), plus a fixed bump per *loaded* element (past the 90 % free-air warning
+threshold — in ground effect even the mild seed runs its main-element drag
+lookup at the 95 % cap, so any looser gate would flag everything and mean
+nothing) at the grid edge or on a clamped lookup. The penalty is
+baseline-relative like the load bands: a re-optimized already-shaped design
+is charged only for leaning *harder* on low-trust data, never for matching
+itself — a standing offset would break early stopping and the candidates'
+penalty gate. Weights (6.0 / 0.75) keep a fully flagged element worth about
+an 11 % target miss: enough to prefer an equally-performing trustworthy
+design, never enough to beat hitting the target. Alternative considered: a
+hard confidence floor (reject evaluations below 0.5) — rejected because the
+surrogate's confidence is itself screening-grade, and a cliff would
+reintroduce the "optimizer refuses designs the analysis page happily
+reports" contradiction the baseline-allowance work removed.
+
+**Candidates carry their trust verdict.** Candidate summaries now include
+`confidence_min` and `low_confidence` / `near_stall` flags (same gates as
+the penalty); cards render them as badges plus the confidence percentage,
+and the winner's flags are repeated as a hint beside Best design — the
+winner is what gets applied, and a badge only on alternate cards would miss
+it. `CAND_MAX` was raised 4 → 6: selection is diversity-gated
+(farthest-point-first, 0.12 minimum spread), so the extra slots fill only
+when genuinely different on-target designs exist, at the cost of two more
+full-fidelity re-analyses at finalize.
+
+**`BOUNDS_BUMP` left at ±0.012.** Tightening shape-refinement bounds was
+considered for RANS-divergence reduction but not done: the stated bar was a
+*measured* reduction, which needs a battery of Docker RANS runs, and the
+trust penalty attacks the same failure (over-aggressive synthesized camber)
+at its cause — the data quality — instead of shrinking the design space for
+well-behaved shapes too.
+
 ## Known limitations
 
 Documented, not fixed. The custom-airfoil registry lives in server memory

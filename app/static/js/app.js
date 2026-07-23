@@ -788,7 +788,38 @@ $("ov-af").addEventListener("change", () => {
   $("ov-af-pool").disabled = !$("ov-af").checked;
 });
 
-async function startOptimization() {
+// manufacturing guard: with prep off, the optimizer tunes knife-edge
+// trailing edges that change once the wing is made buildable. Ask before
+// running; "Optimize anyway" is remembered for the rest of the session.
+let mfgGuardAck = false;
+
+function startOptimization() {
+  if ($("btn-opt-run").disabled) return;
+  if (!state.config.manufacturing && !mfgGuardAck) {
+    if (!$("mfg-guard-dialog").open) $("mfg-guard-dialog").showModal();
+    return;
+  }
+  launchOptimization();
+}
+
+$("mfg-guard-enable").addEventListener("click", async () => {
+  $("mfg-guard-dialog").close();
+  // the same defaults the Manufacturing panel starts with
+  state.config.manufacturing =
+    { te_gap_mm: 1.2, te_mode: "thicken", min_thickness_mm: 0 };
+  writeConfigToForm();
+  onConfigChanged();
+  await launchOptimization();
+});
+$("mfg-guard-anyway").addEventListener("click", async () => {
+  $("mfg-guard-dialog").close();
+  mfgGuardAck = true;
+  await launchOptimization();
+});
+$("mfg-guard-cancel").addEventListener("click", () =>
+  $("mfg-guard-dialog").close());
+
+async function launchOptimization() {
   // disable BEFORE the request: a double-click on the button must not
   // spawn two concurrent server-side search jobs
   if ($("btn-opt-run").disabled) return;
@@ -989,6 +1020,19 @@ function renderOptHints(s) {
     d.textContent = msg;
     host.appendChild(d);
   }
+  // the winner is what gets applied — if IT carries trust flags, say so
+  // here, not only on the candidate card
+  const f1 = ((s.candidates || [])[0] || {}).summary;
+  if (f1 && (f1.low_confidence || f1.near_stall)) {
+    const d = document.createElement("div");
+    d.className = "warning-item";
+    d.textContent = (f1.low_confidence
+      ? "The winning design leans on low-confidence viscous data (NeuralFoil " +
+        `confidence ${Math.round((f1.confidence_min ?? 0) * 100)}%)`
+      : "The winning design loads sections at the edge of their stall data") +
+      " — treat its numbers as optimistic and verify with RANS before building.";
+    host.appendChild(d);
+  }
 }
 
 async function applyDesign(cfgIn) {
@@ -1055,13 +1099,25 @@ function renderCandidates(s) {
     const ld = f.efficiency_ld;
     const badges =
       (c.on_target ? "" : `<span class="badge warn">off target</span>`) +
+      (f.low_confidence ? `<span class="badge warn" title="NeuralFoil ` +
+        `confidence is below 50% on at least one section — the viscous ` +
+        `data behind this design is an extrapolation, not a prediction. ` +
+        `Verify with RANS before trusting it.">low confidence</span>` : "") +
+      (f.near_stall ? `<span class="badge warn" title="A loaded element ` +
+        `runs at the edge of its viscous data: its drag lookup is capped ` +
+        `at the pre-stall polar (drag understated), or its polar never ` +
+        `stalled in the analyzed range (CL_max is a lower bound, not a ` +
+        `stall). Verify with RANS.">near stall</span>` : "") +
       (f.warnings ? `<span class="badge warn">${f.warnings} warning` +
                     `${f.warnings > 1 ? "s" : ""}</span>` : "");
     const head = document.createElement("div");
     head.className = "cand-head";
     head.innerHTML =
       `<span><b>#${c.rank}</b> ${fmtN(dn, 0)} N · drag ${fmtN(drag, 1)} N` +
-      (ld != null ? ` · L/D ${fmtN(ld, 1)}` : "") + `</span><span>${badges}</span>`;
+      (ld != null ? ` · L/D ${fmtN(ld, 1)}` : "") +
+      (f.confidence_min != null
+        ? ` · conf ${Math.round(f.confidence_min * 100)}%` : "") +
+      `</span><span>${badges}</span>`;
     card.appendChild(head);
 
     const body = document.createElement("div");

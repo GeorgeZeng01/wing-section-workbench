@@ -434,5 +434,24 @@ except ValueError as e:
     check("folded-surface contour rejected by TE treatment",
           "folds back" in str(e))
 
+# ---- optimizer manufacturing guard (frontend contract) -----------------
+# Prep stays OFF by default (warn-only decision, see DECISIONS.md), so the
+# UI must interpose before optimizing sharp geometry: the guard dialog and
+# its two exits have to exist and be wired. A static contract check — there
+# is no JS harness — but it pins the pieces a refactor would silently drop.
+html = (ROOT / "app" / "static" / "index.html").read_text(encoding="utf-8")
+js = (ROOT / "app" / "static" / "js" / "app.js").read_text(encoding="utf-8")
+check("mfg guard dialog present with both exits",
+      'id="mfg-guard-dialog"' in html
+      and 'id="mfg-guard-enable"' in html
+      and 'id="mfg-guard-anyway"' in html)
+check("optimize click gates on state.config.manufacturing",
+      "!state.config.manufacturing" in js
+      and '$("mfg-guard-dialog").showModal' in js)
+check("'Enable & optimize' applies the default TE prep",
+      "te_gap_mm: 1.2" in js and '"mfg-guard-enable"' in js)
+check("default config leaves manufacturing off (guard is the chosen path)",
+      "manufacturing" not in js.split("const state = {")[1].split("};")[0])
+
 print(f"\n{sum(results)}/{len(results)} manufacturing checks passed")
 sys.exit(0 if all(results) else 1)

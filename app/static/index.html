@@ -501,6 +501,24 @@
   </div>
 </dialog>
 
+<!-- manufacturing guard: optimizing with prep off tunes sharp TEs -->
+<dialog id="mfg-guard-dialog" class="dialog">
+  <h2>Manufacturing prep is off</h2>
+  <div class="dialog-body">
+    <p>The optimizer will tune sharp trailing edges you won't build. When the
+    profiles are later prepared for the workshop, the flow — and the numbers
+    the search worked so hard for — will change.</p>
+    <p class="note">Enable &amp; optimize turns on TE prep with the defaults
+    (thicken, 1.2&nbsp;mm) so the search runs on the as-built shapes. You can
+    adjust the treatment under <b>Manufacturing</b> in the left panel.</p>
+  </div>
+  <div class="action-row">
+    <button id="mfg-guard-enable" class="btn primary">Enable &amp; optimize</button>
+    <button id="mfg-guard-anyway" class="btn">Optimize anyway</button>
+    <button id="mfg-guard-cancel" class="btn ghost">Cancel</button>
+  </div>
+</dialog>
+
 <div id="toasts" class="toasts" aria-live="polite"></div>
 
 <template id="tpl-element-card">

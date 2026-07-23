@@ -23,6 +23,12 @@ soft penalties keeping the design in the healthy high-lift envelope:
   - slot overlap inside a -1%c .. 5%c band
   - element loading below ~105% of isolated CL_max
   - realized ground-effect loading inside the model's validity allowance
+  - viscous-data trust: NeuralFoil confidence below CONF_FLOOR, and loaded
+    elements whose polar never stalled in the grid or whose drag lookup was
+    clamped at the stall branch (the signals the evaluations already
+    compute; without this the search happily rides data the surrogate
+    itself distrusts — shape refinement especially, which can push camber
+    until both the load and its own self-referential CL_max cap inflate)
   - hard penalty on intersecting geometry / solver failure
 
 Every soft band is widened per-run so the STARTING design's own operating
@@ -88,9 +94,27 @@ THICKNESS_MIN_MAIN = 5.0   # %c — thinner sections are structurally impractica
 THICKNESS_MIN_FLAP = 3.5
 AIRFOIL_POOLS = ("auto", "include_custom", "custom_only")
 
-CAND_MAX = 4               # candidate designs returned per run
+CAND_MAX = 6               # candidate designs returned per run
 CAND_DIVERSITY = 0.12      # min normalized per-variable spread between them
 CAND_TARGET_TOL = 0.03     # alternates must land within 3% of the target
+
+# viscous-data trust penalty. Soft by construction: a screened library stack
+# (confidence well above CONF_FLOOR, stalling inside the polar grid) pays
+# nothing, and even a fully flagged element costs about as much as an ~11%
+# target miss — enough to prefer an equally-performing trustworthy design,
+# never enough to beat hitting the target (weight 60) outright.
+CONF_FLOOR = 0.5           # NeuralFoil confidence below this is penalized
+                           # (the screener's own confidence bar)
+CONF_WEIGHT = 6.0          # x ((floor - conf) / floor)^2, per element
+FLAG_BUMP = 0.75           # per LOADED element at the polar grid edge or on
+                           # a clamped drag lookup
+FLAG_LOAD_FRAC = analysis.LOAD_WARN
+                           # "loaded": at the free-air loading fraction where
+                           # the analysis itself starts warning. It must NOT
+                           # be lower: in ground effect even the mild seed
+                           # design runs its main element's drag lookup at
+                           # the 95%-of-CL_max cap, so a looser gate would
+                           # flag every realistic design and say nothing
 
 
 def build_airfoil_shortlists(config: dict, cfg: StackConfig,
@@ -371,6 +395,21 @@ def _band_penalty(value: float, band: tuple[float, float], scale: float) -> floa
     return 0.0
 
 
+def _confidence_penalty(ev: dict) -> float:
+    """Trust penalty for one evaluation: low NeuralFoil confidence anywhere,
+    plus a fixed bump per loaded element whose viscous limit is a grid-edge
+    lower bound or whose drag lookup clamped at the stall branch."""
+    pen = 0.0
+    for conf, frac, edge, capped in zip(
+            ev.get("confidences", ()), ev.get("fracs", ()),
+            ev.get("at_grid_edge", ()), ev.get("cd_capped", ())):
+        if conf < CONF_FLOOR:
+            pen += CONF_WEIGHT * ((CONF_FLOOR - conf) / CONF_FLOOR) ** 2
+        if (edge or capped) and frac > FLAG_LOAD_FRAC:
+            pen += FLAG_BUMP
+    return pen
+
+
 class Job:
     def __init__(self, config: dict, options: dict):
         self.id = uuid.uuid4().hex[:12]
@@ -472,6 +511,7 @@ class Job:
         n_flaps = max(0, len(self.config.get("elements", [])) - 1)
         self.load_band: list[float] | None = None
         self.ground_band: list[float] | None = None
+        self.conf_pen0 = 0.0   # baseline's own trust penalty (see objective)
         self.gap_bands: list[tuple[float, float]] = [GAP_BAND] * n_flaps
         self.overlap_bands: list[tuple[float, float]] = [OVERLAP_BAND] * n_flaps
         self._cancel = threading.Event()
@@ -540,6 +580,12 @@ class Job:
             j_pen += 2.0 * _band_penalty(g, band, 0.005)
         for o, band in zip(ev["overlaps"], self.overlap_bands):
             j_pen += 2.0 * _band_penalty(o, band, 0.01)
+        # trust penalty, baseline-relative like the loading bands: a start
+        # that already sits on low-confidence data (a re-optimized shaped
+        # design) is penalized only for leaning HARDER on it, never for
+        # matching itself — a standing offset would break _target_reached()
+        # and the candidates' penalty gate for the whole run
+        j_pen += max(0.0, _confidence_penalty(ev) - self.conf_pen0)
         # the target term must dominate realistic drag savings inside ~1%
         # of target, or induced drag (which falls with downforce^2) would
         # pull the optimum a few percent under the requested load
@@ -635,11 +681,22 @@ class Job:
             try:
                 r = analysis.analyze(StackConfig.from_dict(cfg_c),
                                      include_geometry=False)
+                els = r["elements"]
+                conf_min = min(e["nf_confidence"] for e in els)
                 entry["summary"] = {
                     "downforce_n": r["forces"]["downforce_n"],
                     "drag_total_n": r["forces"]["drag_total_n"],
                     "efficiency_ld": r["forces"]["efficiency_ld"],
                     "warnings": len(r["warnings"]),
+                    # trust flags, same gates as the objective's penalty —
+                    # the UI badges that say which winners to distrust
+                    # before RANS
+                    "confidence_min": round(conf_min, 3),
+                    "low_confidence": bool(conf_min < CONF_FLOOR),
+                    "near_stall": any(
+                        (e["cd_lookup_capped"] or e["cl_max_at_grid_edge"])
+                        and e["loading_fraction"] > FLAG_LOAD_FRAC
+                        for e in els),
                 }
             except Exception:
                 entry["summary"] = None
@@ -678,6 +735,7 @@ class Job:
         self.load_band = [max(1.05, f + 0.03) for f in ev0["fracs"]]
         self.ground_band = [max(analysis.GROUND_CL_ALLOWANCE, f + 0.05)
                             for f in ev0["fracs_ground"]]
+        self.conf_pen0 = _confidence_penalty(ev0)
         self.gap_bands = [GAP_BAND if g is None else
                           (min(GAP_BAND[0], g - 5e-4),
                            max(GAP_BAND[1], g + 5e-4))
