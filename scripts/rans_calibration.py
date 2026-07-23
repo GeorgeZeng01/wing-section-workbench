@@ -32,34 +32,45 @@ from app.core import cfd_run  # noqa: E402
 LOG_CSV = ROOT / "docs" / "calibration" / "runs.csv"
 
 FIELDS = ["timestamp_utc", "label", "ride_height_mm", "h_over_c", "mesh",
+          "stack_aoa_deg", "defl2_deg", "speed_ms",
           "n_iters_cap", "state", "converged", "stop_reason", "n_iters_run",
           "elapsed_s", "cl_rans", "cl_rans_std", "cd_rans", "c_est_panel",
           "c_free", "c_ground", "k_g_used", "delta_cl_pct", "suggested_k_g",
           "error"]
 
 
-def baseline_config(ride_height_mm: float) -> dict:
-    """The two-element baseline the UI seeds (sharp TEs, no mfg prep)."""
+def baseline_config(ride_height_mm: float, aoa: float = 0.0,
+                    defl: float = 12.0, speed: float = 15.0) -> dict:
+    """The two-element baseline the UI seeds (sharp TEs, no mfg prep).
+
+    aoa / flap deflection / speed are overridable so the campaign can test
+    whether a fitted curve SHAPE generalizes beyond one operating point —
+    a constant fitted to a single config would be curve-fitting one
+    design, not calibrating the model."""
     return {
         "elements": [
             {"airfoil": "s1223", "chord_ratio": 1.0, "deflection_deg": 0},
-            {"airfoil": "s1223", "chord_ratio": 0.35, "deflection_deg": 12,
+            {"airfoil": "s1223", "chord_ratio": 0.35,
+             "deflection_deg": float(defl),
              "slot_gap_pct": 1.5, "slot_overlap_pct": 3.0}],
-        "stack_aoa_deg": 0.0, "ride_height_mm": float(ride_height_mm),
-        "chord_mm": 350, "span_mm": 1400, "speed_ms": 15,
+        "stack_aoa_deg": float(aoa), "ride_height_mm": float(ride_height_mm),
+        "chord_mm": 350, "span_mm": 1400, "speed_ms": float(speed),
         "rho": 1.225, "nu": 1.5e-5, "ncrit": 7,
         "viscous_efficiency": 0.85, "efficiency_3d": 0.9,
         "span_efficiency": 0.9, "n_panels_per_side": 70,
     }
 
 
-def run_one(ride: float, mesh: str, iters: int, label: str) -> dict:
-    cfg = baseline_config(ride)
+def run_one(ride: float, mesh: str, iters: int, label: str,
+            aoa: float = 0.0, defl: float = 12.0,
+            speed: float = 15.0) -> dict:
+    cfg = baseline_config(ride, aoa, defl, speed)
     t0 = time.time()
     row = {"timestamp_utc": datetime.now(timezone.utc).isoformat(
                timespec="seconds"),
            "label": label, "ride_height_mm": ride,
            "h_over_c": round(ride / 350.0, 4), "mesh": mesh,
+           "stack_aoa_deg": aoa, "defl2_deg": defl, "speed_ms": speed,
            "n_iters_cap": iters}
     try:
         job_id = cfd_run.start(cfg, mesh_size=mesh, n_iters=iters)
@@ -119,6 +130,10 @@ def main() -> int:
                     choices=["coarse", "medium", "fine"])
     ap.add_argument("--iters", type=int, default=10000)
     ap.add_argument("--label", default="cal")
+    ap.add_argument("--aoa", type=float, default=0.0)
+    ap.add_argument("--defl", type=float, default=12.0,
+                    help="flap deflection in degrees")
+    ap.add_argument("--speed", type=float, default=15.0)
     args = ap.parse_args()
 
     avail = cfd_run.availability()
@@ -129,7 +144,10 @@ def main() -> int:
     failures = 0
     for ride in args.rides:
         label = f"{args.label}-h{ride:g}-{args.mesh}"
-        row = run_one(ride, args.mesh, args.iters, label)
+        if (args.aoa, args.defl, args.speed) != (0.0, 12.0, 15.0):
+            label += f"-a{args.aoa:g}-d{args.defl:g}-v{args.speed:g}"
+        row = run_one(ride, args.mesh, args.iters, label,
+                      args.aoa, args.defl, args.speed)
         append_row(row)
         if row["state"] == "done":
             print(f"RESULT {label}: cl {row.get('cl_rans')} "

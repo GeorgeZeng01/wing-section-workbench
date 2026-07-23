@@ -101,3 +101,43 @@ direction that exaggerates finding 2. Queued to resolve:
 viscous free-air value, which prices the η = 0.85 knockdown directly —
 at 90 mm RANS is already 73 % above η·C_f, so η as a flat knockdown is
 also suspect at height).
+
+## 2026-07-23 — Stage 1 continued: fine anchor + tall tails flip the verdict
+
+`anchor-h30-fine` (~90k cells, 17 min, force-converged at 3,457 iters):
+**Cl 3.836 ± 0.263 — dead on the current model's C_est 3.838 (Δ −0.0 %,
+implied k_g 0.119 = the auto curve's own value at h/c 0.0857).** The
+coarse mesh at the same height had read 2.712 — 29 % low. The
+racing-height "collapse" Stage 1's coarse sweep measured is therefore
+substantially a mesh artifact: the under-resolved venturi gap separates
+early. Note the fine run's ±0.26 limit cycle (~7 % band): the flow at
+racing height is genuinely unsteady, so any single number carries that
+band as irreducible uncertainty.
+
+`tail-h150-coarse` (h/c 0.429): Cl 3.222 ± 0.005 vs C_est 3.215 —
+**+0.2 %, implied k_g 0.521 vs curve 0.517.** The current curve is also
+validated here, on a steady, well-resolved point.
+
+`tail-h300-coarse` (h/c 0.857): Cl 2.352 ± 0.035, only +4.3 % above
+η·C_f = 2.254 — **η = 0.85 is honest against RANS near free air.** The
+−17.5 % C_est delta at this height is the curve still claiming k 0.755
+where the measured realization is ~0.12; in absolute terms ~0.5 Cl of
+optimism at a height nobody races at. Worth a curve-tail note, not a
+recalibration on its own.
+
+Revised hypothesis, to be settled by the mesh-check leg
+(`mesh-h30-medium`, `meshchk-h25/60/90-fine`): the current calibration
+is far better than the coarse sweep suggested — validated at fine-30 and
+coarse-150 — and the remaining live questions are (a) whether the coarse
+60/90 mm overshoot (+9 %/+33 %, i.e. the model UNDER-predicting
+mid-height gains) survives fine meshing, and (b) where genuine
+venturi-choke loss begins (the coarse 15 mm point, to be re-read in
+fine-mesh light). Also actionable regardless of the verdict: the in-app
+RANS verify tab DEFAULTS TO THE COARSE MESH — which just mis-read a
+validated operating point by −29 % — so the tab needs at least a
+low-ride-height coarse-mesh warning.
+
+Timestamps note: the two tail rows in `runs.csv` were reconstructed from
+their retained case directories after a CSV schema migration dropped
+them mid-append (solver numbers are exact; their timestamps are accurate
+to a few minutes).

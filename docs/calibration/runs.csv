@@ -1,7 +1,10 @@
-timestamp_utc,label,ride_height_mm,h_over_c,mesh,n_iters_cap,state,converged,stop_reason,n_iters_run,elapsed_s,cl_rans,cl_rans_std,cd_rans,c_est_panel,c_free,c_ground,k_g_used,delta_cl_pct,suggested_k_g,error
-2026-07-23T05:58:33+00:00,probe-h30-coarse,30.0,0.0857,coarse,10000,done,True,force history converged,2196,95.1,2.7123,0.151,0.2187,3.8376,2.6512,19.3319,0.119,-29.3,0.034,
-2026-07-23T06:00:46+00:00,sweep-h15-coarse,15.0,0.0429,coarse,10000,done,True,force history converged,3410,140.1,1.1933,0.0516,0.19682,3.8044,2.6512,45.1596,0.06,-68.6,,
-2026-07-23T06:03:06+00:00,sweep-h25-coarse,25.0,0.0714,coarse,10000,done,True,force history converged,2458,100.1,2.4328,0.0794,0.23083,3.8665,2.6512,23.8632,0.1,-37.1,0.011,
-2026-07-23T06:04:47+00:00,sweep-h40-coarse,40.0,0.1143,coarse,10000,done,True,force history converged,3184,130.1,2.8037,0.0813,0.20288,3.7536,2.6512,14.1472,0.158,-25.3,0.057,
-2026-07-23T06:06:57+00:00,sweep-h60-coarse,60.0,0.1714,coarse,10000,done,True,force history converged,3498,145.1,3.9359,0.0423,0.11999,3.6012,2.6512,9.5311,0.234,9.3,0.294,
-2026-07-23T06:09:22+00:00,sweep-h90-coarse,90.0,0.2571,coarse,10000,done,True,force history converged,3393,140.1,4.5897,0.0161,0.02102,3.4403,2.6512,6.8019,0.34,33.4,0.691,
+timestamp_utc,label,ride_height_mm,h_over_c,mesh,stack_aoa_deg,defl2_deg,speed_ms,n_iters_cap,state,converged,stop_reason,n_iters_run,elapsed_s,cl_rans,cl_rans_std,cd_rans,c_est_panel,c_free,c_ground,k_g_used,delta_cl_pct,suggested_k_g,error
+2026-07-23T05:58:33+00:00,probe-h30-coarse,30.0,0.0857,coarse,0.0,12.0,15.0,10000,done,True,force history converged,2196,95.1,2.7123,0.151,0.2187,3.8376,2.6512,19.3319,0.119,-29.3,0.034,
+2026-07-23T06:00:46+00:00,sweep-h15-coarse,15.0,0.0429,coarse,0.0,12.0,15.0,10000,done,True,force history converged,3410,140.1,1.1933,0.0516,0.19682,3.8044,2.6512,45.1596,0.06,-68.6,,
+2026-07-23T06:03:06+00:00,sweep-h25-coarse,25.0,0.0714,coarse,0.0,12.0,15.0,10000,done,True,force history converged,2458,100.1,2.4328,0.0794,0.23083,3.8665,2.6512,23.8632,0.1,-37.1,0.011,
+2026-07-23T06:04:47+00:00,sweep-h40-coarse,40.0,0.1143,coarse,0.0,12.0,15.0,10000,done,True,force history converged,3184,130.1,2.8037,0.0813,0.20288,3.7536,2.6512,14.1472,0.158,-25.3,0.057,
+2026-07-23T06:06:57+00:00,sweep-h60-coarse,60.0,0.1714,coarse,0.0,12.0,15.0,10000,done,True,force history converged,3498,145.1,3.9359,0.0423,0.11999,3.6012,2.6512,9.5311,0.234,9.3,0.294,
+2026-07-23T06:09:22+00:00,sweep-h90-coarse,90.0,0.2571,coarse,0.0,12.0,15.0,10000,done,True,force history converged,3393,140.1,4.5897,0.0161,0.02102,3.4403,2.6512,6.8019,0.34,33.4,0.691,
+2026-07-23T06:14:09+00:00,anchor-h30-fine,30.0,0.0857,fine,0.0,12.0,15.0,10000,done,True,force history converged,3457,1040.2,3.8358,0.2626,0.23047,3.8376,2.6512,19.3319,0.119,-0.0,0.119,
+2026-07-23T06:35:00+00:00,tail-h150-coarse,150.0,0.4286,coarse,0.0,12.0,15.0,10000,done,True,force history converged,2634,130.1,3.2223,0.0046,0.05212,3.215,2.6512,4.8547,0.517,0.2,0.521,
+2026-07-23T06:38:00+00:00,tail-h300-coarse,300.0,0.8571,coarse,0.0,12.0,15.0,10000,done,True,force history converged,2537,125.1,2.3518,0.0347,0.03421,2.8519,2.6512,3.5865,0.755,-17.5,0.124,
