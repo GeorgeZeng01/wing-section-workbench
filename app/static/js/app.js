@@ -1622,6 +1622,16 @@ function renderRansResult(s) {
       `(${r.panel_error}) — the RANS numbers above stand on their own.`;
     host.appendChild(w);
   }
+  if (r.mesh_caution) {
+    const w = document.createElement("div");
+    w.className = "warning-item";
+    w.textContent = "Coarse-mesh caution: calibration testing measured the " +
+      "coarse mesh reading validated operating points 22–35% below " +
+      "fine-mesh truth at racing and mid ride heights (it under-resolves " +
+      "the venturi gap). Treat this run as screening; re-run on medium or " +
+      "fine before trusting the delta or pinning k_g from it.";
+    host.appendChild(w);
+  }
   if (r.suggested_k_g != null) {
     const d = document.createElement("div");
     d.className = "kv";

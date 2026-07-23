@@ -663,6 +663,13 @@ class RansJob:
                 "delta_cl_pct": round((cl_mean / panel["c_est"] - 1) * 100, 1)
                     if panel and abs(panel["c_est"]) > 1e-9 else None,
                 "suggested_k_g": suggestion,
+                # the 2026-07 calibration campaign (docs/calibration) measured
+                # the coarse mesh reading validated operating points 22-35%
+                # below fine-mesh truth through the racing and mid-height
+                # bands (under-resolved venturi gap) — a coarse result is a
+                # screening number, and a k_g pinned from one can bake that
+                # bias into every estimate in the session
+                "mesh_caution": self.mesh_size == "coarse",
                 "case_dir": str(self.case_dir),
             }
             self.phase = None

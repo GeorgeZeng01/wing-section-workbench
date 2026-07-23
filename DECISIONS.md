@@ -988,6 +988,40 @@ trust penalty attacks the same failure (over-aggressive synthesized camber)
 at its cause — the data quality — instead of shrinking the design space for
 well-behaved shapes too.
 
+## RANS cross-referencing campaign (2026-07)
+
+**A 15-run OpenFOAM campaign cross-referenced C_est against the tool's own
+truth model across ride heights and mesh fidelities; the full chronological
+record, per-run data and fit tables live in `docs/calibration/`.** Headline
+results: the current calibration is *validated* at h/c 0.086 and 0.429
+(fine-mesh Δ −0.0 % and +0.2 %); the estimate is *optimistic* below the
+venturi choke (−19 % at h/c 0.071, worse toward the ground — outright lift
+loss the gain-only model cannot express); and it is *conservative* through
+the mid-height gain peak (fine-mesh RANS +67 % at h/c 0.171, +35 % at
+0.257 — the truth model's load peaks near h/c ≈ 0.17, not the
+published-experiment 0.06–0.1 the curve was shaped to). The coarse mesh
+mis-read a validated point by −29 % (under-resolved venturi gap), which
+had produced a spurious "racing-height collapse" in the first sweep.
+
+**Decision: no global k_g-curve refit — ship the validity map instead.**
+The best-fidelity implied k_g set is non-monotonic (0.05 → 0.12 → 0.73 →
+~0.5 → 0.12), so any refit curve would encode turbulence-model bias at the
+extremes (fully-turbulent k-ω SST loses transitional high-lift near free
+air) rather than physics, and both candidate refits measurably break the
+two validated heights (fit tables in the log). What shipped: a standing
+sub-choke warning below h/c 0.08 (`analysis.HC_CHOKE_OPTIMISM`, mirrored
+in the operating map's warning count); a `mesh_caution` flag on every
+coarse RANS result rendered next to the k_g suggestion (a k_g pinned from
+a coarse run would bake a −29 % bias into the whole session); and the
+model dialog updated to the measured validity map. The mid-height
+conservatism is documentation, not a warning — it means more downforce
+than claimed, and inflating warning counts would wrongly mark those
+designs suspect on candidate cards. Alternative considered and rejected:
+recalibrating the curve to track RANS Cl(h) pointwise — self-consistent
+with the RANS tab but fragile (one section, one config, ±7 % limit-cycle
+bands, one cap-limited point) and it would overwrite the two verified
+operating points with chased noise.
+
 ## Known limitations
 
 Documented, not fixed. The custom-airfoil registry lives in server memory

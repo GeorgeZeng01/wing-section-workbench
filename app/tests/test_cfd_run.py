@@ -245,8 +245,8 @@ check("cancellation lands in a terminal cancelled state",
 
 # ---- convergence verdict + graceful stop ----
 
-def finalize_with(cl_rows, n_iters, force_stop=False):
-    job = cfd_run.RansJob(CFG_D, "coarse", n_iters)
+def finalize_with(cl_rows, n_iters, force_stop=False, mesh="coarse"):
+    job = cfd_run.RansJob(CFG_D, mesh, n_iters)
     cdir = job.case_dir / "postProcessing" / "forceCoeffs1" / "0"
     cdir.mkdir(parents=True, exist_ok=True)
     lines = ["# Time Cd Cd(f) Cd(r) Cl Cl(f) Cl(r)"]
@@ -290,6 +290,16 @@ check("residual-stopped run (below cap) is reported converged",
       early_r and early_r["converged"] is True
       and early_r["stop_reason"] == "residuals converged"
       and early_r["residual_stop"] is True)
+
+# the calibration campaign measured coarse-mesh results 22-35% below
+# fine-mesh truth at racing/mid ride heights — a coarse result must carry
+# the caution flag the UI renders next to the k_g suggestion, and a
+# finer mesh must not
+check("coarse-mesh result carries mesh_caution",
+      early_r and early_r["mesh_caution"] is True)
+fine_r = finalize_with([2.5] * 1500, 3000, mesh="fine")
+check("fine-mesh result carries no mesh_caution",
+      fine_r and fine_r["mesh_caution"] is False)
 
 job_g = cfd_run.RansJob(CFG_D, "coarse", 3000)
 sysd = job_g.case_dir / "system"

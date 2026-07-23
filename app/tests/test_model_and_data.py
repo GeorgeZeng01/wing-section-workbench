@@ -384,6 +384,30 @@ def main():
           f"(sweep {sw_lo['points'][0]['n_warnings']} vs "
           f"analyze {len(a_lo['warnings'])})")
 
+    # ---- 12. sub-choke model-trust warning (RANS calibration campaign) ----
+    # fine-mesh truth runs measured the estimate optimistic below the
+    # venturi-choke onset (-19% at h/c 0.071); analyze() must say so, the
+    # validated 30 mm point must stay clean, and the operating map must
+    # count the warning identically
+    a_choke = analysis.analyze(geometry.StackConfig.from_dict(
+        {**DEFAULT, "ride_height_mm": 25}), include_geometry=False)
+    check("sub-choke ride height carries the optimism warning",
+          any("venturi-choke onset" in w for w in a_choke["warnings"]),
+          f"({len(a_choke['warnings'])} warnings)")
+    check("validated ride height (30 mm) stays free of the choke warning",
+          not any("venturi-choke onset" in w for w in r["warnings"]))
+    sw_ck = analysis.sweep(cfg_s, "ride_height_mm", [25.0, 30.0])
+    a_ck = analysis.analyze(
+        geometry.StackConfig.from_dict({**DEFAULT, "ride_height_mm": 25,
+                                        "n_panels_per_side": 40}),
+        include_geometry=False)
+    check("sweep counts the sub-choke caveat like analyze()",
+          sw_ck["points"][0]["n_warnings"] == len(a_ck["warnings"])
+          and sw_ck["points"][0]["n_warnings"]
+              > sw_ck["points"][1]["n_warnings"],
+          f"(sweep {sw_ck['points'][0]['n_warnings']} vs "
+          f"analyze {len(a_ck['warnings'])})")
+
     print(f"\n{sum(results)}/{len(results)} model/data checks passed")
     return all(results)
 

@@ -456,8 +456,14 @@
     and <code>G_real</code> is the realized share of the inviscid
     ground-effect gain: the gain is saturated at a cap (3× the free-air
     load) and choked near the road by <code>tanh((h/c)/0.045)</code>, so the
-    estimate peaks around h/c ≈ 0.06–0.1 and falls toward the ground — the
-    shape measured in published ground-effect experiments. Both
+    estimate stays bounded toward the ground. RANS cross-referencing
+    (2026-07, <code>docs/calibration</code>) validated the estimate on the
+    baseline section at h/c 0.086 and 0.429, measured it <b>optimistic below
+    the choke onset</b> (−19% at h/c 0.071; a standing warning fires below
+    h/c 0.08) and <b>conservative through the mid-height gain peak</b> (up
+    to +67% at h/c 0.171 — the truth model's load peaks nearer h/c ≈ 0.17
+    than the published-experiment 0.06–0.1 this curve was originally shaped
+    to; more downforce than claimed, so deliberately not a warning). Both
     <code>η_visc</code> and the gain-realization factor <code>k_g</code> are
     editable under Air properties &amp; calibration; leave <code>k_g</code>
     blank for the automatic ride-height curve, or pin it 0–1 against RANS or

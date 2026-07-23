@@ -141,3 +141,59 @@ Timestamps note: the two tail rows in `runs.csv` were reconstructed from
 their retained case directories after a CSV schema migration dropped
 them mid-append (solver numbers are exact; their timestamps are accurate
 to a few minutes).
+
+## 2026-07-23 — mesh-check leg: the verdict, and the no-refit decision
+
+Mesh line at 30 mm: coarse 2.712 ± 0.151 / medium 3.687 ± 0.367 /
+fine 3.836 ± 0.263 — medium and fine agree within their limit-cycle
+bands, so fine is treated as mesh-converged and coarse reads ~29 % low.
+Fine-mesh re-reads of the sweep points:
+
+| h (mm) | h/c   | coarse Cl | fine Cl        | C_est | Δ (fine) | implied k_g (fine) |
+|-------:|------:|----------:|---------------:|------:|---------:|-------------------:|
+| 25     | 0.071 | 2.433     | 3.130 ± 0.022  | 3.867 | −19.0 %  | 0.053 |
+| 30     | 0.086 | 2.712     | 3.836 ± 0.263  | 3.838 | −0.0 %   | 0.119 |
+| 60     | 0.171 | 3.936     | 6.020 ± 0.024  | 3.601 | +67.2 %  | 0.728 |
+| 90     | 0.257 | 4.590     | 4.644 ± 0.024* | 3.440 | +35.0 %  | (cap-limited) |
+
+*fine-90 hit the 10k iteration cap with a nearly flat tail; treated as
+"at least ≈ 4.64", not a calibration point.
+
+**Decision: no global curve refit.** Reasons, in order of weight:
+
+1. The best-fidelity implied k_g set (0.053 → 0.119 → 0.728 → ~0.5 →
+   0.124 across h/c 0.071 → 0.857) is **non-monotonic**. A k_g(h/c)
+   refit through it would encode solver bias at the extremes (fully
+   turbulent k-ω SST loses the s1223's transitional high-lift near free
+   air, where RANS Cl 2.352 vs η·C_f 2.254 pins the small-gain limit),
+   not ground-effect physics.
+2. The current calibration is **validated at two heights** (h/c 0.086,
+   0.429) at the best fidelity run; a refit chasing the mid-height peak
+   would degrade verified points to fit points with a ±7 % limit-cycle
+   band and one cap-limited read.
+3. Single section, single config, one truth pipeline. The published
+   ground-effect experiments the curve was shaped to (peak h/c 0.06–0.1)
+   and our 2D fully-turbulent RANS (peak ≈ 0.17) disagree; with no
+   tunnel data to arbitrate, encoding *knowledge of the disagreement*
+   beats overwriting one model with the other.
+4. The app already has the right per-design mechanism: RANS verify at
+   the user's own operating point + pinned k_g — now guarded against
+   the coarse-mesh trap (below).
+
+**What ships instead** (all cited to this log):
+- `analysis.HC_CHOKE_OPTIMISM = 0.08`: standing sub-choke warning —
+  below h/c 0.08 the estimate is an upper bound (fine-25 measured
+  −19 %, deepening toward the ground). Mirrored in the operating map's
+  warning count. The mid-height conservatism (up to +67 %) is
+  deliberately NOT a warning — it means more downforce than claimed,
+  and polluting warning counts would wrongly mark those designs as
+  suspect on candidate cards; it lives in the model dialog and here.
+- `cfd_run` results carry `mesh_caution` on every coarse run; the RANS
+  tab renders it next to the k_g suggestion — a k_g pinned from a
+  coarse run (which mis-read a validated point by −29 %) would bake
+  that bias into every estimate in the session.
+- Model-dialog text updated to the measured validity map.
+
+Open point queued: `meshchk-h40-fine` completes the racing band
+(25/30/40) and settles whether the choke-warning boundary at h/c 0.08
+needs to move.

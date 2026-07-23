@@ -76,6 +76,19 @@ CAP_FLOOR_C = 0.1
 # model is optimistic there
 GROUND_CL_ALLOWANCE = 2.0
 
+# Venturi-choke onset measured by the 2026-07 RANS cross-referencing
+# campaign (docs/calibration): fine-mesh truth runs on the two-element
+# baseline VALIDATED C_est at h/c 0.086 and 0.429, but below the choke
+# onset the flow loses lift outright — something the gain-only model cannot
+# express (its floor is eta*C_f) — measured -19% at h/c 0.071 and worsening
+# toward the ground. Estimates below this ride height are upper bounds and
+# get a standing warning. (The same campaign measured the model CONSERVATIVE
+# through the mid-height gain peak — up to +67% at h/c 0.171 — which is
+# deliberately NOT a warning: it says the wing makes more than claimed, and
+# inflating warning counts would wrongly mark such designs as suspect. It is
+# documented in the model dialog and docs/calibration instead.)
+HC_CHOKE_OPTIMISM = 0.08
+
 
 def ground_gain_factor(ride_height_c: float) -> float:
     """Default realization-factor curve k_g(h/c).
@@ -264,6 +277,14 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
             f"estimate as optimistic and the profile drag (capped at the "
             f"pre-stall polar) as understated; verify with RANS or tunnel "
             f"data.")
+    if cfg.ride_height_c < HC_CHOKE_OPTIMISM:
+        warnings.append(
+            f"ride height h/c = {cfg.ride_height_c:.3f} is below the "
+            f"venturi-choke onset (~{HC_CHOKE_OPTIMISM:.2f}): RANS truth "
+            f"runs measured outright lift loss here that the estimate's "
+            f"model cannot express (-19% at h/c 0.071 on the baseline, "
+            f"worsening toward the ground) — treat the estimate as an "
+            f"upper bound and verify with RANS on a medium or fine mesh.")
 
     drag_profile_n = q * area * cd_stack
     drag_induced, induced_detail = induced_drag_n(downforce_n, cfg, installed)
@@ -451,6 +472,8 @@ def _sweep_point(cfg: StackConfig, design: list[dict], installed: list[dict],
         n_warnings += 1                           # combined allowance message
     if any(cfg.element_re(i) < viscous.RE_FLOOR for i in range(len(design))):
         n_warnings += 1                           # combined Re-floor caveat
+    if cfg.ride_height_c < HC_CHOKE_OPTIMISM:
+        n_warnings += 1                           # sub-choke optimism caveat
 
     drag_profile_n = q * area * cd_stack
     drag_induced, _ = induced_drag_n(downforce_n, cfg, installed)
