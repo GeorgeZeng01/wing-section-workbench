@@ -407,6 +407,11 @@ def main():
               > sw_ck["points"][1]["n_warnings"],
           f"(sweep {sw_ck['points'][0]['n_warnings']} vs "
           f"analyze {len(a_ck['warnings'])})")
+    check("sweep carries the measured trust bands for the map overlay",
+          sw_ck["trust_bands"]["optimistic_below_hc"]
+              == analysis.HC_CHOKE_OPTIMISM
+          and sw_ck["trust_bands"]["conservative_hc"]
+              == list(analysis.HC_CONSERVATIVE))
 
     print(f"\n{sum(results)}/{len(results)} model/data checks passed")
     return all(results)

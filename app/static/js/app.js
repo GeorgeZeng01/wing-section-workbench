@@ -1407,13 +1407,27 @@ function renderSweep(res) {
       break;
     }
   }
+  // measured model-validity bands (RANS cross-referencing campaign,
+  // docs/calibration): h/c thresholds from the server, converted with this
+  // config's chord. Ride-height sweeps only — they don't apply to speed.
+  let xBands;
+  if (variable === "ride_height_mm" && res.trust_bands) {
+    const c_mm = state.config.chord_mm;
+    const tb = res.trust_bands;
+    xBands = [
+      { from: 0, to: tb.optimistic_below_hc * c_mm, color: "#e0645c",
+        label: "estimate optimistic" },
+      { from: tb.conservative_hc[0] * c_mm, to: tb.conservative_hc[1] * c_mm,
+        color: "#57b6f0", label: "estimate conservative" },
+    ];
+  }
   lineChart($("map-downforce"), {
-    series, xLabel, yLabel: "downforce [N]", height: 205,
+    series, xLabel, yLabel: "downforce [N]", height: 205, xBands,
   });
   lineChart($("map-ld"), {
     series: [{ name: "L/D", color: SERIES[2], x: xs,
                y: pts.map(p => p.efficiency_ld), markers: true }],
-    xLabel, yLabel: "L/D estimate", height: 205,
+    xLabel, yLabel: "L/D estimate", height: 205, xBands,
   });
 
   // points past the ground-loading allowance carry an optimistic estimate
@@ -1430,7 +1444,10 @@ function renderSweep(res) {
   $("map-note").textContent =
     `peak ${fmtN(dn[ipk], 0)} N at ${fmtN(xs[ipk], 1)} ${unit}` +
     (skipped ? ` · ${skipped} point${skipped > 1 ? "s" : ""} skipped` : "") +
-    ` · ${res.n_panels_per_side_used} panels/side`;
+    ` · ${res.n_panels_per_side_used} panels/side` +
+    (xBands ? " · shaded bands: where RANS cross-referencing measured the " +
+              "estimate optimistic (red) or conservative (blue) — see the " +
+              "model notes (i)" : "");
 }
 
 /* ---------------- RANS verify tab ---------------- */

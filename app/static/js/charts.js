@@ -40,7 +40,8 @@ function fmt(v) {
  * Render a line chart.
  * spec: {
  *   series: [{name, color, x: [], y: [], dash?, markers?}],
- *   xLabel, yLabel, invertY?, targetY?, targetLabel?, height?, logY?
+ *   xLabel, yLabel, invertY?, targetY?, targetLabel?, height?, logY?,
+ *   xBands?: [{from, to, color, label?}]   // shaded x-ranges behind the data
  * }
  */
 export function lineChart(container, spec) {
@@ -74,6 +75,20 @@ export function lineChart(container, spec) {
   const Y = spec.invertY
     ? (v => m.t + ((tf(v) - y0) / (y1 - y0)) * ih)
     : (v => m.t + ih - ((tf(v) - y0) / (y1 - y0)) * ih);
+
+  // shaded x-bands first, so grid, series and labels draw over them
+  for (const b of spec.xBands || []) {
+    const bx0 = Math.max(Math.min(b.from, b.to), x0);
+    const bx1 = Math.min(Math.max(b.from, b.to), x1);
+    if (!(bx1 > bx0)) continue;
+    el("rect", { x: X(bx0), y: m.t, width: X(bx1) - X(bx0), height: ih,
+                 fill: b.color, "fill-opacity": 0.10 }, svg);
+    if (b.label) {
+      el("text", { x: (X(bx0) + X(bx1)) / 2, y: m.t + 10, class: "tick",
+                   "text-anchor": "middle", fill: b.color,
+                   "fill-opacity": 0.9 }, svg).textContent = b.label;
+    }
+  }
 
   // grid + ticks
   const gx = niceTicks(x0, x1, 6), gy = niceTicks(y0, y1, 5);

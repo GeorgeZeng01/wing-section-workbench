@@ -88,6 +88,12 @@ GROUND_CL_ALLOWANCE = 2.0
 # inflating warning counts would wrongly mark such designs as suspect. It is
 # documented in the model dialog and docs/calibration instead.)
 HC_CHOKE_OPTIMISM = 0.08
+# the same campaign's mid-height band: fine-mesh RANS measured the estimate
+# CONSERVATIVE here (+67% at h/c 0.171, +35% at 0.257; validated exact at
+# 0.086-0.114 and 0.429). Not a warning — the wing makes MORE than claimed —
+# but the operating map shades the band so the conservatism is visible where
+# ride-height decisions are made.
+HC_CONSERVATIVE = (0.12, 0.35)
 
 
 def ground_gain_factor(ride_height_c: float) -> float:
@@ -548,4 +554,11 @@ def sweep(cfg: StackConfig, variable: str, values: list[float],
         "variable": variable,
         "n_panels_per_side_used": n_used,
         "points": points,
+        # measured model-validity bands (docs/calibration), in h/c — the
+        # map renders them only on ride-height sweeps, converted with the
+        # sweep's own chord
+        "trust_bands": {
+            "optimistic_below_hc": HC_CHOKE_OPTIMISM,
+            "conservative_hc": list(HC_CONSERVATIVE),
+        },
     }
