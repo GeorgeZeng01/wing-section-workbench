@@ -224,6 +224,36 @@ as shipped: the penalty's job is to prefer trustworthy equals during
 search, and the badge + RANS verify is the honesty mechanism for what
 survives. Data to revisit the weights now exists in `runs.csv`.
 
+## 2026-07-23 — Generalization leg: the two axes separate
+
+Does the validity map measured on one config generalize? Three fine-mesh
+25/30 mm pairs at off-baseline configs answer it, with each config's own
+loading-budget verdict alongside:
+
+| config | main loading frac | budget verdict | Δ at 25 mm | Δ at 30 mm |
+|--------|------------------:|----------------|-----------:|-----------:|
+| baseline (defl 12, 15 m/s) | 0.889 | ok, 0 warnings | −19.0 % | −0.0 % |
+| speed 25 m/s               | 0.878 | ok, 0 warnings | −12.3 % | +6.0 % |
+| stack aoa +2°              | 0.997 | **warning**    | −23.1 % | −25.8 % |
+| flap 20°                   | 1.098 | **warning**    | −30.0 % | −26.3 % |
+
+Synthesis — the tool's two trust mechanisms own two orthogonal axes,
+and both are now RANS-measured:
+
+1. **Ride height** (healthy designs): the choke boundary generalizes.
+   Both healthy configs are optimistic at h/c 0.071 (−19 % / −12 %,
+   milder at higher Re — thicker-boundary-layer choke arrives slightly
+   later) and honest at 0.086 (−0 % / +6 %). `HC_CHOKE_OPTIMISM = 0.08`
+   stands unchanged.
+2. **Loading**: both configs past the 90 % free-air warning line
+   measure −23…−30 % optimistic at BOTH heights — including the height
+   where healthy designs are validated — and the Stage 2 near-stall
+   winner measured −42 %. The classical Smith budget's warning line is
+   almost exactly where measured RANS optimism switches on. The
+   validity bands therefore describe designs *inside the loading
+   budget*; loading warnings trump the bands, and the wording in the
+   app and guide now says so.
+
 ## 2026-07-23 — Stage 1 closed: `meshchk-h40-fine` confirms the boundary
 
 Cl 3.718 ± 0.044 vs C_est 3.754 — **Δ −1.0 %, implied k_g 0.154 vs

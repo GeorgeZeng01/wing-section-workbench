@@ -1446,8 +1446,8 @@ function renderSweep(res) {
     (skipped ? ` · ${skipped} point${skipped > 1 ? "s" : ""} skipped` : "") +
     ` · ${res.n_panels_per_side_used} panels/side` +
     (xBands ? " · shaded bands: where RANS cross-referencing measured the " +
-              "estimate optimistic (red) or conservative (blue) — see the " +
-              "model notes (i)" : "");
+              "estimate optimistic (red) or conservative (blue) for designs " +
+              "inside the loading budget — loading warnings trump the bands" : "");
 }
 
 /* ---------------- RANS verify tab ---------------- */

@@ -845,7 +845,12 @@ def part_i(made):
         "(h/c&nbsp;0.12–0.35), where the same runs measured it conservative "
         "— the wing makes more than claimed there. Between the bands, at "
         "ordinary racing ride heights, the estimate was validated to within "
-        "a percent on the baseline section."))
+        "a percent on the baseline section, and the choke boundary held "
+        "across speeds. One caveat, also measured: the bands describe "
+        "designs <i>inside the loading budget</i>. Configurations past the "
+        "90&nbsp;% loading warning line measured 23–30&nbsp;% optimistic "
+        "even at the validated heights — when the loading meters warn, "
+        "believe them over the bands."))
     s.append(h3("The RANS case"))
     s.append(body(
         "Everything this tool reports screens and ranks; RANS decides. Both "
