@@ -1040,5 +1040,12 @@ the screener cache — a re-screen costs seconds); at this scale a cap is not
 worth the spec-invalidation complexity it would add. Optimization searches
 run at coarsened paneling (45–60/side) for speed — candidate cards and Apply
 re-analyze at full resolution, and "on target" is judged on the
-full-resolution number. NeuralFoil confidence and the k_g/eta knobs remain
-screening-grade until recalibrated against RANS or tunnel data.
+full-resolution number. The k_g/eta calibration is now RANS
+cross-referenced on the two-element baseline (validated h/c 0.086–0.114
+and 0.429, optimistic below h/c 0.08, conservative mid-height — see
+`docs/calibration/`), but that validity map is single-section,
+single-config evidence from a fully-turbulent 2D truth model: it has not
+been generalized across stacks, speeds, or transition behavior, and
+tunnel data remains the unarbitrated referee. Steady RANS at racing
+heights runs a genuine limit cycle (±7 % at the 30 mm anchor), so every
+calibration number carries that band.
