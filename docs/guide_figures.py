@@ -434,6 +434,22 @@ def fig_maps(out: Path):
     ipk = int(np.argmax(dn))
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(6.6, 2.7))
+    # measured validity bands, same source as the app's overlay
+    tb = res["trust_bands"]
+    c_mm = DEMO["chord_mm"]
+    for ax in (ax1, ax2):
+        ax.axvspan(0, tb["optimistic_below_hc"] * c_mm,
+                   color="#b03a2e", alpha=0.10, zorder=0)
+        ax.axvspan(tb["conservative_hc"][0] * c_mm,
+                   tb["conservative_hc"][1] * c_mm,
+                   color="#1f4e8c", alpha=0.08, zorder=0)
+    ax1.text(tb["optimistic_below_hc"] * c_mm / 2 + 5, 0.03, "optimistic",
+             transform=ax1.get_xaxis_transform(), fontsize=6.5,
+             color="#b03a2e", ha="center", va="bottom")
+    ax1.text((tb["conservative_hc"][0] + tb["conservative_hc"][1])
+             / 2 * c_mm, 0.965, "conservative",
+             transform=ax1.get_xaxis_transform(), fontsize=6.5,
+             color="#1f4e8c", ha="center", va="top")
     ax1.plot(x, dn, "o-", color=BLUE, lw=1.5, ms=3.2, zorder=3)
     ax1.scatter([x[ipk]], [dn[ipk]], s=46, color=GOLD, zorder=5)
     ax1.annotate(f"peak {dn[ipk]:.0f} N @ {x[ipk]:.0f} mm",

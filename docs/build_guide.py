@@ -581,23 +581,44 @@ def part_i(made):
         "angle, flap deflections, slot gap and overlap, flap chords, the "
         "airfoil of each element, and the airfoil shape (section 7). The "
         "search drives predicted downforce to the target while penalizing "
-        "drag, slot geometry outside the healthy band, element overload, and "
-        "intersecting geometry."))
+        "drag, slot geometry outside the healthy band, element overload, "
+        "intersecting geometry, and designs that lean on viscous data the "
+        "model itself distrusts — low surrogate confidence or operating "
+        "points at the edge of the stall data (Part II, <i>The "
+        "optimizer</i>)."))
+    s.append(body(
+        "If manufacturing preparation (section 8) is off when you press "
+        f"{B('Start optimization')}, the application asks first: with prep "
+        "off, the search would tune knife-edge trailing edges whose flow "
+        "changes once the wing is made buildable. "
+        f"{B('Enable & optimize')} turns prep on with the defaults and "
+        f"runs on the as-built shapes; {B('Optimize anyway')} runs sharp "
+        "and is remembered for the rest of the session."))
     s.append(figure("optimizer",
                     "Figure 4 — A real optimization run: downforce converging "
                     "to the 250&nbsp;N target (left) and the objective "
                     "descending on a log scale (right).", made=made))
     s.append(h3("Candidates, not a single answer"))
     s.append(body(
-        "A finished run returns the best design plus up to three "
+        "A finished run returns the best design plus up to five "
         f"{B('candidate designs')} — distinct set-ups that also hit the "
         "target, chosen to be genuinely different from one another (different "
         "slot geometry, incidence, or airfoils) rather than trivial "
         "variations around one optimum. Each candidate card shows its own "
-        "analyzed downforce, drag, and lift-to-drag, and applies to the "
-        "configuration with one click — so build-tolerance and packaging "
-        "trade-offs stay visible instead of being hidden inside a single "
-        "number."))
+        "analyzed downforce, drag, lift-to-drag, and the minimum surrogate "
+        "confidence across its sections, and applies to the configuration "
+        "with one click — so build-tolerance and packaging trade-offs stay "
+        "visible instead of being hidden inside a single number."))
+    s.append(body(
+        f"Cards can also carry two trust badges. {B('Near stall')} marks a "
+        "winner whose loaded elements operate at the edge of their viscous "
+        f"data; {B('low confidence')} marks one resting on sections the "
+        "surrogate itself distrusts. Both say the same thing: verify with "
+        "RANS before building. The badges were validated against fine-mesh "
+        "RANS on the baseline section — an unflagged winner over-claimed by "
+        "about 14&nbsp;%, a near-stall-flagged winner by 42&nbsp;% (and the "
+        "flagged design, claiming 40&nbsp;% more downforce, actually "
+        "delivered less)."))
     s.append(h3("Search modes"))
     s.append(kv_table([
         ("Global (explore, then polish)", "Explores the whole variable "
@@ -676,7 +697,10 @@ def part_i(made):
         "trailing edge — zero thickness. No layup, print, or hot-wire cut "
         f"can produce that. Enable {B('Manufacturing')} to open every "
         "element's trailing edge to a minimum buildable thickness in "
-        "millimeters, and to check that each section is thick enough to make."))
+        "millimeters, and to check that each section is thick enough to "
+        "make. The optimizer stands guard on this too: starting a run with "
+        "prep off raises the prompt described in section 6, so a search "
+        "never silently tunes geometry the workshop cannot produce."))
     s.append(figure("te_treatment",
                     "Figure 6 — The two trailing-edge treatments applied to "
                     "a real section, zoomed on the aft. Thicken adds material "
@@ -811,6 +835,17 @@ def part_i(made):
         "an element past twice its isolated stall limit are flagged beneath "
         "the charts: the model is optimistic there, so treat those downforce "
         "values as upper bounds."))
+    s.append(body(
+        "Ride-height sweeps also shade the model's measured validity bands, "
+        "from the RANS cross-referencing campaign recorded in the "
+        f"repository's {C('docs/calibration')}: a red band below the "
+        "venturi-choke onset (h/c&nbsp;≈&nbsp;0.08), where fine-mesh truth "
+        "runs measured the estimate optimistic and worsening toward the "
+        "ground, and a blue band through the mid heights "
+        "(h/c&nbsp;0.12–0.35), where the same runs measured it conservative "
+        "— the wing makes more than claimed there. Between the bands, at "
+        "ordinary racing ride heights, the estimate was validated to within "
+        "a percent on the baseline section."))
     s.append(h3("The RANS case"))
     s.append(body(
         "Everything this tool reports screens and ranks; RANS decides. Both "
@@ -827,12 +862,18 @@ def part_i(made):
         "compared against the estimate's profile share, never the total."))
     s.append(kv_table([
         ("Coarse (~15k cells)", "A first look — does the flow stay attached, "
-         "is the case healthy. Converges in about a minute."),
+         "is the case healthy. Converges in about a minute, but it is a "
+         "screening number only: calibration testing measured the coarse "
+         "mesh reading validated operating points 22–35&nbsp;% below "
+         "fine-mesh truth at racing and mid ride heights (the venturi gap is "
+         "under-resolved), and the result says so."),
         ("Medium (~40k cells)", "The standard confirmation run for a "
-         "shortlisted design; typically a few minutes."),
-        ("Fine (~90k cells)", "Final numbers, and the grid-sensitivity check "
-         "for a design you intend to commit to. Heavily loaded sections can "
-         "need many thousands of iterations here — let it run."),
+         "shortlisted design; typically a few minutes. Agreed with the fine "
+         "mesh within the oscillation band at the calibration anchor."),
+        ("Fine (~90k cells)", "Final numbers, calibration-grade comparisons, "
+         "and the grid-sensitivity check for a design you intend to commit "
+         "to. Heavily loaded sections can need many thousands of iterations "
+         "here — let it run."),
     ]))
     s.append(h3("In-app verification — the RANS verify tab"))
     s.append(body(
@@ -863,7 +904,10 @@ def part_i(made):
         "that would make the estimate reproduce the RANS sectional lift at "
         "this operating point, applied to the configuration with one click "
         "— the calibration loop of section 14, closed with real data. It is "
-        "only offered from a converged run. Second, the "
+        "only offered from a converged run, and a coarse-mesh result "
+        "carries a caution beside it: pin a factor from a medium or fine "
+        "run, never from coarse, or the mesh's own bias becomes the "
+        "session's calibration. Second, the "
         f"{B('flow field')}: the solved section flow rendered in the same "
         "as-driven view as the drawing — velocity magnitude with "
         "streamlines, or pressure coefficient — which shows at a glance "
@@ -1241,6 +1285,18 @@ def part_ii(made):
         "beats a design that only reaches it by driving an element deep into "
         "stall."))
     s.append(body(
+        "A further soft term charges for viscous-data trust: each "
+        "evaluation already computes the surrogate's own confidence and "
+        "whether a loaded element sits at the edge of its polar grid or on "
+        "a clamped drag lookup, and the objective now uses them — quadratic "
+        "growth as confidence falls below the screener's 0.5 bar, plus a "
+        "fixed bump per loaded element on edge data. The penalty is "
+        "baseline-relative like the loading bands (a re-optimized shaped "
+        "design pays only for leaning <i>harder</i> on low-trust data) and "
+        "sized so a fully flagged element costs about an 11&nbsp;% target "
+        "miss — enough to prefer an equally-performing trustworthy design, "
+        "never enough to beat hitting the target."))
+    s.append(body(
         "Every soft band is widened once per run so the starting design's "
         "own operating point is penalty-free, and the default search bounds "
         "stretch to include its variable values. The reason is a "
@@ -1296,6 +1352,15 @@ def part_ii(made):
         "The RANS case itself is cross-checked two ways: the identical case "
         "solved in the container and under WSL reports the same "
         "coefficients."))
+    s.append(body(
+        "Beyond the suites, the estimate was cross-referenced against its "
+        "own truth model in a logged RANS campaign — ride-height sweeps at "
+        "three mesh fidelities plus optimizer winners, every run recorded "
+        f"with its verdict in the repository's {C('docs/calibration')}. "
+        "That campaign is where the validity bands on the operating map, "
+        "the sub-choke warning, the coarse-mesh caution, and the candidate "
+        "trust-badge validation all come from — each number in the "
+        "interface traces to a run in that log."))
     s.append(callout(
         "What the numbers are for",
         "Treat every downforce and drag figure as a screening and ranking "
@@ -1315,9 +1380,15 @@ def part_ii(made):
         f"{B('Inviscid pressure field.')} Boundary-layer displacement, slot "
         "merging, and separation are represented only through the calibrated "
         "corrections and the loading limits, not resolved.",
-        f"{B('Calibrated ground effect.')} The correction factors are tuned "
-        "to a physical band, not derived; strong ground effect in particular "
-        "should be confirmed against higher-fidelity data.",
+        f"{B('Calibrated ground effect, with a measured validity map.')} "
+        "The correction factors are tuned, not derived. A RANS "
+        "cross-referencing campaign (recorded in the repository's "
+        f"{C('docs/calibration')}) validated the estimate on the baseline "
+        "section at ordinary racing heights and at large gaps, measured it "
+        "optimistic below the venturi-choke onset (a standing warning "
+        "fires below h/c&nbsp;0.08) and conservative through the "
+        "mid-height gain peak — single-section, fully-turbulent 2D "
+        "evidence; tunnel data remains the referee.",
         f"{B('Surrogate viscous data.')} Section polars come from a neural "
         "surrogate of XFOIL; its confidence is reported and a cross-check is "
         "one click away, but unusual sections at low Reynolds numbers "
