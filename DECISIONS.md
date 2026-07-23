@@ -1022,6 +1022,16 @@ with the RANS tab but fragile (one section, one config, ±7 % limit-cycle
 bands, one cap-limited point) and it would overwrite the two verified
 operating points with chased noise.
 
+**The trust badges were validated against fine-mesh RANS.** Two seeded
+optimizer winners from the same baseline at the validated 30 mm height:
+the unflagged 260 N winner over-claims by −14 %, the near-stall-flagged
+430 N winner by −41.7 % — and the flagged design, claiming 40 % more
+downforce, actually delivers *less* (RANS Cl 3.48 vs the clean winner's
+3.66). The badge marks exactly the separated-flow fantasy designs it was
+built for. Penalty weights stay as shipped (they bias search toward
+trustworthy equals; the badge + RANS verify carries the honesty burden) —
+the data to revisit them is in `docs/calibration/runs.csv`.
+
 ## Known limitations
 
 Documented, not fixed. The custom-airfoil registry lives in server memory

@@ -198,6 +198,32 @@ Open point queued: `meshchk-h40-fine` completes the racing band
 (25/30/40) and settles whether the choke-warning boundary at h/c 0.08
 needs to move.
 
+## 2026-07-23 — Stage 2: the trust badge predicts real divergence
+
+Both Stage 2 winners RANS-verified fine-mesh at the validated 30 mm
+height (so ride-height model error cannot confound the comparison):
+
+| winner | badge | C_est claimed | RANS Cl | Δ |
+|--------|-------|--------------:|--------:|---:|
+| `stage2_clean` (260 N target)   | none       | 4.267 | 3.661 | **−14.2 %** |
+| `stage2_flagged` (430 N target) | near stall | 5.960 | 3.477 | **−41.7 %** |
+
+The badge separates winners exactly as designed: the flagged design's
+claim is off by 3× the clean one's. Better: in absolute terms the
+flagged winner — which claims 40 % more downforce than the clean one —
+actually DELIVERS LESS (3.48 vs 3.66). Pushing element loading past the
+viscous envelope bought nothing in reality; that is precisely the
+"separated-flow fantasy design" failure the trust penalty pushes down
+and the badge marks for RANS verification before trusting.
+
+Honest nuance: the clean winner still over-claims by 14 % — optimism
+grows continuously with aggression (the seed itself measured −0 % here);
+the badge marks where it becomes severe, not where it begins. The
+penalty weights (a flagged element ≈ an 11 % target miss) are left
+as shipped: the penalty's job is to prefer trustworthy equals during
+search, and the badge + RANS verify is the honesty mechanism for what
+survives. Data to revisit the weights now exists in `runs.csv`.
+
 ## 2026-07-23 — Stage 1 closed: `meshchk-h40-fine` confirms the boundary
 
 Cl 3.718 ± 0.044 vs C_est 3.754 — **Δ −1.0 %, implied k_g 0.154 vs
