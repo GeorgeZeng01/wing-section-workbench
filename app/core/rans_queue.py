@@ -35,6 +35,18 @@ MAX_ITEMS = 8
 # calibration-grade at racing height"). The bias flips sign with ride
 # height, so no shifted/widened band pair can correct it — coarse/medium
 # verdicts are demoted to screening wording instead of re-thresholded.
+# PROVENANCE: every runs.csv row behind these two numbers was solved in the
+# 8-chord-tall domain used before 2026-07-24. The taller domain shipped that
+# day measured ~5% less Cl on an aggressive 3-element case (blockage, not
+# physics — docs/calibration/LOG.md), and delta_cl_pct scales with Cl, so
+# the recorded deltas sit that much high. Applying the measured shift moves
+# the recorded clean cluster from -14.2/-14.4 to about -18.5/-18.7: still
+# inside the band, but with ~1.5 points of margin rather than 6. These
+# thresholds are therefore an EXTRAPOLATION of pre-change evidence, not a
+# re-measurement, and the affected verdicts are advisory labels rather than
+# gates. Re-anchor them (anchor-h30-fine, stage2_clean-fine,
+# stage2_flagged-fine at the new domain) before treating a near-band
+# verdict as decisive.
 HEALTHY_LO = -20.0
 CONSERVATIVE_HI = 5.0
 
@@ -51,7 +63,7 @@ def classify(result: dict, mesh_size: str = "fine") -> str:
     d = result.get("delta_cl_pct")
     if d is None:
         return "no panel comparison"
-    if mesh_size != "fine":
+    if cfd_run.mesh_below_calibration_grade(mesh_size):
         return "screening only (mesh below calibration grade)"
     if d < HEALTHY_LO:
         return "over-claims"
@@ -215,12 +227,9 @@ class QueueJob:
                             delta_cl_pct=r["delta_cl_pct"],
                             converged=r["converged"],
                             stop_reason=r["stop_reason"],
-                            # cfd_run flags only coarse; the calibration
-                            # round demoted medium to screening at racing
-                            # height too, so queue rows carry the caution
-                            # for every non-fine mesh
-                            mesh_caution=bool(r["mesh_caution"])
-                            or self.mesh_size != "fine",
+                            mesh_caution=bool(r["mesh_caution"]) or
+                            cfd_run.mesh_below_calibration_grade(
+                                self.mesh_size),
                             case_dir=r.get("case_dir"))
                         row["verdict"] = classify(r, self.mesh_size)
                     elif s["state"] == "failed":

@@ -312,6 +312,7 @@ def main():
                   "k_ground_source", "gain_realization_ratio",
                   "CD_profile_stack", "Cm_le_inviscid", "x_cp_c"}
     need_forces = {"downforce_n", "drag_total_n", "drag_profile_n",
+                   "drag_profile_is_lower_bound", "drag_capped_roles",
                    "drag_induced_n", "induced_model", "efficiency_ld",
                    "q_pa", "reference_area_m2"}
     need_elem = {"role", "airfoil", "airfoil_name", "chord_ratio", "chord_mm",
@@ -412,6 +413,57 @@ def main():
               == analysis.HC_CHOKE_OPTIMISM
           and sw_ck["trust_bands"]["conservative_hc"]
               == list(analysis.HC_CONSERVATIVE))
+
+    # ---- 13. capped-drag markers on the forces block ----
+    # an element carried past its isolated CL_max has no honest drag on the
+    # pre-stall polar, so the caveat travels on the numbers: the UI draws its
+    # >= / <= annotations off these two fields, not off a warning
+    capped = [e["role"] for e in r["elements"] if e["cd_lookup_capped"]]
+    check("capped drag lookup marks profile drag as a lower bound",
+          capped and r["forces"]["drag_profile_is_lower_bound"] is True
+          and r["forces"]["drag_capped_roles"] == capped
+          and all(isinstance(x, str)
+                  for x in r["forces"]["drag_capped_roles"]),
+          f"(capped {capped}, "
+          f"reported {r['forces']['drag_capped_roles']})")
+    check("an uncapped stack carries no lower-bound marker",
+          not any(e["cd_lookup_capped"] for e in r0["elements"])
+          and r0["forces"]["drag_profile_is_lower_bound"] is False
+          and r0["forces"]["drag_capped_roles"] == [],
+          f"({r0['forces']['drag_capped_roles']})")
+
+    # ---- 14. estimate-fidelity note (k_g calibrated on two elements) ----
+    # 3+ elements carried past 1.3x their isolated stall limit sit where
+    # fine-mesh RANS measured the estimate CONSERVATIVE by 35-65%; the map
+    # must count that warning exactly as analyze() emits it
+    cfg_fid = geometry.StackConfig.from_dict({
+        **DEFAULT, "n_panels_per_side": 40,
+        "elements": [
+            {"airfoil": "s1223", "chord_ratio": 1.0},
+            {"airfoil": "s1223", "chord_ratio": 0.4, "deflection_deg": 20,
+             "slot_gap_pct": 1.5, "slot_overlap_pct": 3.0},
+            {"airfoil": "s1223", "chord_ratio": 0.3, "deflection_deg": 35,
+             "slot_gap_pct": 1.5, "slot_overlap_pct": 3.0}]})
+    a_fid = analysis.analyze(cfg_fid, include_geometry=False)
+    fg_fid = max(e["loading_fraction_ground"] for e in a_fid["elements"])
+    check("heavily loaded 3-element stack carries the fidelity note",
+          len(a_fid["elements"]) >= 3 and fg_fid > 1.3
+          and any(w.startswith("estimate fidelity:")
+                  for w in a_fid["warnings"]),
+          f"(max frac_g {fg_fid}, {len(a_fid['warnings'])} warnings)")
+    # the two-element default is past 1.3x as well — the note is gated on
+    # element count, not loading alone
+    check("two-element stack past 1.3x carries no fidelity note",
+          max(e["loading_fraction_ground"] for e in r["elements"]) > 1.3
+          and not any(w.startswith("estimate fidelity:")
+                      for w in r["warnings"]))
+    sw_fid = analysis.sweep(cfg_fid, "ride_height_mm",
+                            [float(cfg_fid.ride_height_mm), 60.0])
+    check("sweep n_warnings counts the fidelity note like analyze()",
+          sw_fid["points"][0]["n_warnings"] == len(a_fid["warnings"])
+          and sw_fid["n_panels_per_side_used"] == cfg_fid.n_panels_per_side,
+          f"(sweep {sw_fid['points'][0]['n_warnings']} vs "
+          f"analyze {len(a_fid['warnings'])})")
 
     print(f"\n{sum(results)}/{len(results)} model/data checks passed")
     return all(results)

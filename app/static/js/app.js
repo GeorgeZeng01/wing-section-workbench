@@ -1960,7 +1960,11 @@ function renderRerank(q) {
       r.rans_downforce_n != null ? fmtN(r.rans_downforce_n, 0) : "–",
       r.delta_cl_pct != null
         ? `${r.delta_cl_pct > 0 ? "+" : ""}${fmtN(r.delta_cl_pct, 1)}` : "–",
-      (r.verdict || "–") + (r.mesh_caution ? " · coarse mesh" : ""),
+      // the caution covers every mesh below fine, so name the one the
+      // queue actually ran rather than assuming coarse
+      (r.verdict || "–") + (r.mesh_caution
+        ? (q.mesh_size ? ` · ${q.mesh_size} mesh` : " · below calibration grade")
+        : ""),
       r.state + (r.error ? ` (${String(r.error).slice(0, 60)})` : ""),
     ];
     for (const c of cells) {
@@ -2167,9 +2171,17 @@ function renderCandidates(s) {
       (c.on_target || s.objective === "max_downforce"
         ? "" : `<span class="badge warn">off target</span>`) +
       (f.slot_signature ? `<span class="badge warn" title="Slot at the ` +
-        `workable floor with no overlap tuck — the corner the inviscid ` +
-        `model over-rates; no recorded RANS point supports it. See the ` +
-        `analysis warning.">slot corner</span>` : "") +
+        `workable floor with no overlap tuck — the corner the optimizer ` +
+        `gravitates to, and the geometry every observed detachment ` +
+        `failure wore. Fine-mesh truth: essentially exact at moderate ` +
+        `loading, but optimism climbs steeply with loading. Watch the ` +
+        `loading meters. See the analysis warning.">slot corner</span>`
+        : "") +
+      (f.past_load_band ? `<span class="badge warn" title="This design ` +
+        `sits outside the loading band the search treats as clean — it is ` +
+        `carried past the band rather than inside it, so its estimate is ` +
+        `the optimistic end of the model. Verify with RANS before ` +
+        `committing to it.">past load band</span>` : "") +
       (f.low_confidence ? `<span class="badge warn" title="NeuralFoil ` +
         `confidence is below 50% on at least one section — the viscous ` +
         `data behind this design is an extrapolation, not a prediction. ` +
@@ -2668,7 +2680,9 @@ async function gateRerank() {
   }
   btn.disabled = false;
   btn.title = "Runs the shortlist through the 2D RANS truth case, one at a " +
-              "time, then re-ranks by measured downforce.";
+              "time, then re-ranks on the measured numbers — by drag among " +
+              "the designs that hit the target, or by downforce in " +
+              "maximum-downforce mode.";
 }
 
 async function refreshRansAvailability() {
@@ -2982,13 +2996,20 @@ function renderRansResult(s, { provenance = "fresh" } = {}) {
   } else if (!r.converged) {
     const w = document.createElement("div");
     w.className = "warning-item crit";
-    w.textContent = `NOT CONVERGED — the lift history was still trending ` +
-      `when the iteration cap ended the run` +
+    // the solver also exits below the cap without settling, and only the
+    // cap case is cured by a bigger iteration budget
+    const capped = String(r.stop_reason || "").startsWith("iteration cap");
+    w.textContent = `NOT CONVERGED — ` +
+      `${r.stop_reason || "the force history had not settled when the run ended"}` +
       (r.cl_drift != null ? ` (Cl drift ${(r.cl_drift * 100).toFixed(1)}% ` +
         `per window)` : ``) +
       `. The numbers above are a mid-transient snapshot, not a result: ` +
-      `raise Max iterations and rerun. No k_g calibration is offered from ` +
-      `an unconverged run.`;
+      (capped
+        ? `raise Max iterations and rerun.`
+        : `the solver quit before the iteration cap, so a bigger cap alone ` +
+          `will not fix it — rerun, and step up the mesh if it exits early ` +
+          `again.`) +
+      ` No k_g calibration is offered from an unconverged run.`;
     host.appendChild(w);
   }
   if (!p && r.panel_error) {
@@ -3001,14 +3022,16 @@ function renderRansResult(s, { provenance = "fresh" } = {}) {
   if (r.mesh_caution) {
     const w = document.createElement("div");
     w.className = "warning-item";
-    w.textContent = "Coarse-mesh caution: on the two-element baseline the " +
-      "coarse mesh read validated operating points 22–35% below fine-mesh " +
-      "truth at racing and mid ride heights (it under-resolved the venturi " +
-      "gap). That bias is configuration-dependent — it did not reproduce " +
-      "on a three-element case — and predates the slot-throat refinement, " +
-      "so its size here is unknown rather than known. Treat this run as " +
-      "screening; re-run on medium or fine before trusting the delta or " +
-      "pinning k_g from it.";
+    w.textContent = "Below calibration grade: only the fine mesh is " +
+      "calibrated against the campaign's truth cases. On the two-element " +
+      "baseline the coarse mesh read validated operating points 22–35% " +
+      "below fine-mesh truth at racing and mid ride heights (it " +
+      "under-resolved the venturi gap), and medium scattered -2 to -20% " +
+      "across tiny geometry changes at racing height. That bias is " +
+      "configuration-dependent — it did not reproduce on a three-element " +
+      "case — and predates the slot-throat refinement, so its size here is " +
+      "unknown rather than known. Treat this run as screening; re-run on " +
+      "fine before trusting the delta or pinning k_g from it.";
     host.appendChild(w);
   }
   if (r.suggested_k_g != null) {
@@ -3279,11 +3302,22 @@ async function buildReport() {
   const a = state.analysis;
   if (a) {
     const f = a.forces, co = a.coefficients;
+    // the printed report is the surface a number gets quoted from, so the
+    // bound marks the live panel shows have to travel with it — the cap
+    // raises no warning of its own
+    const dragLB = !!f.drag_profile_is_lower_bound;
     sec.push(`<h2>Analysis</h2>` + reportKv([
       ["Estimated downforce", `${fmtN(f.downforce_n, 0)} N`],
-      ["Drag estimate", `${fmtN(f.drag_total_n, 1)} N ` +
-        `(${fmtN(f.drag_induced_n, 1)} induced · ${fmtN(f.drag_profile_n, 1)} profile)`],
-      ["L/D estimate", fmtN(f.efficiency_ld, 1)],
+      ["Drag estimate", `${dragLB ? "≥ " : ""}${fmtN(f.drag_total_n, 1)} N ` +
+        `(${fmtN(f.drag_induced_n, 1)} induced · ` +
+        `${dragLB ? "≥" : ""}${fmtN(f.drag_profile_n, 1)} profile)`],
+      ["L/D estimate", `${dragLB ? "≤ " : ""}${fmtN(f.efficiency_ld, 1)}`],
+      ["Drag bound", dragLB
+        ? `profile drag is a floor and L/D a ceiling: ` +
+          `${(f.drag_capped_roles || []).join(", ") || "some elements"} ` +
+          `operate past the pre-stall polar the drag lookup reads from — ` +
+          `verify drag with RANS before trading on it`
+        : ""],
       ["C_ΔF estimate", fmtN(co.C_downforce_estimated, 2)],
       ["C_ΔF inviscid gnd / free", `${fmtN(co.C_downforce_inviscid_ground, 2)} / ` +
         `${fmtN(co.C_downforce_inviscid_free, 2)}`],
@@ -3334,17 +3368,27 @@ async function buildReport() {
   // RANS verification
   const rs = state.ransResult?.result;
   if (rs) {
+    // a printed delta outlives the screen that qualified it — carry the
+    // same caveats the RANS card shows
+    const prov = rs.delta_cl_provisional ? " (provisional)" : "";
     sec.push(`<h2>RANS verification</h2>` + reportKv([
-      ["Sectional Cl — RANS", `${numf(rs.cl_rans, 3)} ± ${numf(rs.cl_rans_std, 3)}`],
+      ["Sectional Cl — RANS",
+        `${numf(rs.cl_rans, 3)} ± ${numf(rs.cl_rans_std, 3)}${prov}`],
       ["Sectional Cl — panel estimate", rs.panel ? numf(rs.panel.c_est, 3) : "–"],
       ["Cl delta", rs.delta_cl_pct != null
-        ? `${rs.delta_cl_pct > 0 ? "+" : ""}${fmtN(rs.delta_cl_pct, 1)}%` : "–"],
+        ? `${rs.delta_cl_pct > 0 ? "+" : ""}${fmtN(rs.delta_cl_pct, 1)}%${prov}` : "–"],
       ["Downforce at RANS Cl", `${rs.downforce_n_at_rans_cl} N`],
+      ["Attachment (wall shear)", rs.wall_verdict || ""],
       ["Converged", rs.converged ? "yes" : (rs.user_stopped
         ? "stopped by user (preview)" : "NO — mid-transient snapshot")],
       ["Iterations", `${rs.n_iters_run} (${rs.stop_reason})`],
+      ["Lift trend", rs.cl_trend_note || ""],
+      ["Estimate scope", rs.estimate_scope_note || ""],
       ["Suggested k_g", rs.suggested_k_g != null ? rs.suggested_k_g : "–"],
-      ["Mesh caution", rs.mesh_caution ? "coarse mesh — screening only" : ""],
+      ["Mesh caution", rs.mesh_caution
+        ? "mesh below calibration grade — screening only; re-run on fine " +
+          "before trusting the delta"
+        : ""],
     ]));
     // re-validated: a restored cache must stay inline image data
     const flow = safeFlow(await captureRansFlow());

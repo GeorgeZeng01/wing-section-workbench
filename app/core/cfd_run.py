@@ -277,6 +277,23 @@ def _tail_stats(vals: list[float], n: int = TAIL_MEAN_ROWS
     return m, math.sqrt(var), k
 
 
+CALIBRATION_GRADE_MESH = "fine"
+
+
+def mesh_below_calibration_grade(mesh_size: str) -> bool:
+    """Is a result on this mesh a screening number rather than a datum?
+
+    ONE definition, shared with the shortlist queue's verdict grading —
+    the two disagreeing would let a k_g be pinned from a mesh the queue
+    calls unusable for exactly that purpose. The 2026-07 campaign measured
+    the coarse mesh reading validated operating points 22-35% below
+    fine-mesh truth on the two-element baseline (under-resolved venturi
+    gap) and found medium scattering just as widely at racing height, so
+    only fine calibrates.
+    """
+    return mesh_size != CALIBRATION_GRADE_MESH
+
+
 def suggested_k_g(cl_rans: float, c_free: float, c_ground: float,
                   cfg: StackConfig) -> float | None:
     """The pinned k_g that makes the studio's C_est reproduce the RANS Cl.
@@ -679,6 +696,10 @@ class RansJob:
         # excludes the startup transient, same as the stop decision.
         cl_drift = drift(data["cl"][FORCE_STOP_SKIP:])
         history_flat = cl_drift is not None and cl_drift < CONVERGED_CL_TOL
+        # drift() needs SKIP + 3*100 rows before it can judge anything. Not
+        # measurable is not the same as measurably trending: a short run
+        # must not be told its history is climbing when nothing measured it.
+        history_unknown = cl_drift is None
         # "the user stop took effect" requires the solver to have quit
         # below the cap AND to have advanced past the flip — a stop that
         # landed after the solver already exited on its own must not
@@ -700,12 +721,16 @@ class RansJob:
                            "still trending")
         elif n_run < self.n_iters:
             converged = history_flat
-            stop_reason = ("residuals converged" if converged else
-                           "solver stopped early with a still-trending "
-                           "force history")
+            stop_reason = (
+                "residuals converged" if converged else
+                f"solver stopped early after {n_run} iterations — too few "
+                f"to verify the force history" if history_unknown else
+                "solver stopped early with a still-trending force history")
         else:
             converged = history_flat
-            stop_reason = "iteration cap reached"
+            stop_reason = ("iteration cap reached" if not history_unknown else
+                           f"iteration cap reached after {n_run} iterations — "
+                           f"too few to verify the force history")
 
         # panel-model numbers for the same config, full pipeline
         panel = None
@@ -735,11 +760,14 @@ class RansJob:
         # signed trend across the last two windows: the drifting-run note
         # tells the user WHICH WAY the number is still moving (a rising
         # history makes the tail mean a lower bound)
-        w = min(FORCE_STOP_WINDOW, max(1, len(data["cl"]) // 3))
+        # measured on the same post-transient slice the verdict used: a
+        # direction read across the startup decay would point the wrong way
+        post = data["cl"][FORCE_STOP_SKIP:]
+        w = min(FORCE_STOP_WINDOW, max(1, len(post) // 3))
         trend_note = None
-        if not converged and len(data["cl"]) >= 2 * w:
-            m_prev = sum(data["cl"][-2 * w:-w]) / w
-            m_last = sum(data["cl"][-w:]) / w
+        if not converged and not history_unknown and len(post) >= 2 * w:
+            m_prev = sum(post[-2 * w:-w]) / w
+            m_last = sum(post[-w:]) / w
             signed = (m_last - m_prev) / max(abs(m_last), 0.05)
             if abs(signed) >= 0.001:
                 direction = "rising" if signed > 0 else "falling"
@@ -748,6 +776,11 @@ class RansJob:
                     f"Cl is still {direction} ~{abs(signed) * 100:.1f}% per "
                     f"{w}-iteration window — treat {cl_mean:.2f} as a "
                     f"{bound} bound, not a result")
+        elif not converged and history_unknown:
+            trend_note = (
+                f"only {len(data['cl'])} iterations of force history — too "
+                f"few to tell whether {cl_mean:.2f} has settled; raise Max "
+                f"iterations and rerun")
 
         # measured wall state (y+ + separation) from the diagnostics the
         # case writes beside every field set; absent on cases generated
@@ -812,13 +845,7 @@ class RansJob:
                       and abs(panel["c_est"]) > 1e-9
                       and cl_mean / panel["c_est"] - 1 > 0.25) else None,
                 "suggested_k_g": suggestion,
-                # the 2026-07 calibration campaign (docs/calibration) measured
-                # the coarse mesh reading validated operating points 22-35%
-                # below fine-mesh truth through the racing and mid-height
-                # bands (under-resolved venturi gap) — a coarse result is a
-                # screening number, and a k_g pinned from one can bake that
-                # bias into every estimate in the session
-                "mesh_caution": self.mesh_size == "coarse",
+                "mesh_caution": mesh_below_calibration_grade(self.mesh_size),
                 "user_stopped": user_applied,
                 "case_dir": str(self.case_dir),
             }

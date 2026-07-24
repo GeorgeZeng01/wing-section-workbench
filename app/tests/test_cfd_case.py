@@ -58,6 +58,24 @@ def msh_stats(text):
     return names, n3
 
 
+def patch_facets(text):
+    """{patch: face count} from a MSH2 file. The wall curves are meshed one
+    element per polyline segment at minimum (gmsh subdivides, never merges),
+    so a wall patch's face count is a floor on the meshed wall sampling."""
+    names = {int(tag): name for dim, tag, name in re.findall(
+        r'^(\d+) (\d+) "([^"]+)"$',
+        text[text.index("$PhysicalNames"):
+             text.index("$EndPhysicalNames")], re.M) if dim == "2"}
+    body = text[text.index("$Elements"):text.index("$EndElements")]
+    out = {}
+    for ln in body.splitlines()[2:]:
+        f = ln.split()
+        # 2D types: 2 tri, 3 quad; first tag is the physical group
+        if len(f) > 3 and f[1] in ("2", "3") and int(f[3]) in names:
+            out[names[int(f[3])]] = out.get(names[int(f[3])], 0) + 1
+    return out
+
+
 def main():
     tmp = Path(tempfile.mkdtemp(prefix="wss_cfd_case_"))
     try:
@@ -88,6 +106,23 @@ def main():
         check("first layer targets y+ ~ 1",
               summary["boundary_layer"] and 0.5 <= summary["y_plus_est"] <= 2.0,
               f"(y+ {summary['y_plus_est']}, h1 {summary['first_layer_mm']} mm)")
+        check("summary names the boundary-layer mode that was achieved",
+              summary["bl_mode"] in ("per-element", "global")
+              if summary["boundary_layer"] else summary["bl_mode"] is None,
+              f"({summary['bl_mode']})")
+
+        # the meshed wall sampling is decoupled from the panel count: the
+        # case is meshed on a densified rebuild of the same section, so a
+        # 60-panel solver config still gets MESH_SURFACE_MIN_N nodes/side
+        facets = patch_facets(msh)
+        wall = [facets.get(f"wing_e{i + 1}", 0) for i in range(2)]
+        check("wall is densified independently of the panel count",
+              CFG.n_panels_per_side < cfd.MESH_SURFACE_MIN_N
+              and summary["surface_nodes_per_side"] >= cfd.MESH_SURFACE_MIN_N
+              and all(n // 2 >= cfd.MESH_SURFACE_MIN_N - 1 for n in wall),
+              f"(faces/side {[n // 2 for n in wall]} at "
+              f"{CFG.n_panels_per_side} panels, floor "
+              f"{cfd.MESH_SURFACE_MIN_N - 1})")
 
         cd = (case / "system/controlDict").read_text()
         # the RANS runner's graceful stop rewrites this exact token — the
@@ -95,6 +130,14 @@ def main():
         check("controlDict carries the stopAt token the runner rewrites",
               "stopAt          endTime;" in cd
               and "runTimeModifiable true;" in cd)
+        check("controlDict endTime is the case's iteration cap",
+              f"endTime         {summary['n_iters']};" in cd
+              and summary["n_iters"] == cfd.N_ITERS,
+              f"(n_iters {summary['n_iters']})")
+        # ...and the cap travels from the request, not from the default
+        check("a non-default iteration request reaches endTime",
+              "endTime         1500;" in cfd._controldict(
+                  CFG, cfd.DZ_C * CFG.chord_m, 1500))
         fc = cd[cd.index("forceCoeffs"):]
         check("controlDict forceCoeffs is downforce-positive on the wing",
               "liftDir         (0 -1 0);" in fc

@@ -733,7 +733,11 @@ pure-refinement fallback mesh (gmsh's BoundaryLayer field is its fragile
 corner) runs the identical case. The boundary-layer stack is auto-capped at
 40 % of the tightest clearance in the geometry, so opposing layers never
 collide across a slot or the ground gap. Presets land ~15k / ~40k / ~90k
-cells (coarse/medium/fine). The exported case is the roadmap's "truth
+cells (coarse/medium/fine). (Both superseded by the 2026-07-24 round: the
+cap is now per element — measured against the clearances each element
+actually faces, because one tight slot was starving every other element's
+stack — and the presets land ~21k / ~46k / ~95k after the taller domain,
+slot-throat refinement and wall densification.) The exported case is the roadmap's "truth
 model" handoff made concrete — panel/NeuralFoil screen, RANS decides:
 `run.sh` sources the newest WSL OpenFOAM environment (before enabling shell
 strictness — the documented pitfall), converts and checks the mesh, runs
@@ -1006,7 +1010,13 @@ the mid-height gain peak (fine-mesh RANS +67 % at h/c 0.171, +35 % at
 0.257 — the truth model's load peaks near h/c ≈ 0.17, not the
 published-experiment 0.06–0.1 the curve was shaped to). The coarse mesh
 mis-read a validated point by −29 % (under-resolved venturi gap), which
-had produced a spurious "racing-height collapse" in the first sweep.
+had produced a spurious "racing-height collapse" in the first sweep — a
+result measured on THIS two-element baseline, not a general property of
+the preset: the 2026-07-24 round found coarse and fine agreeing within
+noise on a three-element case, and that round's slot-throat refinement
+targets the very gap the −29 % came from. Every number in this section
+also predates the 16-chord domain (see the provenance warning in
+`docs/calibration/LOG.md`).
 
 **Decision: no global k_g-curve refit — ship the validity map instead.**
 The best-fidelity implied k_g set is non-monotonic (0.05 → 0.12 → 0.73 →

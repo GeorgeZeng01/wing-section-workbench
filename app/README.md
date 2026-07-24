@@ -271,9 +271,13 @@ app/
     viscous.py         NeuralFoil polars + XFOIL reference runs
     analysis.py        combined analysis and the corrected estimate
     optimizer.py       target-downforce search (background jobs)
+    shaping.py         Hicks–Henne camber/thickness refinement of sections
     screener.py        library-wide airfoil ranking
     export.py          DXF / DAT / TXT / CSV / SVG / ZIP writers
     cfd.py             OpenFOAM 2D RANS case generation (gmsh mesh + case)
+    cfd_run.py         in-app RANS runs in Docker (live convergence, k_g)
+    foam_post.py       field parsing, wall report, flow-field render
+    rans_queue.py      shortlist RANS verification queue with re-ranking
   static/              the web UI (no build step, no external dependencies)
   tests/               validation suite
 ```

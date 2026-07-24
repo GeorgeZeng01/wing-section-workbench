@@ -6,6 +6,19 @@ timestamps, machine-readable); this file records the order, the intent
 and the conclusions. Constants changed on the strength of these runs
 cite the run labels that justified them.
 
+> **PROVENANCE WARNING (2026-07-24).** Every row in `runs.csv`, and every
+> number in every entry below, was solved in the **8-chord-tall domain**
+> used before the 2026-07-24 round. That round measured the 8-chord slip
+> ceiling inflating Cl by ~5 % (and Cd far more) on an aggressive
+> 3-element case and raised `Y_TOP_C` to 16 — so the recorded deltas sit
+> roughly that much high, and nothing here has been re-measured at the
+> new domain. Blockage scales with loading, so lightly loaded two-element
+> rows shift less than the ~5 % measured on the loaded probe, but the sign
+> is one-directional. Treat the recorded bands as advisory and re-anchor
+> (`anchor-h30-fine`, `stage2_clean-fine`, `stage2_flagged-fine`) before
+> letting a near-threshold verdict decide anything. The verdict bands in
+> `app/core/rans_queue.py` carry the same warning at their definition.
+
 Method notes, fixed up front:
 
 - **Geometry**: the sharp (no manufacturing prep) two-element baseline —
@@ -14,10 +27,13 @@ Method notes, fixed up front:
   pins the exact config.
 - **Calibration points must be attached-flow cases.** Steady RANS on a
   separated high-lift stack settles into a bounded limit cycle, not a
-  number (measured: the aggressive 3-element case at Cl 8.6 ± —, the
-  2-element coarse case Cl 2.71 ± 0.15). Separated or heavily
+  number (measured: the validity-boundary 3-element probe at Cl 8.6 ± —,
+  the 2-element coarse case Cl 2.71 ± 0.15). Separated or heavily
   oscillating runs mark the model's validity boundary and test the
-  trust badges; they are never curve-fit points.
+  trust badges; they are never curve-fit points. (That Cl 8.6 belongs to
+  the boundary probe alone — the 2026-07-24 entry below records a
+  different, converged 3-element case at 7.59 with the flow attached, so
+  do not quote 8.6 as "the" three-element number.)
 - **Verdict discipline**: only runs whose convergence verdict is
   "force history converged" or "residuals converged" contribute a
   `suggested_k_g` (cfd_run refuses otherwise); cap-limited trending

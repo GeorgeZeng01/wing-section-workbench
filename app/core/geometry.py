@@ -345,6 +345,12 @@ def min_dist_to_polyline(pt: np.ndarray, coords: np.ndarray) -> float:
     return float(np.min(np.hypot(*(pt - proj).T)))
 
 
+def _cross2(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Scalar (z) cross product of 2-D vectors, broadcasting over the
+    leading axes. np.cross deprecated 2-D operands in NumPy 2.0."""
+    return a[..., 0] * b[..., 1] - a[..., 1] * b[..., 0]
+
+
 def _edges_cross(a: np.ndarray, b: np.ndarray) -> bool:
     """Proper (interior) crossing between any edge of polygon a and any edge
     of polygon b, closing segments included. Strict inequalities: contours
@@ -352,11 +358,11 @@ def _edges_cross(a: np.ndarray, b: np.ndarray) -> bool:
     p, q = a, np.roll(a, -1, axis=0)
     r, s = b, np.roll(b, -1, axis=0)
     u = (q - p)[:, None, :]
-    d1 = np.cross(u, r[None, :, :] - p[:, None, :])
-    d2 = np.cross(u, s[None, :, :] - p[:, None, :])
+    d1 = _cross2(u, r[None, :, :] - p[:, None, :])
+    d2 = _cross2(u, s[None, :, :] - p[:, None, :])
     v = (s - r)[None, :, :]
-    d3 = np.cross(v, p[:, None, :] - r[None, :, :])
-    d4 = np.cross(v, q[:, None, :] - r[None, :, :])
+    d3 = _cross2(v, p[:, None, :] - r[None, :, :])
+    d4 = _cross2(v, q[:, None, :] - r[None, :, :])
     return bool(((d1 * d2 < 0) & (d3 * d4 < 0)).any())
 
 

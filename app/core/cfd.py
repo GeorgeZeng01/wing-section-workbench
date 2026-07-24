@@ -871,17 +871,22 @@ def build_case(cfg: StackConfig, out_dir: Path, mesh_size: str = "medium",
     if not (100 <= n_iters <= 20_000):
         raise ValueError("n_iters must be between 100 and 20000")
     preset = MESH_PRESETS[mesh_size]
-    design = geometry.build_stack(cfg)
-    if any(e["intersects"] for e in design):
-        raise ValueError("elements intersect — open the slots before meshing")
     # the wall polyline is meshed as straight facets, so its node count is
     # the surface resolution for EVERY preset — decoupled from the panel
     # count here (the solver's 70/side leaves ~8 mm facets on the main
     # element; the flow solution deserves better even when the panel
     # method doesn't need it). Same underlying section, denser sampling.
-    if cfg.n_panels_per_side < MESH_SURFACE_MIN_N:
-        design = geometry.build_stack(dataclasses.replace(
-            cfg, n_panels_per_side=MESH_SURFACE_MIN_N))
+    # The densified rebuild re-solves the slot placement on its own
+    # discretisation, so the intersection guard runs AFTER it: the geometry
+    # that is checked has to be the geometry that is meshed, or a stack
+    # that reads clear at the user's panel count reaches gmsh self-
+    # intersecting and fails as an opaque mesh error.
+    mesh_nodes = max(cfg.n_panels_per_side, MESH_SURFACE_MIN_N)
+    design = geometry.build_stack(
+        cfg if mesh_nodes == cfg.n_panels_per_side
+        else dataclasses.replace(cfg, n_panels_per_side=mesh_nodes))
+    if any(e["intersects"] for e in design):
+        raise ValueError("elements intersect — open the slots before meshing")
     installed = geometry.install_stack(design, cfg.ride_height_c)
     polys = [_closed_poly_m(e["coords"], cfg.chord_m) for e in installed]
     # the domain is a fixed box (Y_TOP_C chords tall): a validated config can
@@ -953,6 +958,9 @@ def build_case(cfg: StackConfig, out_dir: Path, mesh_size: str = "medium",
         "bl_mode": stats["bl_mode"],
         "first_layer_mm": round(h1 * 1e3, 4),
         "y_plus_est": round(y_plus, 2),
+        # the wall sampling actually meshed — not cfg.n_panels_per_side,
+        # which is the panel solver's number
+        "surface_nodes_per_side": mesh_nodes,
         "re_main_chord": int(round(cfg.speed_ms * cfg.chord_m / cfg.nu)),
         "patches": ["inlet", "outlet", "top", "ground", *wings,
                     "frontAndBack"],

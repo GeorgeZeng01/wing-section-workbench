@@ -385,7 +385,7 @@
             Candidates</h3>
           <div id="opt-candidates"></div>
           <h3 class="sub-title" id="rerank-title" hidden
-              title="Runs the winner, every candidate and the Pareto knee through the same 2D RANS truth case, one at a time, then re-ranks by MEASURED downforce. The panel model navigates; RANS measures — this is the maximum-accuracy step for the designs you would actually build. Medium mesh agreed with fine in the calibration campaign; coarse is screening only.">
+              title="Runs the winner, every candidate and the Pareto knee through the same 2D RANS truth case, one at a time, then re-ranks on the MEASURED numbers, consistently with the objective: target runs rank by measured drag among the designs that hit the target, maximum-downforce runs rank by measured downforce. The panel model navigates; RANS measures — this is the maximum-accuracy step for the designs you would actually build. Only fine-mesh runs carry a calibrated verdict; coarse and medium are labelled screening only.">
             RANS re-rank</h3>
           <div id="rerank-block" hidden>
             <div class="action-row">
@@ -457,12 +457,12 @@
       <div class="tab-controls">
         <label class="field inline"><span class="f-label">Mesh</span>
           <span class="f-wrap"><select id="rans-mesh" class="select-inline">
-            <option value="coarse" selected>Coarse (~15k cells, quickest)</option>
-            <option value="medium">Medium (~40k cells)</option>
-            <option value="fine">Fine (~90k cells, slow)</option>
+            <option value="coarse" selected>Coarse (~21k cells, quickest)</option>
+            <option value="medium">Medium (~46k cells)</option>
+            <option value="fine">Fine (~95k cells, slow)</option>
           </select><i></i></span></label>
         <label class="field inline"
-               title="Upper bound only — the run stops on its own as soon as the force history flattens (or residuals converge), so a generous cap costs nothing when the solve behaves. Fine meshes on heavily loaded sections can genuinely need many thousands of iterations; a run that hits this cap while still trending is reported as not converged.">
+               title="Upper bound only — the run stops on its own as soon as the force history flattens, so a generous cap costs nothing when the solve behaves. The solver's own residual thresholds are a backstop that does not fire on a loaded high-lift case, so the force history is the criterion that actually ends a run. Fine meshes on heavily loaded sections can genuinely need many thousands of iterations; a run that hits this cap while still trending is reported as not converged.">
           <span class="f-label">Max iterations</span>
           <span class="f-wrap"><input id="rans-iters" type="number" step="100" min="100" max="20000" value="10000" style="width:70px"><i></i></span></label>
         <button id="btn-rans-run" class="btn small primary" disabled>Verify with RANS</button>
@@ -563,9 +563,9 @@
              from the <b>RANS verify</b> tab (Docker).</p>
           <label class="field inline"><span class="f-label">Mesh</span>
             <span class="f-wrap"><select id="exp-cfd-mesh" class="select-inline">
-              <option value="coarse">Coarse (~15k cells)</option>
-              <option value="medium" selected>Medium (~40k cells)</option>
-              <option value="fine">Fine (~90k cells)</option>
+              <option value="coarse">Coarse (~21k cells)</option>
+              <option value="medium" selected>Medium (~46k cells)</option>
+              <option value="fine">Fine (~95k cells)</option>
             </select><i></i></span></label>
           <button id="btn-export-cfd" class="btn primary">Generate case</button>
         </div>

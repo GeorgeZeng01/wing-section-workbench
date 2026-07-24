@@ -301,6 +301,34 @@ fine_r = finalize_with([2.5] * 1500, 3000, mesh="fine")
 check("fine-mesh result carries no mesh_caution",
       fine_r and fine_r["mesh_caution"] is False)
 
+# a run too short for drift() to judge must say SO, not assert a trend it
+# never measured (drift needs FORCE_STOP_SKIP + 3*100 rows)
+short_r = finalize_with([2.5] * 700, 3000)
+check("short flat run is not accused of trending",
+      short_r and short_r["cl_drift"] is None
+      and "too few" in short_r["stop_reason"]
+      and "trending" not in short_r["stop_reason"]
+      and short_r["suggested_k_g"] is None,
+      f"({short_r and short_r['stop_reason']})")
+check("short run's trend note reports the shortfall, not a direction",
+      short_r and short_r["cl_trend_note"] is not None
+      and "too few" in short_r["cl_trend_note"]
+      and "rising" not in short_r["cl_trend_note"]
+      and "falling" not in short_r["cl_trend_note"])
+short_cap_r = finalize_with([2.5] * 700, 700)
+check("short cap-limited run also declines to claim a trend",
+      short_cap_r and "too few" in short_cap_r["stop_reason"]
+      and short_cap_r["converged"] is False)
+
+# the mesh-grade policy is ONE definition shared with the queue's grading
+check("only the fine mesh is calibration grade",
+      cfd_run.mesh_below_calibration_grade("coarse")
+      and cfd_run.mesh_below_calibration_grade("medium")
+      and not cfd_run.mesh_below_calibration_grade("fine"))
+med_r = finalize_with([2.5] * 1500, 3000, mesh="medium")
+check("medium single run carries the mesh caution the queue also applies",
+      med_r and med_r["mesh_caution"] is True)
+
 # an early rc==0 exit with a DRIFTING history must not mint a verdict (or
 # a k_g): the stop mechanism explains the exit, only the history certifies
 early_drift_r = finalize_with([2.0 + 0.001 * i for i in range(1500)], 3000)

@@ -7,7 +7,9 @@ is faked through the cfd_run._popen seam — no docker involved.
 
 Run directly:  python app/tests/test_rans_queue.py
 """
+import atexit
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -19,7 +21,9 @@ sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 # isolation BEFORE any app.core import: cfd_run resolves its runs dir from
 # WSS_DATA_DIR at call time, and without this the suite writes fabricated
 # run dirs into the real app_data/rans and PRUNES the user's retained cases
-os.environ["WSS_DATA_DIR"] = tempfile.mkdtemp(prefix="wss-rans-queue-test-")
+_SCRATCH = Path(tempfile.mkdtemp(prefix="wss-rans-queue-test-")).resolve()
+os.environ["WSS_DATA_DIR"] = str(_SCRATCH)
+atexit.register(shutil.rmtree, _SCRATCH, ignore_errors=True)
 from app.core import cfd_run, rans_queue  # noqa: E402
 from app.core.geometry import StackConfig  # noqa: E402
 
@@ -151,8 +155,12 @@ def wait_solver_idle(timeout=10.0):
 
 
 def main():
-    check("suite runs against an isolated data dir (not app_data)",
-          _REAL not in _RUNS.parents and _RUNS != _REAL, f"({_RUNS})")
+    # the import guard already refuses to run inside the real app_data; this
+    # is the positive form — the runs dir must land in THIS suite's scratch
+    # dir, not merely somewhere else
+    check("runs dir resolves inside the suite's scratch data dir",
+          _RUNS == _SCRATCH or _SCRATCH in _RUNS.parents,
+          f"({_RUNS} vs {_SCRATCH})")
 
     # ---- verdict classification against the recorded bands ----
     check("classify: healthy band (fine)",
