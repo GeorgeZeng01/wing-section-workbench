@@ -11,7 +11,7 @@
 </script>
 <link rel="icon" href="/static/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" href="/static/favicon.png">
-<link rel="stylesheet" href="/static/css/app.css?v=19">
+<link rel="stylesheet" href="/static/css/app.css?v=21">
 </head>
 <body>
 
@@ -364,10 +364,10 @@
           <div class="progress" aria-hidden="true"><div id="opt-progress"></div></div>
           <div id="opt-status" class="note">idle — Fast/Standard stop early at the target; Thorough searches everything</div>
         </div>
-        <div id="opt-charts" class="opt-charts empty">
-          <div id="opt-charts-empty" class="empty-note">Run the optimizer to
-            see the convergence history, the objective trend and the
-            downforce–drag Pareto front.</div>
+        <div id="opt-charts" class="opt-charts chart-empty-host empty">
+          <div id="opt-charts-empty" class="charts-empty-note empty-note">Run
+            the optimizer to see the convergence history, the objective trend
+            and the downforce–drag Pareto front.</div>
           <div id="opt-conv" class="chart-host"></div>
           <div id="opt-obj" class="chart-host"></div>
           <div id="opt-pareto" class="chart-host"
@@ -443,7 +443,10 @@
       </div>
       <div id="map-stale" class="stale-note" hidden>configuration changed
         since this sweep — re-sweep to update the maps</div>
-      <div class="chart-pair">
+      <div id="map-charts" class="chart-pair chart-empty-host empty">
+        <div class="charts-empty-note empty-note">Sweep ride height or speed
+          to see how downforce and L/D change away from the operating
+          point.</div>
         <div id="map-downforce" class="chart-host"></div>
         <div id="map-ld" class="chart-host"></div>
       </div>
@@ -477,7 +480,7 @@
         (simpleFoam + k-ω SST, moving ground) in Docker and compares the
         result against the panel estimate. Optional — the design workflow
         never requires it.</div>
-      <div class="chart-pair rans-charts" style="margin-top:8px">
+      <div id="rans-charts" class="chart-pair rans-charts empty" style="margin-top:8px">
         <div id="rans-conv" class="chart-host"></div>
         <div id="rans-result"><div class="empty-note">No verification run yet.
           Set up a section, then Verify with RANS — a coarse run typically
@@ -689,7 +692,7 @@
   </div>
 </template>
 
-<script type="module" src="/static/js/shell.js?v=19"></script>
-<script type="module" src="/static/js/app.js?v=19"></script>
+<script type="module" src="/static/js/shell.js?v=21"></script>
+<script type="module" src="/static/js/app.js?v=21"></script>
 </body>
 </html>

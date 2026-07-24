@@ -1002,17 +1002,19 @@ function renderResults(res) {
     const row = document.createElement("div");
     row.className = "load-row";
     const scale = 1.3; // track spans 0..130% of CL_max
+    // abbreviated tokens keep the subline on one line at the results
+    // column's ~297px even with double-digit values (mono font)
     const gload = gf == null ? "" :
       ` · <span class="gload${gf > 2.0 ? " warn" : ""}" title="realized ` +
       `ground-effect operating point: Cl ${fmtN(e.Cl_operating, 2)} — ` +
-      `${fmtN(gf, 2)}× the isolated CLmax">ground load ${fmtN(gf, 2)}</span>`;
+      `${fmtN(gf, 2)}× the isolated CLmax">g-load ${fmtN(gf, 2)}</span>`;
     // the element label + loading % on one clean line; the detailed
     // coefficients on a muted subline below so nothing wraps mid-metric
     row.innerHTML =
       `<div class="load-head"><span>E${i + 1} ${esc(e.role)}</span>` +
       `<span>${(frac * 100).toFixed(0)}%</span></div>` +
-      `<div class="load-sub">Cl ${fmtN(e.Cl_checked, 2)} / ` +
-      `${fmtN(e.CL_max_isolated, 2)} · ground ×${fmtN(e.ground_multiplier, 1)}` +
+      `<div class="load-sub">Cl ${fmtN(e.Cl_checked, 2)}/` +
+      `${fmtN(e.CL_max_isolated, 2)} · gnd ×${fmtN(e.ground_multiplier, 1)}` +
       `${gload}</div>` +
       `<div class="load-track">` +
       `<div class="load-fill" style="width:${Math.min(frac / scale, 1) * 100}%;` +
@@ -1083,6 +1085,7 @@ function resetWorkspaceResults() {
   syncOptObjectiveUI();   // expands "idle" into the mode's idle line
   // RANS verify
   $("rans-conv").innerHTML = "";
+  $("rans-charts").classList.add("empty");   // hide the empty conv half
   $("rans-result").innerHTML =
     '<div class="empty-note">No verification run yet. Set up a section, ' +
     'then Verify with RANS — a coarse run typically takes a few minutes.</div>';
@@ -1093,6 +1096,7 @@ function resetWorkspaceResults() {
   // maps
   $("map-downforce").innerHTML = "";
   $("map-ld").innerHTML = "";
+  $("map-charts").classList.add("empty");   // back to the placeholder
   $("map-allowance").hidden = true;
   $("map-stale").hidden = true;
   $("map-note").textContent = "Sweep ride height or speed to map how the " +
@@ -2524,6 +2528,7 @@ function renderSweep(res) {
       "no valid sweep points — every value failed validation";
     return;
   }
+  $("map-charts").classList.remove("empty");   // real charts now
   const xs = pts.map(p => p.value);
   const dn = pts.map(p => p.downforce_n);
   let ipk = 0;
@@ -2772,6 +2777,7 @@ async function startRansVerify() {
     $("rans-iters").disabled = true;
     $("rans-stale").hidden = true;
     $("rans-conv").innerHTML = "";   // previous run's chart is not this run
+    $("rans-charts").classList.add("empty");   // until this run's history draws
     $("rans-flow").hidden = true;
     ransFlowCache = null;
     $("rans-result").innerHTML =
@@ -2873,6 +2879,9 @@ function renderRans(s) {
   bits.push(`${Math.round(+s.elapsed_s || 0)}s`);
   $("rans-status").textContent = bits.join(" · ");
   if (s.history && s.history.length > 1) {
+    // reveal the convergence half BEFORE lineChart measures its width, or
+    // it reads 0 and falls back to a fixed 480px (letterboxed chart)
+    $("rans-charts").classList.remove("empty");
     const cEst = s.result?.panel?.c_est ?? state.ransCEst;
     lineChart($("rans-conv"), {
       series: [{ name: "Cl (RANS)", color: SERIES[0],

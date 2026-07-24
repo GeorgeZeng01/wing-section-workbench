@@ -211,6 +211,13 @@ body {
   }
   .dock-divider { display: none; }
   .dock { min-height: 340px; }
+  /* the page (not the panel) scrolls here, so the config becomes a
+     viewport-bounded sticky column — otherwise its sticky Analyze/Optimize
+     footer has no scroll container and drops below the fold. Height leaves
+     room for the 48px topbar + the grid's 8px gaps so the footer stays on
+     screen at scroll 0. */
+  .config { position: sticky; top: 8px; align-self: start;
+            max-height: calc(100vh - 64px); }
 }
 @media (max-width: 760px) {
   .layout {
@@ -404,6 +411,13 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
 .select-inline { background: transparent; border: none; padding: 0;
                  font-family: var(--mono); font-size: var(--fs-1); width: 100%; }
 .select-inline:focus { outline: none; }
+/* two select-inlines live outside an .f-wrap box (re-rank mesh, candidate
+   pool) — give them their own box so they read as controls, not plain text */
+#rr-mesh { background: var(--surface-2); border: 1px solid var(--hairline);
+           border-radius: var(--r-s); padding: 4px 8px; }
+.af-pool-row .select-inline { width: auto; background: var(--surface-2);
+           border: 1px solid var(--hairline); border-radius: var(--r-s);
+           padding: 3px 7px; }
 .select option, .select-inline option { background: var(--surface-1); color: var(--ink); }
 
 .check { display: flex; align-items: center; gap: 6px;
@@ -620,10 +634,11 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
 .chart-host.tall { min-height: 230px; }
 .chart-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 @media (max-width: 900px) { .chart-pair { grid-template-columns: 1fr; } }
-/* RANS: before a run the convergence half is empty — hide it and let the
-   result note (which carries the empty state) take the full width */
-.rans-charts #rans-conv:empty { display: none; }
-.rans-charts:has(#rans-conv:empty) { grid-template-columns: 1fr; }
+/* RANS: before a run the convergence half is empty — hide it (via a JS
+   .empty class, not :empty, so lineChart can still measure the host width
+   when it later draws) and let the result note take the full width */
+#rans-charts.empty { grid-template-columns: 1fr; }
+#rans-charts.empty #rans-conv { display: none; }
 
 .chart .grid { stroke: var(--grid-dot); stroke-width: 1; }
 .chart .axis { stroke: var(--hairline-2); stroke-width: 1; }
@@ -678,12 +693,16 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
 .progress > div.done { background: var(--good); }
 #opt-hints .warning-item { margin: 8px 0; }
 .opt-charts { display: grid; grid-auto-rows: minmax(190px, 1fr); gap: 8px; min-width: 0; }
-/* before a run the three chart hosts would be one large blank panel — show
-   a placeholder instead and collapse the empty grid */
-.opt-charts.empty { display: flex; align-items: center; justify-content: center; }
-.opt-charts.empty .chart-host, .opt-charts.empty #opt-pareto-note { display: none; }
-#opt-charts-empty { max-width: 34ch; text-align: center; line-height: 1.5; }
-.opt-charts:not(.empty) #opt-charts-empty { display: none; }
+
+/* generic empty-chart state: before a run, a chart area is one large blank
+   panel — show a centered placeholder instead and hide the empty hosts.
+   Toggled by a .empty class (NOT :empty, which collides with lineChart
+   emptying its container before measuring width → a 480px fallback). */
+.chart-empty-host.empty { display: flex; align-items: center; justify-content: center;
+                          min-height: 190px; }
+.chart-empty-host.empty > *:not(.charts-empty-note) { display: none; }
+.charts-empty-note { max-width: 38ch; text-align: center; line-height: 1.5; margin: auto; }
+.chart-empty-host:not(.empty) > .charts-empty-note { display: none; }
 .opt-best { border-left: 1px solid var(--hairline); padding-left: 16px; }
 .opt-best .sub-title { margin-top: 0; }
 #opt-cand-title { margin-top: 16px; }
