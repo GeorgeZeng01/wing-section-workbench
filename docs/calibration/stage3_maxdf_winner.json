@@ -1,0 +1,24 @@
+{
+ "elements": [
+  {
+   "airfoil": "s1223",
+   "chord_ratio": 1.0,
+   "deflection_deg": 0
+  },
+  {
+   "airfoil": "s1223",
+   "chord_ratio": 0.35,
+   "deflection_deg": 22.38399,
+   "slot_gap_pct": 0.81198,
+   "slot_overlap_pct": 0.0956
+  }
+ ],
+ "stack_aoa_deg": -4.0,
+ "ride_height_mm": 30,
+ "chord_mm": 350,
+ "span_mm": 1400,
+ "speed_ms": 15,
+ "ncrit": 7,
+ "viscous_efficiency": 0.85,
+ "efficiency_3d": 0.9
+}
