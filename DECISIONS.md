@@ -1050,6 +1050,51 @@ into the banded map (a 2-D validity surface) — rejected as false
 precision from four configs; the two existing mechanisms already carry
 the message at the right granularity.
 
+## Rule envelopes and optimizer objectives (2026-07)
+
+**Rule envelopes are hard constraints, not soft bands.** The optimizer's
+loading/gap/overlap bands are preferences: `_baseline_allowance()` widens
+them so a start is never penalized for being what it already is
+(do-no-harm). Competition rules are legality — a design outside the box is
+not a worse design, it is not a legal design — so the envelope check marks
+evaluations infeasible by name (`rule: max_length_mm by 15.2 mm`), and a
+run started from a violating design refuses eagerly with a plain message
+instead of burning its budget on a search where every evaluation would be
+infeasible. Options considered: (a) treat the envelope like the soft bands
+and widen to the baseline — rejected, do-no-harm would legalize an illegal
+start; (b) silently gate per-evaluation only — rejected, a violating start
+would run to "no feasible design found" with no hint why; (c) eager
+refusal + per-evaluation gate (chosen).
+
+**One envelope object drives everything.** `geometry.envelope_check()` is
+the single compliance implementation; `geometry_report` (UI warnings +
+viewport box), `quick_objective_eval` (optimizer feasibility), and the
+optimizer's eager refusal all call it, so the drawing, the warning list
+and the optimizer can never disagree about legality. The verdict echoes
+the envelope limits so the viewport draws the box from the same object it
+colors violations with.
+
+**Envelope semantics v1: extent box in the installed frame at the
+configured ride height.** Limits are mm caps on installed extents (length,
+top height, ground clearance), not a positioned rectangle — the section
+can be mounted anywhere along the car, so length constrains extent and
+the drawn box's x-offset is display-only. All limits optional; values are
+always user-entered, never hardcoded (rules change every season).
+Alternatives: a positioned box in the wing-local frame (rejected — invites
+false violations from an arbitrary mounting origin); checking across a
+ride-height range (deferred — the rules FSAE-style teams care about are
+measured in static/reference condition; revisit if a real rulebook needs
+it).
+
+**Rule presets are a machine-level library; the active envelope travels
+with the project.** Named rule sets (`FSAE 2026`, …) live in
+`app_data/rule_presets.json` behind `GET/PUT /api/rule-presets` — the same
+rulebook applies across projects on one machine. The active envelope is a
+`rule_envelope` config field, so sessions and project files carry it
+automatically. Alternative considered: presets inside each project file —
+rejected, a new project would start with an empty rulebook and teams would
+re-type the season's numbers per project.
+
 ## Known limitations
 
 Documented, not fixed. The custom-airfoil registry lives in server memory

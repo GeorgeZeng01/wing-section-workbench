@@ -43,6 +43,8 @@ export const api = {
   sweep: (config, variable, values) =>
     request("POST", "/api/sweep", { config, variable, values }),
   presets: () => request("GET", "/api/presets"),
+  rulePresets: () => request("GET", "/api/rule-presets"),
+  rulePresetsSave: (presets) => request("PUT", "/api/rule-presets", { presets }),
   session: () => request("GET", "/api/session"),
   sessionSave: (state) => request("POST", "/api/session", { state }),
   exportSave: (fmt, config, options = {}) =>

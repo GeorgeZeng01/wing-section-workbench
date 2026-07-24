@@ -132,6 +132,54 @@
       </div>
     </section>
 
+    <section class="group">
+      <div class="group-head">
+        <h2 class="group-title">Rules</h2>
+        <label class="check"
+               title="Competition rule envelope: user-entered geometric limits, checked on the installed wing at the configured ride height. Rules change every season, so nothing is hardcoded — enter this year's numbers and save them as a named preset. The drawing shows the envelope as a dashed box; the optimizer treats it as hard constraints.">
+          <input id="rules-on" type="checkbox"> apply</label>
+      </div>
+      <div id="rules-body" hidden>
+        <div class="fields two-col">
+          <label class="field"
+                 title="Cap on the installed streamwise length of the whole stack (all elements together, measured as driven). Blank = unconstrained.">
+            <span class="f-label">Max length</span>
+            <span class="f-wrap"><input id="rule-len" type="number" step="1" min="10" max="20000"><i>mm</i></span></label>
+          <label class="field"
+                 title="Highest point of any element above the road. Blank = unconstrained.">
+            <span class="f-label">Max height</span>
+            <span class="f-wrap"><input id="rule-height" type="number" step="1" min="1" max="5000"><i>mm</i></span></label>
+          <label class="field"
+                 title="The lowest point of the wing must stay at or above this height over the road. Blank = unconstrained.">
+            <span class="f-label">Min clearance</span>
+            <span class="f-wrap"><input id="rule-clear" type="number" step="1" min="0" max="1000"><i>mm</i></span></label>
+          <label class="field"
+                 title="Where the drawn box starts along x, relative to the wing's leading extent. Drawing anchor only — compliance is measured on extents, since the section can be mounted anywhere along the car.">
+            <span class="f-label">Box x-offset</span>
+            <span class="f-wrap"><input id="rule-xoff" type="number" step="1" min="-20000" max="20000" value="0"><i>mm</i></span></label>
+        </div>
+        <div class="fields two-col">
+          <label class="field"
+                 title="Named rule sets saved on this machine (they apply across projects). The active values always travel with the project itself.">
+            <span class="f-label">Preset</span>
+            <span class="f-wrap"><select id="rule-preset" class="select-inline">
+              <option value="">— none —</option>
+            </select><i></i></span></label>
+          <label class="field" title="Name for saving the current values as a preset, e.g. FSAE 2026.">
+            <span class="f-label">Save as</span>
+            <span class="f-wrap"><input id="rule-preset-name" type="text"
+              maxlength="60" placeholder="FSAE 2026"><i></i></span></label>
+        </div>
+        <div class="action-row">
+          <button id="rule-preset-save" class="btn tiny">Save preset</button>
+          <button id="rule-preset-del" class="btn tiny ghost">Delete preset</button>
+        </div>
+        <p class="group-note">The dashed box in the drawing is this envelope;
+        a violated edge turns amber with the overshoot in mm. The optimizer
+        refuses to start from a violating design and never proposes one.</p>
+      </div>
+    </section>
+
     <div class="action-row">
       <button id="btn-analyze" class="btn primary">Analyze section</button>
       <button id="btn-goto-optimize" class="btn">Optimize…</button>
@@ -145,6 +193,8 @@
             title="How the wing runs on the car: inverted, above the road. Analysis always uses this orientation. Exports can still be written in the upright catalog/CAD convention — see the Export tab.">
         As driven — inverted above the road</span>
       <label class="check"><input id="vp-dims" type="checkbox" checked> Dimensions</label>
+      <label class="check" title="Show the rule envelope box (when Rules are applied)">
+        <input id="vp-rules" type="checkbox" checked> Rules</label>
       <button id="vp-fit" class="btn tiny ghost" title="Fit drawing to view">Fit</button>
       <span class="vp-nav-hint">scroll to zoom · drag to pan</span>
       <span id="vp-legend" class="vp-legend"></span>

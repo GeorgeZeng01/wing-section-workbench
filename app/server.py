@@ -701,6 +701,79 @@ def session_put(body: SessionBody):
     return {"ok": True, "bytes": len(data)}
 
 
+# ---------- rule presets ----------
+#
+# Named rule envelopes ("FSAE 2026", ...) are a machine-level library — the
+# same rulebook applies across projects, so they live next to the session
+# state rather than inside any one project file. The ACTIVE envelope still
+# travels inside the config (and therefore inside project files/sessions).
+
+RULE_PRESETS_FILE = SESSION_FILE.parent / "rule_presets.json"
+RULE_PRESETS_MAX = 50
+
+
+class RulePresetsBody(BaseModel):
+    presets: list[dict]
+
+
+@app.get("/api/rule-presets")
+def rule_presets_get():
+    if not RULE_PRESETS_FILE.exists():
+        return {"presets": []}
+    try:
+        import json as _json
+        data = _json.loads(RULE_PRESETS_FILE.read_text(encoding="utf-8"))
+        return {"presets": data if isinstance(data, list) else []}
+    except Exception:
+        return {"presets": []}
+
+
+@app.put("/api/rule-presets")
+def rule_presets_put(body: RulePresetsBody):
+    import dataclasses
+    import json as _json
+    import os as _os
+    import time as _time
+    if len(body.presets) > RULE_PRESETS_MAX:
+        raise HTTPException(422,
+                            detail=f"at most {RULE_PRESETS_MAX} rule presets")
+    cleaned, seen = [], set()
+    for p in body.presets:
+        if not isinstance(p, dict):
+            raise HTTPException(422, detail="each preset must be an object")
+        name = str(p.get("name") or "").strip()
+        if not (1 <= len(name) <= 60):
+            raise HTTPException(422,
+                                detail="each preset needs a name, 1..60 chars")
+        if name.lower() in seen:
+            raise HTTPException(422, detail=f"duplicate preset name {name!r}")
+        seen.add(name.lower())
+        try:
+            env = geometry.validate_rule_envelope(p.get("envelope") or {})
+        except (ValueError, TypeError) as e:
+            raise HTTPException(422, detail=f"preset {name!r}: {e}")
+        d = dataclasses.asdict(env)
+        d.pop("preset_name", None)   # the name lives beside, not inside
+        cleaned.append({"name": name, "envelope": d})
+    RULE_PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    data = _json.dumps(cleaned, indent=1)
+    tmp = RULE_PRESETS_FILE.with_name(
+        f".rule_presets.{_os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_text(data, encoding="utf-8")
+        for attempt in range(4):
+            try:
+                _os.replace(tmp, RULE_PRESETS_FILE)
+                break
+            except PermissionError:
+                if attempt == 3:
+                    raise
+                _time.sleep(0.05 * (attempt + 1))
+    finally:
+        tmp.unlink(missing_ok=True)
+    return {"ok": True, "count": len(cleaned)}
+
+
 @app.get("/api/health")
 def health():
     return {"ok": True, "library_size": len(airfoils.library_names())}

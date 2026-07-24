@@ -234,24 +234,8 @@ def _validate(cfg: StackConfig) -> None:
         if not (math.isfinite(m.min_thickness_mm)
                 and 0.0 <= m.min_thickness_mm <= 50.0):
             raise ValueError("min_thickness_mm must be 0..50 mm")
-    env = cfg.rule_envelope
-    if env is not None:
-        for name, lo, hi in (("max_length_mm", 10.0, 20000.0),
-                             ("max_height_mm", 1.0, 5000.0),
-                             ("min_ground_clearance_mm", 0.0, 1000.0)):
-            v = getattr(env, name)
-            if v is not None and not (math.isfinite(v) and lo <= v <= hi):
-                raise ValueError(f"rule_envelope.{name} must be a finite "
-                                 f"value in {lo}..{hi} mm (or omitted)")
-        if not (math.isfinite(env.x_offset_mm)
-                and -20000.0 <= env.x_offset_mm <= 20000.0):
-            raise ValueError("rule_envelope.x_offset_mm must be a finite "
-                             "value in -20000..20000 mm")
-        if (env.max_height_mm is not None
-                and env.min_ground_clearance_mm is not None
-                and env.min_ground_clearance_mm >= env.max_height_mm):
-            raise ValueError("rule_envelope: min_ground_clearance_mm must be "
-                             "below max_height_mm — the box is empty")
+    if cfg.rule_envelope is not None:
+        _validate_envelope(cfg.rule_envelope)
     for i, e in enumerate(cfg.elements):
         for f, lo, hi in (("chord_ratio", 0.05, 1.0),
                           ("deflection_deg", -90.0, 90.0),
@@ -279,6 +263,35 @@ def _validate(cfg: StackConfig) -> None:
             v = getattr(e, f)
             if v is not None and not (math.isfinite(v) and lo <= v <= hi):
                 raise ValueError(f"element {i+1}: {f} must be {lo}..{hi} %c")
+
+
+def _validate_envelope(env: RuleEnvelopeSpec) -> None:
+    import math
+    for name, lo, hi in (("max_length_mm", 10.0, 20000.0),
+                         ("max_height_mm", 1.0, 5000.0),
+                         ("min_ground_clearance_mm", 0.0, 1000.0)):
+        v = getattr(env, name)
+        if v is not None and not (math.isfinite(v) and lo <= v <= hi):
+            raise ValueError(f"rule_envelope.{name} must be a finite "
+                             f"value in {lo}..{hi} mm (or omitted)")
+    if not (math.isfinite(env.x_offset_mm)
+            and -20000.0 <= env.x_offset_mm <= 20000.0):
+        raise ValueError("rule_envelope.x_offset_mm must be a finite "
+                         "value in -20000..20000 mm")
+    if (env.max_height_mm is not None
+            and env.min_ground_clearance_mm is not None
+            and env.min_ground_clearance_mm >= env.max_height_mm):
+        raise ValueError("rule_envelope: min_ground_clearance_mm must be "
+                         "below max_height_mm — the box is empty")
+
+
+def validate_rule_envelope(d: dict) -> RuleEnvelopeSpec:
+    """Parse + validate a bare envelope dict (the rule-preset endpoints use
+    this — presets are envelopes without a surrounding config). Raises
+    ValueError with the same messages the config validator gives."""
+    env = RuleEnvelopeSpec.from_dict(d)
+    _validate_envelope(env)
+    return env
 
 
 def rotate(coords: np.ndarray, deg: float, center=(0.0, 0.0)) -> np.ndarray:
@@ -507,6 +520,15 @@ def envelope_check(installed: list[dict], cfg: StackConfig) -> dict | None:
             "by_mm": round(env.min_ground_clearance_mm - bottom, 2)})
     return {
         "ok": not violations,
+        # echo the limits so every consumer (viewport box, warnings,
+        # optimizer messages) draws from this one object
+        "envelope": {
+            "max_length_mm": env.max_length_mm,
+            "max_height_mm": env.max_height_mm,
+            "min_ground_clearance_mm": env.min_ground_clearance_mm,
+            "x_offset_mm": env.x_offset_mm,
+            "preset_name": env.preset_name,
+        },
         "extents_mm": {"length": round(length, 2), "top": round(top, 2),
                        "bottom": round(bottom, 2)},
         "violations": violations,

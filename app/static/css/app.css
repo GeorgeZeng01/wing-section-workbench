@@ -337,6 +337,12 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
 .dim-label { font: 10.5px var(--mono); fill: var(--steel); }
 .dim-label-bg { fill: var(--plane); opacity: 0.75; }
 .cp-mark { stroke: var(--warning); stroke-width: 1.3; }
+.rule-line { stroke: var(--steel); stroke-width: 1.1; stroke-dasharray: 7 5;
+             fill: none; opacity: 0.65; }
+.rule-line.rule-clearance { stroke-dasharray: 3 4; }
+.rule-line.viol { stroke: var(--warning); opacity: 1; stroke-width: 1.5; }
+.rule-label { font: 10.5px var(--mono); fill: var(--steel); opacity: 0.85; }
+.rule-label.viol { fill: var(--warning); opacity: 1; }
 .chart-empty { fill: var(--ink-3); font: 12px var(--sans); }
 
 /* ---------------- results ---------------- */

@@ -53,6 +53,7 @@ const state = {
   screenRows: null,
   screenSort: { key: "CL_max", dir: -1 },
   screenShowLowConf: false,
+  rulePresets: [],            // machine-level rule-envelope library
 };
 
 const viewport = new Viewport($("viewport"));
@@ -111,6 +112,16 @@ function writeConfigToForm() {
     $("mfg-te").value = m.te_gap_mm ?? 1.2;
     $("mfg-mode").value = m.te_mode || "thicken";
     $("mfg-tmin").value = m.min_thickness_mm ?? 0;
+  }
+  const env = state.config.rule_envelope;
+  $("rules-on").checked = !!env;
+  $("rules-body").hidden = !env;
+  if (env) {
+    $("rule-len").value = env.max_length_mm ?? "";
+    $("rule-height").value = env.max_height_mm ?? "";
+    $("rule-clear").value = env.min_ground_clearance_mm ?? "";
+    $("rule-xoff").value = env.x_offset_mm ?? 0;
+    $("rule-preset").value = env.preset_name ?? "";
   }
   buildElementCards();
   updateTargetC();
@@ -197,6 +208,129 @@ function bindManufacturing() {
       state.config.manufacturing = readMfgForm();
       onConfigChanged();
     });
+  }
+}
+
+/* ---------------- rules envelope ---------------- */
+
+function readRulesForm() {
+  const num = (id) => {
+    const v = parseFloat($(id).value);
+    return Number.isFinite(v) ? v : null;
+  };
+  const env = {
+    max_length_mm: num("rule-len"),
+    max_height_mm: num("rule-height"),
+    min_ground_clearance_mm: num("rule-clear"),
+    x_offset_mm: num("rule-xoff") ?? 0,
+  };
+  const preset = $("rule-preset").value;
+  if (preset) env.preset_name = preset;
+  return env;
+}
+
+function bindRules() {
+  $("rules-on").addEventListener("change", () => {
+    if ($("rules-on").checked) {
+      state.config.rule_envelope = readRulesForm();
+    } else {
+      delete state.config.rule_envelope;
+    }
+    $("rules-body").hidden = !$("rules-on").checked;
+    onConfigChanged();
+  });
+  for (const id of ["rule-len", "rule-height", "rule-clear", "rule-xoff"]) {
+    $(id).addEventListener("input", () => {
+      if (!$("rules-on").checked) return;
+      $("rule-preset").value = "";   // hand edits leave the preset behind
+      state.config.rule_envelope = readRulesForm();
+      onConfigChanged();
+    });
+  }
+  $("rule-preset").addEventListener("change", () => {
+    const name = $("rule-preset").value;
+    const p = state.rulePresets.find((x) => x.name === name);
+    if (p) {
+      $("rule-len").value = p.envelope.max_length_mm ?? "";
+      $("rule-height").value = p.envelope.max_height_mm ?? "";
+      $("rule-clear").value = p.envelope.min_ground_clearance_mm ?? "";
+      $("rule-xoff").value = p.envelope.x_offset_mm ?? 0;
+      $("rule-preset-name").value = name;
+    }
+    if (!$("rules-on").checked) return;
+    state.config.rule_envelope = readRulesForm();
+    onConfigChanged();
+  });
+  $("rule-preset-save").addEventListener("click", saveRulePreset);
+  $("rule-preset-del").addEventListener("click", deleteRulePreset);
+}
+
+function renderRulePresetOptions() {
+  const sel = $("rule-preset");
+  const cur = state.config.rule_envelope?.preset_name || "";
+  sel.innerHTML = "";
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "— none —";
+  sel.appendChild(none);
+  for (const p of state.rulePresets) {
+    const o = document.createElement("option");
+    o.value = p.name;
+    o.textContent = p.name;     // textContent: preset names are user data
+    sel.appendChild(o);
+  }
+  sel.value = state.rulePresets.some((p) => p.name === cur) ? cur : "";
+}
+
+async function loadRulePresets() {
+  try {
+    const res = await api.rulePresets();
+    state.rulePresets = res.presets || [];
+  } catch {
+    state.rulePresets = [];    // endpoint unreachable: an empty library
+  }
+  renderRulePresetOptions();
+}
+
+async function saveRulePreset() {
+  const name = ($("rule-preset-name").value || "").trim();
+  if (!name) { toast("Give the preset a name first."); return; }
+  const env = readRulesForm();
+  delete env.preset_name;
+  if (env.max_length_mm == null && env.max_height_mm == null
+      && env.min_ground_clearance_mm == null) {
+    toast("Enter at least one rule limit before saving.");
+    return;
+  }
+  const presets = [...state.rulePresets.filter((p) => p.name !== name),
+                   { name, envelope: env }]
+    .sort((a, b) => a.name.localeCompare(b.name));
+  try {
+    await api.rulePresetsSave(presets);
+    state.rulePresets = presets;
+    renderRulePresetOptions();
+    $("rule-preset").value = name;
+    if ($("rules-on").checked) {
+      state.config.rule_envelope = readRulesForm();
+      onConfigChanged();
+    }
+    toast(`Rule preset "${name}" saved.`, "good");
+  } catch (e) {
+    toast(`Preset not saved: ${e.message}`);
+  }
+}
+
+async function deleteRulePreset() {
+  const name = $("rule-preset").value;
+  if (!name) { toast("Select a preset to delete."); return; }
+  const presets = state.rulePresets.filter((p) => p.name !== name);
+  try {
+    await api.rulePresetsSave(presets);
+    state.rulePresets = presets;
+    renderRulePresetOptions();
+    toast(`Rule preset "${name}" deleted.`, "good");
+  } catch (e) {
+    toast(`Preset not deleted: ${e.message}`);
   }
 }
 
@@ -532,6 +666,18 @@ function buildViewportLegend() {
 // the viewport always draws as driven (inverted, ground at y = 0) — the
 // orientation the analysis uses; upright output lives in the Export tab
 $("vp-dims").addEventListener("change", (e) => viewport.setDims(e.target.checked));
+$("vp-rules").addEventListener("change", (e) => {
+  viewport.setRules(e.target.checked);
+  try {
+    localStorage.setItem("wss-show-rules", e.target.checked ? "1" : "0");
+  } catch { /* storage blocked — the toggle just resets next launch */ }
+});
+try {
+  if (localStorage.getItem("wss-show-rules") === "0") {
+    $("vp-rules").checked = false;
+    viewport.setRules(false);
+  }
+} catch { /* default stays on */ }
 $("vp-fit").addEventListener("click", () => viewport.fit());
 
 /* ---------------- analysis + results ---------------- */
@@ -1939,7 +2085,9 @@ async function restoreSession() {
 async function boot() {
   bindConfigInputs();
   bindManufacturing();
+  bindRules();
   loadPresets();
+  loadRulePresets();
   checkHealth();
   setInterval(checkHealth, 20000);
   // the desktop launcher's browser fallback reads request activity as "the

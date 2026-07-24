@@ -20,6 +20,7 @@ export class Viewport {
     this.chordMm = 350;
     this.frame = "installed";
     this.showDims = true;
+    this.showRules = true;
     this.xcp = null;           // center of pressure, stack units, or null
     this.view = null;          // {s, ox, oy}
     this._bindNav();
@@ -34,6 +35,7 @@ export class Viewport {
 
   setFrame(f) { this.frame = f; this.fit(); }
   setDims(v) { this.showDims = v; this.render(); }
+  setRules(v) { this.showRules = v; this.render(); }
   setCp(x) { this.xcp = x; this.render(); }
 
   elements() {
@@ -154,6 +156,66 @@ export class Viewport {
     this._dimLabel(g, (xA + xB) / 2, y - 7, label);
   }
 
+  _ruleLabel(svg, x, y, text, viol, anchor = "start") {
+    const t = el("text", { x, y, class: `rule-label${viol ? " viol" : ""}`,
+                           "text-anchor": anchor }, svg);
+    t.textContent = text;
+  }
+
+  _drawRules(svg) {
+    const r = this.geo.rules;
+    const env = r.envelope || {};
+    const mm = this.chordMm;
+    const viol = {};                       // edge -> violation record
+    for (const v of r.violations || []) viol[v.edge] = v;
+    const { x0, x1, y1 } = this.bbox();
+    const cls = (edge) => `rule-line${viol[edge] ? " viol" : ""}`;
+    // box anchor: the stack's leading extent plus the user's offset — the
+    // length rule constrains extent, not position, so the box just frames
+    // the stack where it sits
+    const xL = x0 + (env.x_offset_mm || 0) / mm;
+    const len = env.max_length_mm != null ? env.max_length_mm / mm : null;
+    const hTop = env.max_height_mm != null ? env.max_height_mm / mm : null;
+    const clr = env.min_ground_clearance_mm != null
+      ? env.min_ground_clearance_mm / mm : null;
+    const xR = len != null ? xL + len : Math.max(x1, xL);
+    const yTop = hTop != null ? hTop : y1 * 1.15;
+    const padC = 14 / this.view.s;          // 14 px in world units
+    const [pxL, pyG] = this.P(xL, 0);
+    const [pxR] = this.P(xR, 0);
+    const [, pyT] = this.P(0, yTop);
+    if (len != null) {
+      el("line", { x1: pxL, y1: pyG, x2: pxL, y2: pyT, class: cls("length") }, svg);
+      el("line", { x1: pxR, y1: pyG, x2: pxR, y2: pyT, class: cls("length") }, svg);
+      if (viol.length) {
+        this._ruleLabel(svg, pxR + 6, (pyG + pyT) / 2,
+                        `max length +${viol.length.by_mm.toFixed(1)} mm`, true);
+      }
+    }
+    if (hTop != null) {
+      const [hx0] = this.P(xL - padC, 0);
+      const [hx1] = this.P(xR + padC, 0);
+      el("line", { x1: hx0, y1: pyT, x2: hx1, y2: pyT, class: cls("top") }, svg);
+      const v = viol.top;
+      this._ruleLabel(svg, hx1 - 2, pyT - 5,
+                      v ? `max height +${v.by_mm.toFixed(1)} mm`
+                        : `${env.max_height_mm} mm`, !!v, "end");
+    }
+    if (clr != null) {
+      const [cx0, cy] = this.P(xL - padC, clr);
+      const [cx1] = this.P(xR + padC, clr);
+      el("line", { x1: cx0, y1: cy, x2: cx1, y2: cy,
+                   class: `${cls("bottom")} rule-clearance` }, svg);
+      const v = viol.bottom;
+      this._ruleLabel(svg, cx0 + 2, cy + 14,
+                      v ? `min clearance −${v.by_mm.toFixed(1)} mm`
+                        : `clearance ${env.min_ground_clearance_mm} mm`, !!v);
+    }
+    if (env.preset_name && (len != null || hTop != null)) {
+      this._ruleLabel(svg, pxL + 4, pyT - 5, env.preset_name, false);
+    }
+  }
+
   render() {
     const svg = this.svg;
     svg.innerHTML = "";
@@ -177,6 +239,12 @@ export class Viewport {
                      fill: "url(#gnd-hatch)", opacity: 0.8 }, svg);
         el("line", { x1: 0, y1: gy, x2: W, y2: gy, class: "ground-line" }, svg);
       }
+    }
+
+    // rule envelope: light dashed box behind the elements, violated edges
+    // in the warning color with the overshoot called out in mm
+    if (this.frame === "installed" && this.showRules && this.geo.rules) {
+      this._drawRules(svg);
     }
 
     // elements
