@@ -161,6 +161,7 @@ class ExportBody(BaseModel):
     frame: Literal["installed", "design"] = "installed"
     entity: Literal["spline", "polyline"] = "spline"
     include_analysis: bool = True
+    include_hitbox: bool = False
 
 
 class CfdExportBody(BaseModel):
@@ -471,7 +472,8 @@ def _export_bytes(fmt: str, body: ExportBody) -> tuple[bytes, str, str]:
     media, ext = _EXPORT_TYPES[fmt]
     try:
         if fmt == "dxf":
-            data = export.dxf_bytes(cfg, body.frame, body.entity)
+            data = export.dxf_bytes(cfg, body.frame, body.entity,
+                                    include_hitbox=body.include_hitbox)
         elif fmt == "svg":
             data = export.svg_bytes(cfg, body.frame)
         elif fmt == "csv":

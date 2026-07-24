@@ -1877,7 +1877,8 @@ document.querySelectorAll("[data-export]").forEach((b) => {
   b.addEventListener("click", async () => {
     busy(b, true);
     const fmt = b.dataset.export;
-    const options = { frame: $("exp-frame").value, entity: $("exp-entity").value };
+    const options = { frame: $("exp-frame").value, entity: $("exp-entity").value,
+                      include_hitbox: $("exp-hitbox").checked };
     try {
       const saved = await api.exportSave(fmt, state.config, options);
       lastExport = { ...saved, fmt, options };

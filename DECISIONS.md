@@ -1095,6 +1095,16 @@ automatically. Alternative considered: presets inside each project file —
 rejected, a new project would start with an empty rulebook and teams would
 re-type the season's numbers per project.
 
+**DXF bounding box: 4 LINEs on a dedicated HITBOX layer, off by default.**
+Horizontals touch the stack's lowest/highest points, verticals its
+leftmost/rightmost — instant overall dimensions in CAD, deletable in one
+action by killing the layer. Options considered: (a) a closed LWPOLYLINE —
+rejected, four independent lines match how CAD users measure and trim
+against reference geometry, and either dies with the layer anyway;
+(b) always-on — rejected, most exports feed lofts where any non-contour
+geometry is noise. Available in both frames (the design frame has no
+ground line, but its box is still meaningful).
+
 ## Known limitations
 
 Documented, not fixed. The custom-airfoil registry lives in server memory
