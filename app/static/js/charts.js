@@ -3,6 +3,13 @@
 
 const NS = "http://www.w3.org/2000/svg";
 
+// axis labels and series names can carry text originating from a project
+// file; the tooltip renders them via innerHTML, so escape at the sink
+function esc(v) {
+  return String(v).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
 function el(tag, attrs = {}, parent = null) {
   const n = document.createElementNS(NS, tag);
   for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
@@ -208,17 +215,12 @@ export function lineChart(container, spec) {
       dots[si].style.display = "";
       dots[si].setAttribute("cx", X(sx));
       dots[si].setAttribute("cy", Y(sy));
-      // series names can carry user/file-originated text — escape them,
-      // this string lands in the tooltip via innerHTML
-      const safeName = String(s.name).replace(/[&<>"']/g, (c) =>
-        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;",
-           '"': "&quot;", "'": "&#39;" }[c]));
       rows.push(`<span class="tip-swatch" style="background:${s.color}"></span>` +
-                `${safeName}&nbsp;<b>${fmt(sy)}</b>`);
+                `${esc(s.name)}&nbsp;<b>${fmt(sy)}</b>`);
       cross.setAttribute("x1", X(sx));
       cross.setAttribute("x2", X(sx));
     });
-    tipG.innerHTML = `<div class="tip-x">${spec.xLabel || "x"} = ${fmt(xv)}</div>` +
+    tipG.innerHTML = `<div class="tip-x">${esc(spec.xLabel || "x")} = ${fmt(xv)}</div>` +
                      rows.map(r => `<div>${r}</div>`).join("");
     tipG.style.display = "";
     const cx = (ev.clientX - r.left);

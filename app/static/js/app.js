@@ -723,18 +723,29 @@ const persistSession = debounce(() => {
 // the app right after opening it) would overwrite the user's saved work
 // with the blank starting state.
 let sessionReady = false;
+function beacon(state) {
+  try {
+    return navigator.sendBeacon("/api/session",
+      new Blob([JSON.stringify({ state })], { type: "application/json" }));
+  } catch { return false; }
+}
 function flushSession() {
   if (!sessionReady) return;
   try {
     const snap = sessionSnapshot();
     try { localStorage.setItem("wss-session", JSON.stringify(snap)); } catch {}
     // the beacon quota is ~64 KB — a results-bearing snapshot can exceed it
-    // and be silently dropped. That is acceptable: the debounced writer
-    // already posted the full state moments ago, and restoreSession picks
-    // the NEWER of server/localStorage by timestamp, so a same-origin
-    // reload still gets the very last edits from localStorage.
-    navigator.sendBeacon("/api/session",
-      new Blob([JSON.stringify({ state: snap })], { type: "application/json" }));
+    // and be dropped. On a same-origin reload localStorage covers the gap,
+    // but the desktop shell serves a fresh origin each launch, so a dropped
+    // beacon at close would lose the last edits. If the full beacon is
+    // refused, retry with a results-stripped snapshot: the design, target
+    // and pins are tiny and always fit, so the configuration never gets
+    // lost even when the heavy results do (the debounced POST carried those
+    // moments earlier).
+    if (!beacon(snap)) {
+      const { results, ...lean } = snap;
+      beacon(lean);
+    }
   } catch { /* best effort */ }
 }
 window.addEventListener("pagehide", flushSession);
@@ -935,7 +946,12 @@ async function runAnalysis() {
   } catch (e) {
     if (seq === analyzeSeq) toast(`Analysis failed: ${e.message}`);
   } finally {
-    if (seq === analyzeSeq) busy(btn, false);
+    if (seq === analyzeSeq) {
+      busy(btn, false);
+      // if the config went geometry-invalid mid-run, busy(false) would have
+      // re-enabled a button applyGeoValidity meant to keep disabled
+      applyGeoValidity();
+    }
   }
 }
 
@@ -1165,13 +1181,20 @@ function renderPins() {
     apply.title = "Restore this pinned design (replaces the configuration " +
                   "and re-analyzes)";
     apply.addEventListener("click", async () => {
+      // restoring a pin is a full context switch, exactly like open/preset:
+      // it must not swap the config out from under a running job, and the
+      // previous design's results must not survive to render under, be
+      // pinned against, or persist/export with the restored one
+      if (jobsRunning()) {
+        toast("A run is still using the solver — wait for it to finish or " +
+              "cancel it before restoring a pin.", "info", 6000);
+        return;
+      }
       busy(apply, true);
       state.config = withDefaults(structuredClone(p.config));
       state.target = p.target;
-      // the config changed wholesale: everything computed for the previous
-      // design is now stale (RANS verdicts, maps, the k_g offer)
       configRevision++;
-      markStale();
+      resetWorkspaceResults();
       writeConfigToForm();
       persistSession();
       await refreshGeometry();
@@ -1489,6 +1512,9 @@ function setOptControlsLocked(on) {
     syncOptModeUI();
     syncOptimizerVars();
     syncAfPool();
+    // the config may have become geometry-invalid during the run — Run must
+    // stay disabled with its reason rather than being blanket re-enabled
+    applyGeoValidity();
   }
 }
 
@@ -1701,8 +1727,11 @@ function renderOptimizer(s) {
       `<div class="kv"><span>E${i + 1} airfoil</span><b>${esc(a)}</b></div>`).join("");
     const rows = afRows + s.variables.map((v, i) => {
       if (v.key === "airfoil_idx") return "";   // shown by name above
+      // v.elem is file-controlled; only a real integer becomes an "E#"
+      // prefix, so a crafted string can neither inject markup nor print NaN
+      const eLbl = Number.isInteger(v.elem) ? `E${v.elem + 1} ` : "";
       const label = v.elem == null ? "stack angle"
-        : `E${v.elem + 1} ${NAMES[v.key] || esc(v.key)}`;
+        : `${eLbl}${NAMES[v.key] || esc(v.key)}`;
       const val = +(s.best.x?.[i]);
       if (!Number.isFinite(val)) return "";
       const unit =
@@ -2468,6 +2497,7 @@ async function runSweep() {
     toast(`Sweep failed: ${e.message}`);
   } finally {
     busy(btn, false);
+    applyGeoValidity();   // re-gate if the config went invalid mid-sweep
   }
 }
 
@@ -2622,8 +2652,8 @@ async function refreshRansAvailability() {
   // active row as "our" verify job — cancelling it would silently kill the
   // queue, and its result describes a shortlist candidate, not the current
   // configuration
-  let queue = null;
-  try { ({ queue } = await api.ransQueueCurrent()); } catch {}
+  let queue = null, queueProbeOk = false;
+  try { ({ queue } = await api.ransQueueCurrent()); queueProbeOk = true; } catch {}
   const queueLive = queue && ["pending", "running"].includes(queue.state);
   state.queueActive = !!queueLive;
   if (queueLive) {
@@ -2633,7 +2663,11 @@ async function refreshRansAvailability() {
       `the optimizer's re-rank queue is using the solver${act}. Its ` +
       `progress and results live in the Optimizer tab.`;
     updateSolverButtons();
-  } else if (!state.ransJob) {
+  } else if (!state.ransJob && queueProbeOk) {
+    // only re-attach an unknown solver job when we actually KNOW there is no
+    // queue: if the queue probe failed we cannot tell whether the active job
+    // is a queue row, and adopting it as "our" verify run would let Cancel
+    // silently kill the queue
     // a job the page does not know about (reload, second window, dropped
     // poll) is re-attached — unless it was a queue row, whose result
     // belongs to the Optimizer tab, not to the current config. A LIVE run
@@ -2702,7 +2736,16 @@ $("btn-rans-stop").addEventListener("click", async () => {
 });
 
 async function startRansVerify() {
+  // click-time single-flight: the mutex is otherwise only on button.disabled,
+  // which two near-simultaneous triggers (a click plus Enter) can both pass
+  // before the async ransStart lands and the server 409s
+  if (state.ransJob || state.queueActive) {
+    toast("The solver is already busy — wait for the current run or the " +
+          "re-rank queue to finish.", "info");
+    return;
+  }
   const iters = parseInt($("rans-iters").value, 10);
+  $("btn-rans-run").disabled = true;   // close the window before the await
   try {
     const { job_id } = await api.ransStart(
       state.config, $("rans-mesh").value,
@@ -2727,6 +2770,11 @@ async function startRansVerify() {
     pollRans();
   } catch (e) {
     toast(`Could not start the RANS run: ${e.message}`);
+    // the run never started — restore the mesh/iter controls and re-gate
+    // the button (it was disabled to close the double-start window)
+    $("rans-mesh").disabled = false;
+    $("rans-iters").disabled = false;
+    updateSolverButtons();
   }
 }
 
@@ -3185,15 +3233,15 @@ async function buildReport() {
     ]) +
     `<table class="grid"><tr><th>Element</th><th>Cl</th><th>CL_max</th>` +
     `<th>Loading</th><th>Ground ×</th></tr>` +
-    a.elements.map((e, i) =>
+    (a.elements || []).map((e, i) =>
       `<tr><td>E${i + 1} ${esc(e.role)}</td><td>${fmtN(e.Cl_checked, 2)}</td>` +
       `<td>${fmtN(e.CL_max_isolated, 2)}</td>` +
-      `<td>${(e.loading_fraction * 100).toFixed(0)}%</td>` +
+      `<td>${numf(e.loading_fraction != null ? e.loading_fraction * 100 : null, 0)}%</td>` +
       `<td>${fmtN(e.ground_multiplier, 1)}</td></tr>`).join("") +
     `</table>` +
-    (a.warnings.length
+    ((a.warnings || []).length
       ? `<div class="warn"><b>Warnings</b><ul>` +
-        a.warnings.map(w => `<li>${esc(w)}</li>`).join("") + `</ul></div>`
+        (a.warnings || []).map(w => `<li>${esc(w)}</li>`).join("") + `</ul></div>`
       : ""));
   }
 
@@ -3215,7 +3263,7 @@ async function buildReport() {
                          s.near_stall ? "near stall" : "",
                          s.slot_signature ? "slot corner" : ""]
             .filter(Boolean).join(", ") || "clean";
-          return `<tr><td>${cd.rank}</td>` +
+          return `<tr><td>${esc(cd.rank)}</td>` +
             `<td>${fmtN(s.downforce_n ?? cd.downforce_n, 0)} N</td>` +
             `<td>${fmtN(s.drag_total_n ?? cd.drag_n, 1)} N</td>` +
             `<td>${s.efficiency_ld != null ? fmtN(s.efficiency_ld, 1) : "–"}</td>` +
@@ -3253,7 +3301,7 @@ async function buildReport() {
       `<table class="grid"><tr><th>#</th><th>Design</th><th>Panel N</th>` +
       `<th>RANS N</th><th>Δ%</th><th>Verdict</th></tr>` +
       state.ransRerank.map(r =>
-        `<tr><td>${r.rank ?? "–"}</td><td>${esc(r.label)}</td>` +
+        `<tr><td>${esc(r.rank ?? "–")}</td><td>${esc(r.label)}</td>` +
         `<td>${r.panel_downforce_n != null ? fmtN(r.panel_downforce_n, 0) : "–"}</td>` +
         `<td>${r.rans_downforce_n != null ? fmtN(r.rans_downforce_n, 0) : "–"}</td>` +
         `<td>${r.delta_cl_pct != null
@@ -3372,9 +3420,11 @@ async function loadPresets() {
         return;
       }
       const p = presets[+sel.value];
-      // a preset is a new design context: the old workspace's results
-      // must not survive under it
+      // a preset is a fresh project: the old workspace's results AND its
+      // pins (which belonged to the previous design context) must not carry
+      // over — file-open replaces pins with the file's, a preset has none
       resetWorkspaceResults();
+      state.pins = [];
       configRevision++;
       state.config = withDefaults(structuredClone(p.config));
       state.target = p.target_downforce_n ?? state.target;
@@ -3656,7 +3706,10 @@ async function restoreSession() {
   const valid = (s) => !!s?.config?.elements?.length;
   let saved = null;
   if (valid(server) && valid(local)) {
-    saved = (+local.t || 0) > (+server.t || 0) ? local : server;
+    // prefer the newer snapshot; on a tie prefer localStorage, which always
+    // holds the FULL snapshot — at close both copies share a timestamp but
+    // the server one may be the results-stripped beacon fallback
+    saved = (+local.t || 0) >= (+server.t || 0) ? local : server;
   } else {
     saved = valid(server) ? server : (valid(local) ? local : null);
   }
