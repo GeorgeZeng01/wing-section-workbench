@@ -51,6 +51,12 @@ def knee_of(front):
 
 
 def main() -> int:
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--prefix", default="stage3",
+                    help="output filename prefix (stage3 = the pre-review "
+                         "record; use a new prefix per optimizer revision)")
+    args = ap.parse_args()
     job = optimizer.Job(dict(BASELINE),
                         {"objective": "max_downforce", "mode": "global",
                          "budget": 1500})
@@ -60,19 +66,19 @@ def main() -> int:
         print(f"run did not finish usable: {s['state']} {s['error']}")
         return 1
     w = s["candidates"][0]
-    (OUT / "stage3_maxdf_winner.json").write_text(
+    (OUT / f"{args.prefix}_maxdf_winner.json").write_text(
         json.dumps(w["config"], indent=1), encoding="utf-8")
     ws = w["summary"]
     print(f"max-downforce winner: {ws['downforce_n']:.1f} N, "
           f"drag {ws['drag_total_n']:.2f} N, frac_max {ws['frac_max']:.3f} "
-          f"-> docs/calibration/stage3_maxdf_winner.json")
+          f"-> docs/calibration/{args.prefix}_maxdf_winner.json")
     knee = knee_of(s["pareto"] or [])
     if knee is not None:
-        (OUT / "stage3_pareto_knee.json").write_text(
+        (OUT / f"{args.prefix}_pareto_knee.json").write_text(
             json.dumps(knee["config"], indent=1), encoding="utf-8")
         print(f"pareto knee: {knee['downforce_n']:.1f} N, "
               f"drag {knee['drag_n']:.2f} N "
-              f"-> docs/calibration/stage3_pareto_knee.json")
+              f"-> docs/calibration/{args.prefix}_pareto_knee.json")
     return 0
 
 
