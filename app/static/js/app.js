@@ -54,6 +54,8 @@ const state = {
   screenSort: { key: "CL_max", dir: -1 },
   screenShowLowConf: false,
   rulePresets: [],            // machine-level rule-envelope library
+  ransRerank: null,           // last RANS re-rank rows (session-persisted)
+  rerankPoll: null,
 };
 
 const viewport = new Viewport($("viewport"));
@@ -550,7 +552,8 @@ function sessionSnapshot() {
     }
   }
   return { config: state.config, target: state.target,
-           airfoil_names: state.airfoilNames, custom_airfoils: custom };
+           airfoil_names: state.airfoilNames, custom_airfoils: custom,
+           rans_rerank: state.ransRerank };
 }
 
 // the desktop shell serves on a fresh port (= new origin) every launch, so
@@ -1054,6 +1057,11 @@ function pollOptimizer() {
         if (s.best_config) {
           state.optResult = s;
           $("btn-opt-apply").disabled = false;
+          // the shortlist exists now — offer the RANS re-rank
+          if (s.candidates && s.candidates.length) {
+            $("rerank-title").hidden = false;
+            $("rerank-block").hidden = false;
+          }
         } else if (s.state === "done") {
           $("opt-best-body").textContent =
             "The run finished without a usable design — nothing to apply. " +
@@ -1185,6 +1193,140 @@ function renderPareto(s) {
     note.hidden = true;
   }
 }
+
+/* ---------------- RANS re-rank of the shortlist ---------------- */
+
+function rerankItems() {
+  const s = state.optResult;
+  if (!s || !s.candidates || !s.candidates.length) return [];
+  const items = s.candidates.map((c) => ({
+    label: `candidate #${c.rank} — ` +
+           `${fmtN(c.summary?.downforce_n ?? c.downforce_n, 0)} N`,
+    config: c.config,
+    _x: JSON.stringify(c.x),
+  }));
+  // add the Pareto knee: the front point farthest from the line between
+  // the extremes (normalized axes) — the classic best-trade-off pick
+  const front = s.pareto || [];
+  if (front.length >= 3) {
+    const dn = front.map(p => p.downforce_n);
+    const dr = front.map(p => p.drag_n);
+    const dnS = Math.max(...dn) - Math.min(...dn) || 1;
+    const drS = Math.max(...dr) - Math.min(...dr) || 1;
+    const a = front[0], b = front[front.length - 1];
+    const ax = a.drag_n / drS, ay = a.downforce_n / dnS;
+    const bx = b.drag_n / drS, by = b.downforce_n / dnS;
+    const len = Math.hypot(bx - ax, by - ay) || 1;
+    let knee = null, kd = 0;
+    for (const p of front) {
+      const px = p.drag_n / drS, py = p.downforce_n / dnS;
+      const d = Math.abs((bx - ax) * (ay - py) - (ax - px) * (by - ay)) / len;
+      if (d > kd) { kd = d; knee = p; }
+    }
+    if (knee && !items.some(it => it._x === JSON.stringify(knee.x))) {
+      items.push({ label: `pareto knee — ${fmtN(knee.downforce_n, 0)} N`,
+                   config: knee.config, _x: "" });
+    }
+  }
+  return items.slice(0, 8).map(({ label, config }) => ({ label, config }));
+}
+
+async function startRerank() {
+  const items = rerankItems();
+  if (!items.length) {
+    toast("Run the optimizer first — the queue verifies its shortlist.");
+    return;
+  }
+  busy($("btn-rerank"), true);
+  try {
+    await api.ransQueueStart(items, $("rr-mesh").value);
+    $("btn-rerank-cancel").disabled = false;
+    pollRerank();
+  } catch (e) {
+    toast(`Could not start the verification queue: ${e.message}`);
+    busy($("btn-rerank"), false);
+  }
+}
+
+function pollRerank() {
+  clearInterval(state.rerankPoll);
+  state.rerankPoll = setInterval(async () => {
+    try {
+      const { queue } = await api.ransQueueCurrent();
+      if (!queue) return;
+      renderRerank(queue);
+      if (["done", "failed", "cancelled"].includes(queue.state)) {
+        clearInterval(state.rerankPoll);
+        busy($("btn-rerank"), false);
+        $("btn-rerank-cancel").disabled = true;
+        if (queue.state === "failed") {
+          toast(`Verification queue failed: ${queue.error}`);
+        }
+        state.ransRerank = queue.rows;
+        persistSession();
+      }
+    } catch { /* transient poll miss — the next tick retries */ }
+  }, 2000);
+}
+
+function renderRerank(q) {
+  const rows = q.rows || [];
+  const status = $("rerank-status");
+  if (q.state) {
+    const act = (q.active != null && rows[q.active])
+      ? ` — solving ${rows[q.active].label}` : "";
+    status.textContent = `${q.state}${act} · ${q.mesh_size || ""} mesh · ` +
+                         `${Math.round(q.elapsed_s || 0)}s`;
+  } else {
+    status.textContent = "last verification (restored with the session)";
+  }
+  const host = $("rerank-table");
+  host.innerHTML = "";
+  if (!rows.length) return;
+  const tbl = document.createElement("table");
+  tbl.className = "rr-table";
+  const head = tbl.insertRow();
+  for (const h of ["#", "design", "panel N", "RANS N", "Δ%", "verdict",
+                   "state", ""]) {
+    const th = document.createElement("th");
+    th.textContent = h;
+    head.appendChild(th);
+  }
+  for (const r of rows) {
+    const tr = tbl.insertRow();
+    if (!r.converged) tr.className = "dim";
+    const cells = [
+      r.rank ?? "–", r.label,
+      r.panel_downforce_n != null ? fmtN(r.panel_downforce_n, 0) : "–",
+      r.rans_downforce_n != null ? fmtN(r.rans_downforce_n, 0) : "–",
+      r.delta_cl_pct != null
+        ? `${r.delta_cl_pct > 0 ? "+" : ""}${fmtN(r.delta_cl_pct, 1)}` : "–",
+      (r.verdict || "–") + (r.mesh_caution ? " · coarse mesh" : ""),
+      r.state + (r.error ? ` (${String(r.error).slice(0, 60)})` : ""),
+    ];
+    for (const c of cells) {
+      const td = tr.insertCell();
+      td.textContent = String(c);   // labels/errors are data, not markup
+    }
+    const td = tr.insertCell();
+    if (r.config) {
+      const b = document.createElement("button");
+      b.className = "btn tiny";
+      b.textContent = "Apply";
+      b.addEventListener("click", () => applyDesign(r.config));
+      td.appendChild(b);
+    }
+    const vd = tr.cells[5];
+    if (r.verdict === "over-claims") vd.style.color = "var(--warning)";
+    if (r.verdict === "healthy band") vd.style.color = "var(--good)";
+  }
+  host.appendChild(tbl);
+}
+
+$("btn-rerank").addEventListener("click", startRerank);
+$("btn-rerank-cancel").addEventListener("click", async () => {
+  try { await api.ransQueueCancel(); } catch { /* already gone */ }
+});
 
 function renderOptHints(s) {
   const host = $("opt-hints");
@@ -2192,6 +2334,9 @@ async function restoreSession() {
     Object.assign(state.airfoilNames, saved.airfoil_names || {});
     state.config = withDefaults(saved.config);
     if (Number.isFinite(saved.target)) state.target = saved.target;
+    if (Array.isArray(saved.rans_rerank)) {
+      state.ransRerank = saved.rans_rerank;
+    }
     return true;
   } catch {
     return false;
@@ -2218,6 +2363,22 @@ async function boot() {
   // explains the two actions
   refreshGeometry();
   reattachOptimizer();   // a reload must not orphan a running search
+
+  // re-attach a running verification queue, or restore the last table
+  try {
+    const { queue } = await api.ransQueueCurrent();
+    if (queue && ["pending", "running"].includes(queue.state)) {
+      $("rerank-title").hidden = false;
+      $("rerank-block").hidden = false;
+      busy($("btn-rerank"), true);
+      $("btn-rerank-cancel").disabled = false;
+      pollRerank();
+    } else if (state.ransRerank && state.ransRerank.length) {
+      $("rerank-title").hidden = false;
+      $("rerank-block").hidden = false;
+      renderRerank({ rows: state.ransRerank });
+    }
+  } catch { /* rediscovery is best-effort */ }
 
   if (restored) {
     toast("Continuing where you left off — use Load preset… to start fresh.",

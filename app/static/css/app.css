@@ -343,6 +343,14 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
 .rule-line.viol { stroke: var(--warning); opacity: 1; stroke-width: 1.5; }
 .rule-label { font: 10.5px var(--mono); fill: var(--steel); opacity: 0.85; }
 .rule-label.viol { fill: var(--warning); opacity: 1; }
+
+/* RANS re-rank table (Optimizer tab) */
+.rr-table { width: 100%; border-collapse: collapse; font-size: 12px;
+            margin-top: 6px; }
+.rr-table th, .rr-table td { padding: 3px 6px; text-align: left;
+                             border-bottom: 1px solid var(--hairline); }
+.rr-table th { color: var(--ink-3); font-weight: 600; }
+.rr-table tr.dim td { color: var(--ink-3); }
 .chart-empty { fill: var(--ink-3); font: 12px var(--sans); }
 
 /* ---------------- results ---------------- */

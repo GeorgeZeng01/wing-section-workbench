@@ -400,6 +400,44 @@ def rans_cancel(job_id: str):
     return {"ok": True}
 
 
+class RansQueueBody(BaseModel):
+    items: list[dict]
+    mesh_size: Literal["coarse", "medium", "fine"] = "medium"
+    max_iters: int = Field(default=10000, ge=100, le=20000)
+
+
+@app.post("/api/rans-queue/start")
+def rans_queue_start(body: RansQueueBody):
+    """Verify an optimizer shortlist sequentially with RANS and re-rank
+    by measured downforce. One queue at a time; shares the single-run
+    solver guard."""
+    from .core import rans_queue
+    try:
+        qid = rans_queue.start(body.items, body.mesh_size, body.max_iters)
+    except ValueError as e:
+        raise HTTPException(422, detail=_err_detail(e))
+    except RuntimeError as e:
+        raise HTTPException(409, detail=str(e))
+    return {"queue_id": qid}
+
+
+@app.get("/api/rans-queue/current")
+def rans_queue_current():
+    from .core import rans_queue
+    q = rans_queue.get_current()
+    return {"queue": q.snapshot() if q is not None else None}
+
+
+@app.post("/api/rans-queue/cancel")
+def rans_queue_cancel():
+    from .core import rans_queue
+    q = rans_queue.get_current()
+    if q is None:
+        raise HTTPException(404, detail="no verification queue")
+    q.cancel()
+    return {"ok": True}
+
+
 @app.post("/api/rans/{job_id}/stop")
 def rans_stop(job_id: str):
     """Stop-and-keep-fields: graceful writeNow stop so the velocity and

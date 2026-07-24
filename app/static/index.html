@@ -359,6 +359,22 @@
               title="Distinct designs found during the search that also hit the target — different trade-offs, not just the single optimum. Apply one to inspect it in full.">
             Candidates</h3>
           <div id="opt-candidates"></div>
+          <h3 class="sub-title" id="rerank-title" hidden
+              title="Runs the winner, every candidate and the Pareto knee through the same 2D RANS truth case, one at a time, then re-ranks by MEASURED downforce. The panel model navigates; RANS measures — this is the maximum-accuracy step for the designs you would actually build. Medium mesh agreed with fine in the calibration campaign; coarse is screening only.">
+            RANS re-rank</h3>
+          <div id="rerank-block" hidden>
+            <div class="action-row">
+              <select id="rr-mesh" class="select-inline">
+                <option value="coarse">Coarse (screening)</option>
+                <option value="medium" selected>Medium</option>
+                <option value="fine">Fine (slow, definitive)</option>
+              </select>
+              <button id="btn-rerank" class="btn small">Verify shortlist</button>
+              <button id="btn-rerank-cancel" class="btn small ghost" disabled>Cancel</button>
+            </div>
+            <div id="rerank-status" class="note"></div>
+            <div id="rerank-table"></div>
+          </div>
         </div>
       </div>
     </div>

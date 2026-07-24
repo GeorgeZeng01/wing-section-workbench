@@ -60,6 +60,11 @@ export const api = {
   ransStatus: (id) => request("GET", `/api/rans/${id}`),
   ransCancel: (id) => request("POST", `/api/rans/${id}/cancel`),
   ransStop: (id) => request("POST", `/api/rans/${id}/stop`),
+  ransQueueStart: (items, meshSize, maxIters = 10000) =>
+    request("POST", "/api/rans-queue/start",
+            { items, mesh_size: meshSize, max_iters: maxIters }),
+  ransQueueCurrent: () => request("GET", "/api/rans-queue/current"),
+  ransQueueCancel: () => request("POST", "/api/rans-queue/cancel"),
 };
 
 export async function downloadExport(fmt, config, options = {}) {

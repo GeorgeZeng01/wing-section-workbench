@@ -1218,6 +1218,28 @@ quoted, in the analysis page and every optimizer candidate's warning
 count; no optimizer penalty is charged on geometry the record has not
 priced.
 
+**RANS re-rank: the maximum-accuracy step is RANS at the END of the
+loop, not a different engine in it.** The user's ask was maximum
+accuracy. Measured reality: there is no viable viscous 2D multi-element
+ground-effect engine to swap in (MSES is licensed and fragile exactly
+here; an in-house viscous-inviscid coupling is a research project with
+its own unvalidated error bars); RANS-in-the-DE-loop is arithmetic
+nonsense (~1500 evaluations x hours); and the coarse mesh — the only
+fast RANS — mis-read a validated point by -29% in the campaign, worse
+than the panel model inside its trusted band. What ships: a sequential
+verification queue (app/core/rans_queue.py) that takes the shortlist —
+winner, candidates, the Pareto knee — through the existing cfd_run
+pipeline at medium mesh by default (medium agreed with fine in the
+campaign; fine for finals), re-ranks by MEASURED downforce, and
+classifies each panel-vs-RANS delta against the recorded bands (healthy
+band above -20%, over-claims below, conservative above +5%). Every item
+passes the rule-envelope gate before a solver hour is spent; the queue
+shares the single-solver guard; verdict rows persist with the session.
+Alternatives considered: surrogate/EI refinement around the RANS winner
+— deferred as the documented extension, the plain re-rank is the 80%
+that costs 20%; parallel solves — rejected, Docker/WSL2 is a single-lane
+resource and the one-job guard exists for measured reasons.
+
 **RANS "Stop & keep fields": the graceful writeNow path gets a user
 trigger, with an honest verdict.** Cancel hard-kills the container
 (`docker rm -f`), which preempts run.sh's writeCellCentres step — a
