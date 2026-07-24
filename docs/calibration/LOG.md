@@ -346,3 +346,45 @@ The corner alone is NOT the over-claim driver at healthy loading; the
 The medium-trend legs (0.8/1.3/2.0) and the stage3b verdicts are
 running; the slot-corner advisory's wording gets recalibrated against
 the full set when they land.
+
+## 2026-07-24 — D7 trend + stage3b verdicts: three lessons, one surprise
+
+All five follow-up runs force-history converged (`runs.csv` d7-*,
+stage3b-*):
+
+    D7 medium trend, healthy loading (fine anchor at g0.8: −1.3 %):
+      gap 0.8 %c → −14.7 %   gap 1.3 %c → −20.0 %   gap 2.0 %c → −2.0 %
+    stage3b max winner (post-review fix, loading 0.900, claim 4.429):
+      RANS Cl 3.346 ± 0.061 — Δ −24.4 %
+    stage3b pareto knee (gap 0.89, ovl 0.31, defl 12.6, aoa −2.6,
+      claim 3.054): RANS Cl 5.457 ± 0.021 — Δ +78.7 %
+
+(1) MEDIUM MESH IS NOT CALIBRATION-GRADE AT RACING HEIGHT. The medium
+trend scatters −2…−20 % across tiny geometry changes and disagrees with
+the fine anchor by 13 points at the identical config — limit-cycle
+sampling plus an under-resolved venturi. The coarse caution extends:
+at 30 mm treat medium as screening too; only fine runs calibrate. The
+D7 verdict therefore rests on the fine anchor alone: the tight-gap
+corner at moderate loading is essentially exact (−1.3 %), so
+GAP_WORKABLE_PCT keeps its 0.8 floor and the slot-corner advisory is
+reworded from "no recorded point supports the corner" to the measured,
+loading-conditional truth.
+
+(2) THE LOADING-OPTIMISM GRADIENT IS NOW MAPPED: ~−14 % near 0.85
+loading, −19.2 % at 0.876, −24.4 % at 0.900. Optimism is a continuum
+rising toward the warning line, not a step past it — a max-downforce
+winner that rides the line pays about a quarter of its claim. The 0.90
+trust boundary stands (past it the collapse regime begins, −37…−42 %
+measured), but at-the-line winners should be read through this gradient
+— and the RANS re-rank measures each one individually.
+
+(3) NEW MEASURED FAILURE MODE — CONSERVATIVE, AT RACING HEIGHT. The
+stage3b knee under-claims by 79 %: its geometry carries an extreme
+inviscid ground coupling (c_ground/c_free ≈ 6.5; implied k_g 0.431 vs
+the curve's 0.119) that the bounded-gain model crushes. The recorded
+conservative band was mid-height (+35…+67 % at h/c 0.17–0.26); this
+shows the same under-claim can appear at h/c 0.086 for
+high-coupling geometries. Direction is safe (the wing delivers MORE
+than claimed) but Pareto fronts are shape-distorted in that class.
+Candidate predictor for a future leg: the c_ground/c_free ratio,
+already computed per evaluation. Not acted on yet — one point.

@@ -1425,9 +1425,11 @@ function renderOptHints(s) {
     if (s.state === "done" && w0 && w0.frac_max != null) {
       msg = `Maximum trusted downforce: every element held inside the 90% ` +
             `free-air loading line (winner peaks at ` +
-            `${Math.round(w0.frac_max * 100)}%) — the regime where clean ` +
-            `designs measured ~14% optimistic against fine-mesh RANS, not ` +
-            `the 23–42% over-claim zone past the line.`;
+            `${Math.round(w0.frac_max * 100)}%). Fine-mesh RANS measured ` +
+            `panel optimism rising along this axis — about −14% near 85% ` +
+            `loading, −24% right at the line — versus the −37…−42% ` +
+            `collapse past it that this mode exists to exclude. Use the ` +
+            `RANS re-rank below to measure your actual winner.`;
     }
   }
   if (s.load_cap_note === "baseline_exceeds_cap") {

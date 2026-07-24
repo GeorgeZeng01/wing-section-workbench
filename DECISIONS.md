@@ -1153,11 +1153,17 @@ so the gradient must not vanish; measured on the fixed benchmark (after
 the review round below fixed the wall continuity and the clean-pool
 gate) the mode lifts the two-element baseline's 259.1 N claim to
 269.2 N with the winner riding the line at 90.0% loading, and pulls the
-recorded near-stall specimen from 112% back to 90%. Fine-mesh RANS
-measured the (pre-fix) max-mode winner at -19.2% — between the -14%
-clean anchor and the -23% loading-warned onset, consistent with
-optimism growing toward the line; the post-fix winner's fine run is in
-the calibration queue.
+recorded near-stall specimen from 112% back to 90%. Fine-mesh RANS then
+mapped the mode's own axis: -19.2% at loading 0.876 (pre-review-fix
+winner) and -24.4% at 0.900 (post-fix winner riding the line), against
+the -14% clean anchor near 0.85 — optimism is a continuum rising toward
+the line, not a step past it. Decision on that evidence: the 0.90
+boundary STANDS (it is where the recorded -37..-42% collapse regime
+begins, and moving it on four loading points would be curve-chasing —
+the same reasoning that rejected the global k_g refit); instead the
+gradient is documented in the mode's hint and LOG.md, and the RANS
+re-rank measures each actual winner. Anyone wanting the -14..-19%
+regime simply reads the re-rank table or backs the target off the line.
 
 **min_ld and min_confidence are floors with the same shape: soft hinge in
 the search, hard filter at the output.** `min_ld` (efficiency floor, the

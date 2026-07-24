@@ -95,22 +95,22 @@ HC_CHOKE_OPTIMISM = 0.08
 # ride-height decisions are made.
 HC_CONSERVATIVE = (0.12, 0.35)
 
-# Slot-capture signature (2026-07): EVERY recorded stage-2 optimizer
-# winner — clean and flagged alike — sits in the same corner the inviscid
-# solver loves: slot gap pinned at the workable floor with essentially no
-# overlap tuck (gap 0.80, overlap 0.00-0.06 on the record). The RANS
-# deltas there: -14% at moderate loading, -37..-42% at high loading —
-# while the gap-1.5%c baseline at comparable downforce measured ~0%. So
-# no recorded truth point SUPPORTS this corner, and the healthy-winner
-# bias itself may partly be the tight-slot cost (the gap-axis RANS leg is
-# the experiment that separates that). A surface-pressure trust metric was
-# built and measured against the recorded classes first
-# (scripts/recovery_metric_check.py) and REJECTED: ground-image suction
-# peaks normalize every design's canonical recovery to ~0.98, and the
-# inviscid solution actively rewards tighter gaps — the real tight-gap
-# failure is boundary-layer merging, which no inviscid quantity sees.
-# Until that RANS leg lands, this geometric advisory is the honest
-# guardrail for the corner.
+# Slot-capture signature (2026-07): every recorded optimizer winner —
+# clean and flagged alike — sits in the corner the inviscid solver loves:
+# slot gap pinned at the workable floor with essentially no overlap tuck.
+# The gap-axis RANS leg then measured the corner itself: at MODERATE
+# loading it is essentially exact (fine mesh, -1.3% vs the gap-1.5%c
+# baseline's -0..-1%), so the corner alone is not the over-claim driver —
+# loading is, and every recorded over-claim (-14% shading to -24% at the
+# 0.90 line, -37..-42% past it) also sat in this corner at higher
+# loading. The advisory therefore stays (the observed detachment failures
+# all wore this geometry) but speaks in loading-conditional, measured
+# terms. A surface-pressure trust metric was built and measured against
+# the recorded classes first (scripts/recovery_metric_check.py) and
+# REJECTED: ground-image suction peaks normalize every design's canonical
+# recovery to ~0.98, and the inviscid solution actively rewards tighter
+# gaps — the real tight-gap failure is boundary-layer merging, which no
+# inviscid quantity sees.
 SLOT_SIG_GAP = 0.0105      # gap at/below ~1%c (the 0.8%c bound + margin)
 SLOT_SIG_OVERLAP = 0.005   # overlap below 0.5%c: no tuck under the TE
 
@@ -170,13 +170,14 @@ def slot_signature_warnings(design: list[dict]) -> list[str]:
             out.append(
                 f"{design[i]['role']}: slot at the workable floor "
                 f"({g * 100:.2f}%c gap) with no overlap tuck "
-                f"({o * 100:.2f}%c) — the corner the inviscid model "
-                f"over-rates. No recorded RANS point supports it: winners "
-                f"with this slot measured -14% (moderate loading) to -42% "
-                f"(high loading) against fine-mesh truth, while the "
-                f"1.5%c-gap baseline at similar downforce measured ~0% "
-                f"(docs/calibration). Prefer 1.5-2.5%c gap with 2-4%c "
-                f"overlap, or verify with RANS before trusting the number.")
+                f"({o * 100:.2f}%c) — the corner the optimizer gravitates "
+                f"to, and the geometry every observed detachment failure "
+                f"wore. Fine-mesh truth (docs/calibration): at moderate "
+                f"loading this corner measured -1.3% (essentially exact), "
+                f"but optimism climbs steeply with loading everywhere "
+                f"(-14% near 85%, -24% at the 90% line, -37..-42% past "
+                f"it). Watch the loading meters; prefer 1.5-2.5%c gap "
+                f"with 2-4%c overlap when in doubt, or verify with RANS.")
     return out
 
 
