@@ -1123,6 +1123,50 @@ guarantee (471 N baseline -> 482 N optimized) preserved. Note: in-band
 gap shading (0.8 %c is the band edge) is still penalty-free here by
 construction — pricing that is the recovery-metric decision below.
 
+**Max-downforce mode: the loading band hardens at the measured trust
+line, cliff-free in the search, hard at the output.** The measured fact
+this mode exists to respect: winners past the 0.90 free-air loading line
+over-claim 23-42% against fine-mesh RANS (replicated), so "maximize
+downforce" without the guardrail would be a fantasy-zone generator. In
+this mode the do-no-harm widening deliberately does NOT apply to the
+free-air loading band: an approach ramp starts at 0.85 (so the wall is
+felt with gradient), a steep smooth wall stands past 0.90 (at loading
+0.95 it costs more J than any plausible downforce gain buys), and the
+output carries the hard guarantee — every candidate re-checked at full
+fidelity, violators dropped, the best survivor promoted, and an explicit
+failure ("...best candidate loads 97% — enlarge the chord, add an
+element, or use target mode") when nothing survives. A hot baseline is
+NOT refused (unlike rule violations — legality vs trust): the run
+proceeds under the capped band with a note, and the UI says the winner
+may sit below the start's over-claimed number by design. Options
+considered: (a) mark loading > 0.90 infeasible mid-search — rejected,
+the same cliff the trust-penalty decision already rejected; (b) penalty
+scaling only, no output filter — rejected, the mode's entire output
+would be the over-claim regime the moment the penalty is out-bid;
+(c) ramp + wall + output guarantee (chosen). Reward is linear
+(60·(1 − downforce/baseline), scale fixed at run start) — no set-point,
+so the gradient must not vanish; measured on the fixed benchmark the mode
+lifts the two-element baseline 259 -> 286 N with the winner peaking at
+87% loading, and pulls the recorded near-stall specimen from 112% back
+to 90%.
+
+**min_ld and min_confidence are floors with the same shape: soft hinge in
+the search, hard filter at the output.** `min_ld` (efficiency floor, the
+usable form of "best ratio" — pure max-L/D degenerates to the smallest
+wing) and `min_confidence` (user-set NeuralFoil confidence floor,
+default 0.5 = the screener's bar; the penalty knee follows the user's
+floor so the search is steered away from designs the filter would
+discard, and conf_pen0 keeps the charge baseline-relative). Both filters
+drop violating candidates at full fidelity and fail with a message naming
+the floor and the best value found when nothing passes. Consequence
+accepted at the default: a winner that would previously ship with a
+`low confidence` badge is now replaced by the best passing design, and
+the run fails outright only when nothing passes (the calibration campaign
+measured that badge class over-claiming to -42%, so shipping it as the
+winner was the worse default). Alternative considered: default the floor
+to "off" and enforce only when set — rejected as keeping the measured
+failure mode as the default output; floor 0 restores it explicitly.
+
 **Slot-flow trust metric: built, measured against the RANS record, and
 rejected — a geometric advisory ships instead.** The observed failure mode
 (flow detaching ahead of the main TE while the flap sits above the slot

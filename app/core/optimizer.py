@@ -116,6 +116,24 @@ DEADZONE_F = 0.008         # descend: |downforce-D*|/D* treated as "on level"
                            # trading the last 0.1% of tracking for drag)
 DESCEND_DRAG_W = 0.30      # descend drag-weight floor (user's if higher)
 
+# max-downforce mode. The measured trust boundary is the 0.90 free-air
+# loading line: winners past it over-claim 23-42% against fine-mesh RANS
+# (replicated — DECISIONS.md "RANS cross-referencing campaign"), so a
+# naive maximizer would optimize straight into that regime. The band
+# HARDENS here, cliff-free (the rejected-hard-floor precedent stands): an
+# approach ramp starts before the line so the search feels the wall with
+# gradient, a steep smooth wall stands past it, and the output carries a
+# HARD guarantee — winner and candidates are re-checked at full fidelity
+# and dropped if any element loads past the line.
+MAXDF_RAMP_START = 0.85    # ramp onset (loading fraction)
+MAXDF_RAMP_W = 2.0         # <= 2.0/element at the 0.90 line itself
+MAXDF_WALL_W = 40.0        # at f = 0.95 this costs 40 — no downforce pays it
+MAXDF_FRAC_SLACK_SEARCH = 0.01    # archive prefilter slack (search panels)
+MAXDF_FRAC_SLACK_FULL = 0.005     # full-fidelity output slack
+CAND_MAXDF_TOL = 0.05      # alternates within 5% of the best clean downforce
+MIN_LD_W = 40.0            # min_ld soft-hinge weight (mirror of the bands)
+LD_SLACK = 0.98            # output filter: ld >= 0.98 * min_ld
+
 # viscous-data trust penalty. Soft by construction: a screened library stack
 # (confidence well above CONF_FLOOR, stalling inside the polar grid) pays
 # nothing, and even a fully flagged element costs about as much as an ~11%
@@ -413,16 +431,21 @@ def _band_penalty(value: float, band: tuple[float, float], scale: float) -> floa
     return 0.0
 
 
-def _confidence_penalty(ev: dict) -> float:
+def _confidence_penalty(ev: dict, floor: float = CONF_FLOOR) -> float:
     """Trust penalty for one evaluation: low NeuralFoil confidence anywhere,
     plus a fixed bump per loaded element whose viscous limit is a grid-edge
-    lower bound or whose drag lookup clamped at the stall branch."""
+    lower bound or whose drag lookup clamped at the stall branch.
+
+    The knee follows the user's confidence floor (min_confidence option):
+    an output filter without matching search pressure would spend budget
+    converging on designs the filter then discards."""
     pen = 0.0
+    floor = max(float(floor), 1e-6)
     for conf, frac, edge, capped in zip(
             ev.get("confidences", ()), ev.get("fracs", ()),
             ev.get("at_grid_edge", ()), ev.get("cd_capped", ())):
-        if conf < CONF_FLOOR:
-            pen += CONF_WEIGHT * ((CONF_FLOOR - conf) / CONF_FLOOR) ** 2
+        if conf < floor:
+            pen += CONF_WEIGHT * ((floor - conf) / floor) ** 2
         if (edge or capped) and frac > FLAG_LOAD_FRAC:
             pen += FLAG_BUMP
     return pen
@@ -465,6 +488,28 @@ class Job:
         if options.get("mode", "global") not in ("global", "local"):
             raise ValueError("options['mode'] must be 'global' or 'local' "
                              "('refine' is accepted as an alias for 'local')")
+        # objective mode is a separate axis from the SEARCH mode above
+        self.objective_mode = str(options.get("objective", "target"))
+        if self.objective_mode not in ("target", "max_downforce"):
+            raise ValueError("options['objective'] must be 'target' or "
+                             "'max_downforce'")
+        ld = options.get("min_ld")
+        if ld is not None:
+            try:
+                ld = float(ld)
+            except (TypeError, ValueError):
+                raise ValueError("options['min_ld'] must be a number or null")
+            if not (_math.isfinite(ld) and 0.0 < ld <= 50.0):
+                raise ValueError("options['min_ld'] must be in 0..50 "
+                                 "(or null for no floor)")
+        self.min_ld = ld
+        try:
+            mc = float(options.get("min_confidence", CONF_FLOOR))
+        except (TypeError, ValueError):
+            raise ValueError("options['min_confidence'] must be a number")
+        if not (_math.isfinite(mc) and 0.0 <= mc <= 1.0):
+            raise ValueError("options['min_confidence'] must be in 0..1")
+        self.min_conf = mc
         # every element spec must resolve NOW — a job whose every evaluation
         # would fail (e.g. a custom airfoil lost to a server restart) must be
         # rejected up front, not finish 'done' with nothing to show
@@ -544,6 +589,13 @@ class Job:
         self.target_note = None    # None | "unreachable_low" (target below
                                    # the clean floor) | "unreachable_high"
         self._obj_phase = "attain"  # attain | descend (objective() branch)
+        self.dscale = 200.0        # max-downforce reward scale (baseline
+                                   # downforce, fixed at run start — mid-run
+                                   # renormalization would poison archive
+                                   # comparability)
+        self.load_cap_note = None  # "baseline_exceeds_cap" in max mode
+        self.conf_note = None      # "baseline_below_floor"
+        self._drop_stats = None    # output-filter drops, for the failure msg
         self.archive: list[dict] = []   # every feasible evaluation (for
                                         # candidate selection at the end)
         self.candidates = None     # ranked diverse designs, set on finish
@@ -608,12 +660,26 @@ class Job:
         # start that already runs hot is penalized only for getting HOTTER,
         # never for matching itself — an absolute cap here made every run
         # from an aggressive design land below its baseline downforce.
-        if self.load_band:
+        if self.objective_mode == "max_downforce":
+            # hardened, cliff-free: ramp before the measured trust line so
+            # the wall is felt with gradient, steep smooth wall past it —
+            # and the do-no-harm widening deliberately does NOT apply to
+            # this band (matching an already-hot baseline is not a
+            # do-no-harm act when the mode's contract is trusted output)
+            j_pen = 0.0
+            for f in ev["fracs"]:
+                if f > analysis.LOAD_WARN:
+                    j_pen += MAXDF_WALL_W * ((f - analysis.LOAD_WARN)
+                                             / 0.05) ** 2
+                elif f > MAXDF_RAMP_START:
+                    j_pen += MAXDF_RAMP_W * ((f - MAXDF_RAMP_START)
+                                             / 0.05) ** 2
+        elif self.load_band:
             load_excess = sum(max(0.0, f - top) ** 2
                               for f, top in zip(ev["fracs"], self.load_band))
+            j_pen = 40.0 * load_excess
         else:
-            load_excess = ev["load_excess"]
-        j_pen = 40.0 * load_excess
+            j_pen = 40.0 * ev["load_excess"]
         # keep the search out of the regime the model itself calls
         # unreliable: realized ground-effect loading past the allowance —
         # baseline-relative for the same do-no-harm reason as above
@@ -632,8 +698,22 @@ class Job:
         # design) is penalized only for leaning HARDER on it, never for
         # matching itself — a standing offset would break _target_reached()
         # and the candidates' penalty gate for the whole run
-        j_pen += max(0.0, _confidence_penalty(ev) - self.conf_pen0)
-        if self._obj_phase == "descend" and self.dstar is not None:
+        j_pen += max(0.0, _confidence_penalty(ev, self.min_conf)
+                     - self.conf_pen0)
+        if self.min_ld is not None:
+            # efficiency floor as a soft hinge, mirroring the bands; the
+            # output filter in _finalize_candidates provides the guarantee
+            ld_now = ev["downforce_n"] / max(ev["drag_n"], 1e-6)
+            j_pen += MIN_LD_W * max(0.0, self.min_ld / max(ld_now, 1e-6)
+                                    - 1.0) ** 2
+        if self.objective_mode == "max_downforce":
+            # linear reward: there is no set-point, so the gradient must
+            # not vanish anywhere; scale fixed at run start (baseline
+            # downforce) so archive entries stay comparable end to end
+            j = (60.0 * (1.0 - ev["downforce_n"] / self.dscale)
+                 + w_drag * ev["drag_n"] / self.dscale * 10.0
+                 + j_pen)
+        elif self._obj_phase == "descend" and self.dstar is not None:
             # descend: hold the achievable level D* inside a small deadzone
             # and spend the freedom on drag. Outside the deadzone the same
             # 60-weight spring as the tracker takes over, so the simplex
@@ -699,9 +779,13 @@ class Job:
         The archive mixes attain-phase and descend-phase J values, which
         are not comparable; selection therefore re-scores every entry from
         its stored downforce/drag/penalty — no re-evaluation needed."""
+        w_drag = float(self.options.get("drag_weight", 0.10))
+        if self.objective_mode == "max_downforce":
+            return (60.0 * (1.0 - a["downforce_n"] / self.dscale)
+                    + w_drag * a["drag_n"] / self.dscale * 10.0
+                    + a["penalty"])
         dstar = (self.dstar if self.dstar is not None
                  else float(self.options.get("target_downforce_n", 200.0)))
-        w_drag = float(self.options.get("drag_weight", 0.10))
         scale = max(abs(dstar), 1.0)
         f_dev = max(0.0, abs(a["downforce_n"] - dstar) / scale - DEADZONE_F)
         return (60.0 * f_dev ** 2
@@ -719,6 +803,8 @@ class Job:
         band/trust penalties. D* is measured at the attain phase's paneling
         — the descend deadzone absorbs the coarse-vs-full bias, and the
         candidates re-analyze at full fidelity anyway."""
+        if self.objective_mode != "target":
+            return   # max mode has no level to hold
         target = float(self.options.get("target_downforce_n", 200.0))
         with self._lock:
             pool = [a for a in self.archive if a["penalty"] < PEN_OK]
@@ -743,10 +829,19 @@ class Job:
         on-level manifold instead of polishing one point three times."""
         with self._lock:
             pool = [a for a in self.archive if a["penalty"] < PEN_OK]
-        tol = max(CAND_TARGET_TOL * abs(self.dstar or 1.0), 1.0)
-        on = sorted((a for a in pool
-                     if abs(a["downforce_n"] - (self.dstar or 0.0)) <= tol),
-                    key=lambda a: a["drag_n"])
+        if self.objective_mode == "max_downforce":
+            # polish from the strongest CLEAN designs inside the trust line
+            on = sorted((a for a in pool
+                         if a.get("frac_max") is None
+                         or a["frac_max"] <= analysis.LOAD_WARN
+                         + MAXDF_FRAC_SLACK_SEARCH),
+                        key=lambda a: -a["downforce_n"])
+        else:
+            tol = max(CAND_TARGET_TOL * abs(self.dstar or 1.0), 1.0)
+            on = sorted((a for a in pool
+                         if abs(a["downforce_n"] - (self.dstar or 0.0))
+                         <= tol),
+                        key=lambda a: a["drag_n"])
         if not on:
             if self.best is not None:
                 return [np.array(self.best["x"])]
@@ -783,16 +878,37 @@ class Job:
         # the winner must come from full-fidelity evaluations when any exist
         # — the coarse search paneling carries a bias larger than the drag
         # differences between near-optimal designs
-        full = [a for a in by_j if a.get("panels") == self._full_panels]
-        best = full[0] if full else by_j[0]
-        tol = max(CAND_TARGET_TOL * abs(dstar), 1.0)
-        good = [a for a in by_j
-                if abs(a["downforce_n"] - dstar) <= tol
-                and a["penalty"] < PEN_OK]
-        best_j = self._rescore(best)
-        j_slack = best_j + max(0.15 * abs(best_j), 0.02)
-        pool = ([a for a in good if self._rescore(a) <= j_slack]
-                or good[:100] or by_j[:100])
+        if self.objective_mode == "max_downforce":
+            # the trusted pool: clean and inside the measured loading line
+            # (search-fidelity prefilter — the full-fidelity re-check in
+            # _finalize_candidates provides the hard guarantee)
+            ok = [a for a in by_j
+                  if a["penalty"] < PEN_OK
+                  and (a.get("frac_max") is None
+                       or a["frac_max"] <= analysis.LOAD_WARN
+                       + MAXDF_FRAC_SLACK_SEARCH)]
+            if ok:
+                full_ok = [a for a in ok
+                           if a.get("panels") == self._full_panels]
+                best = full_ok[0] if full_ok else ok[0]
+                dn_floor = (1.0 - CAND_MAXDF_TOL) * best["downforce_n"]
+                pool = [a for a in ok if a["downforce_n"] >= dn_floor]
+            else:
+                full = [a for a in by_j
+                        if a.get("panels") == self._full_panels]
+                best = full[0] if full else by_j[0]
+                pool = by_j[:100]
+        else:
+            full = [a for a in by_j if a.get("panels") == self._full_panels]
+            best = full[0] if full else by_j[0]
+            tol = max(CAND_TARGET_TOL * abs(dstar), 1.0)
+            good = [a for a in by_j
+                    if abs(a["downforce_n"] - dstar) <= tol
+                    and a["penalty"] < PEN_OK]
+            best_j = self._rescore(best)
+            j_slack = best_j + max(0.15 * abs(best_j), 0.02)
+            pool = ([a for a in good if self._rescore(a) <= j_slack]
+                    or good[:100] or by_j[:100])
         picked = [best]
         while len(picked) < CAND_MAX:
             cand, cd = None, CAND_DIVERSITY
@@ -831,13 +947,17 @@ class Job:
                     "warnings": len(r["warnings"]),
                     # trust flags, same gates as the objective's penalty —
                     # the UI badges that say which winners to distrust
-                    # before RANS
+                    # before RANS. The low-confidence badge tracks the
+                    # floor in effect (user's min_confidence).
                     "confidence_min": round(conf_min, 3),
-                    "low_confidence": bool(conf_min < CONF_FLOOR),
+                    "low_confidence": bool(conf_min < self.min_conf),
                     "near_stall": any(
                         (e["cd_lookup_capped"] or e["cl_max_at_grid_edge"])
                         and e["loading_fraction"] > FLAG_LOAD_FRAC
                         for e in els),
+                    "frac_max": round(max(e["loading_fraction"]
+                                          for e in els), 3),
+                    "slot_signature": bool(r.get("slot_signature")),
                 }
             except Exception:
                 entry["summary"] = None
@@ -853,7 +973,80 @@ class Job:
                     abs(ref_dn - self.dstar)
                     <= max(CAND_TARGET_TOL * abs(self.dstar), 1.0))
             out.append(entry)
-        return out
+        return self._apply_output_filters(out)
+
+    def _apply_output_filters(self, out: list[dict]) -> list[dict]:
+        """The HARD side of the guarantees: candidates re-checked at full
+        fidelity, violators dropped, survivors re-ranked. The search-side
+        pressure is soft (ramps/hinges, no mid-search cliff — the rejected
+        hard-confidence-floor precedent); the output is where the modes'
+        contracts are enforced."""
+        guarded = (self.objective_mode == "max_downforce"
+                   or self.min_ld is not None or self.min_conf > 0.0)
+        if not guarded:
+            return out
+        drops = {"loading": 0, "confidence": 0, "ld": 0, "unverified": 0}
+        best_frac, best_conf, best_ld = None, None, None
+        kept = []
+        for entry in out:
+            s = entry.get("summary")
+            if s is None:
+                # a guarantee cannot be verified on a design whose full
+                # re-analysis failed
+                drops["unverified"] += 1
+                continue
+            frac, conf = s.get("frac_max"), s.get("confidence_min")
+            ld = s.get("efficiency_ld")
+            best_frac = frac if best_frac is None else min(best_frac, frac)
+            best_conf = conf if best_conf is None else max(best_conf, conf)
+            best_ld = ld if best_ld is None else max(best_ld, ld)
+            if (self.objective_mode == "max_downforce" and frac is not None
+                    and frac > analysis.LOAD_WARN + MAXDF_FRAC_SLACK_FULL):
+                drops["loading"] += 1
+                continue
+            if conf is not None and conf < self.min_conf - 0.005:
+                drops["confidence"] += 1
+                continue
+            if (self.min_ld is not None and ld is not None
+                    and ld < LD_SLACK * self.min_ld):
+                drops["ld"] += 1
+                continue
+            kept.append(entry)
+        for i, entry in enumerate(kept, 1):
+            entry["rank"] = i
+        if any(drops.values()):
+            self._drop_stats = {**drops, "best_frac": best_frac,
+                                "best_conf": best_conf, "best_ld": best_ld}
+        return kept
+
+    def _guarantee_failure_message(self) -> str:
+        d = self._drop_stats or {}
+        parts = []
+        if d.get("loading"):
+            parts.append(
+                f"max-downforce found no design inside the trusted loading "
+                f"envelope (every element <= {analysis.LOAD_WARN:.0%} of its "
+                f"isolated CL_max — past it, RANS measured 23-42% "
+                f"over-claims); the best candidate loads "
+                f"{d['best_frac']:.0%}. Enlarge the chord, add an element, "
+                f"or use target mode")
+        if d.get("confidence"):
+            parts.append(
+                f"no design meets the confidence floor {self.min_conf:.2f} "
+                f"(best found {d['best_conf']:.2f}"
+                + (", and the starting design is below the floor too"
+                   if self.conf_note else "")
+                + "). Lower the floor or change airfoils")
+        if d.get("ld"):
+            parts.append(
+                f"no design holds L/D >= {self.min_ld:.1f} (best found "
+                f"{d['best_ld']:.1f}). Lower the efficiency floor or free "
+                f"more variables")
+        if d.get("unverified") and not parts:
+            parts.append("every candidate failed its full-fidelity "
+                         "re-analysis — the guarantees could not be "
+                         "verified")
+        return "; ".join(parts) or "no candidate survived the output filters"
 
     # ---- runner ----
 
@@ -877,10 +1070,23 @@ class Job:
             return
         if not ev0.get("feasible"):
             return
-        self.load_band = [max(1.05, f + 0.03) for f in ev0["fracs"]]
+        self.dscale = max(abs(ev0["downforce_n"]), 50.0)
+        if self.objective_mode == "max_downforce":
+            # the free-air loading band does NOT widen to a hot baseline
+            # in this mode (the wall in objective() stands at the measured
+            # trust line regardless); flag the situation instead so the UI
+            # can say the winner may sit below the baseline's over-claimed
+            # number by design
+            if any(f > analysis.LOAD_WARN for f in ev0["fracs"]):
+                self.load_cap_note = "baseline_exceeds_cap"
+        else:
+            self.load_band = [max(1.05, f + 0.03) for f in ev0["fracs"]]
         self.ground_band = [max(analysis.GROUND_CL_ALLOWANCE, f + 0.05)
                             for f in ev0["fracs_ground"]]
-        self.conf_pen0 = _confidence_penalty(ev0)
+        self.conf_pen0 = _confidence_penalty(ev0, self.min_conf)
+        if (ev0.get("confidences")
+                and min(ev0["confidences"]) < self.min_conf):
+            self.conf_note = "baseline_below_floor"
         self.gap_bands = [GAP_BAND if g is None else
                           (min(GAP_BAND[0], g - 5e-4),
                            max(GAP_BAND[1], g + 5e-4))
@@ -927,6 +1133,8 @@ class Job:
                               shaping.BOUNDS_TS[1] - 0.01)
 
     def _target_reached(self) -> bool:
+        if self.objective_mode != "target":
+            return False   # no set-point: max mode never stops early
         b = self.best
         if b is None:
             return False
@@ -1068,19 +1276,32 @@ class Job:
                     # still a real design — return it instead of nothing
                     with self._lock:
                         self.best = coarse_best
-                if self.best is not None:
-                    best_cfg = apply_vector(self.config, self.variables,
-                                            np.array(self.best["x"]),
-                                            self.shortlists)
+                candidates = (self._finalize_candidates()
+                              if self.best is not None else [])
+                if candidates:
+                    # the winner is candidate #1 by construction — after
+                    # the output filters it can differ from the raw search
+                    # best, so best/result must follow the promoted design
+                    best_cfg = candidates[0]["config"]
                     result = analysis.analyze(StackConfig.from_dict(best_cfg))
-                    candidates = self._finalize_candidates()
                     with self._lock:
+                        self.best = {**(self.best or {}),
+                                     "x": candidates[0]["x"],
+                                     "J": candidates[0]["J"],
+                                     "downforce_n":
+                                         candidates[0]["downforce_n"],
+                                     "drag_n": candidates[0]["drag_n"]}
                         self.best_config = best_cfg
                         self.result = result
                         self.candidates = candidates
                         self.state = "cancelled" if cancelled else "done"
                 elif cancelled:
                     self.state = "cancelled"
+                elif self.best is not None:
+                    # the search found designs but the output guarantees
+                    # dropped every one — a failure with a named cause
+                    self.state = "failed"
+                    self.error = self._guarantee_failure_message()
                 else:
                     # the search ran but never saw a feasible design — that
                     # is a failure with a diagnosable cause, not a "done"
@@ -1125,6 +1346,9 @@ class Job:
                 "dstar_n": (round(self.dstar, 1)
                             if self.dstar is not None else None),
                 "target_note": self.target_note,
+                "objective": self.objective_mode,
+                "load_cap_note": self.load_cap_note,
+                "conf_note": self.conf_note,
                 "variables": [{**v} for v in self.variables],
                 "best_config": self.best_config,
                 "result": self.result if self.state in ("done", "cancelled")

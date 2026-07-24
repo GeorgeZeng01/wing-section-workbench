@@ -933,6 +933,13 @@ $("btn-opt-apply").addEventListener("click", applyBestDesign);
 $("ov-af").addEventListener("change", () => {
   $("ov-af-pool").disabled = !$("ov-af").checked;
 });
+$("opt-objective").addEventListener("change", () => {
+  const isMax = $("opt-objective").value === "max_downforce";
+  $("opt-target").disabled = isMax;
+  $("opt-target").title = isMax
+    ? "Ignored while maximizing — the loading trust line is the constraint"
+    : "";
+});
 
 // manufacturing guard: with prep off, the optimizer tunes knife-edge
 // trailing edges that change once the wing is made buildable. Ask before
@@ -974,8 +981,11 @@ async function launchOptimization() {
   // snapshot the target: charts and hints must describe THIS run even if
   // the target field is edited while it searches
   const target = state.target;
+  const minConf = parseFloat($("opt-minconf").value);
   const options = {
     target_downforce_n: target,
+    objective: $("opt-objective").value,
+    min_confidence: Number.isFinite(minConf) ? minConf : 0.5,
     mode: $("opt-mode").value,
     budget: parseInt($("opt-budget").value, 10),
     // 0 is a legal weight ("ignore drag") — don't || it away
@@ -988,6 +998,8 @@ async function launchOptimization() {
     opt_shape: $("ov-shape").checked,
     airfoil_pool: $("ov-af-pool").value,
   };
+  const minLd = parseFloat($("opt-minld").value);
+  if (Number.isFinite(minLd)) options.min_ld = minLd;
   if (![options.opt_stack_aoa, options.opt_deflections, options.opt_positions,
         options.opt_chords, options.opt_airfoils, options.opt_shape]
         .some(Boolean)) {
@@ -1080,12 +1092,18 @@ function renderOptimizer(s) {
   $("opt-status").textContent = bits.join(" · ");
   if (s.history && s.history.length) {
     const target = state.optTarget ?? state.target;
+    const isMax = s.objective === "max_downforce";
     lineChart($("opt-conv"), {
       series: [{ name: "downforce", color: SERIES[0],
                  x: s.history.map(h => h.eval),
                  y: s.history.map(h => h.downforce_n) }],
       xLabel: "evaluation", yLabel: "downforce [N]",
-      targetY: target, targetLabel: `target ${target} N`,
+      // max mode has no set-point; the measured floor/ceiling line (D*)
+      // replaces the target line when the run reported one
+      targetY: isMax ? null : (s.target_note ? s.dstar_n : target),
+      targetLabel: isMax ? null
+        : (s.target_note ? `achievable ${s.dstar_n} N`
+                         : `target ${target} N`),
       height: 128,
     });
     lineChart($("opt-obj"), {
@@ -1171,6 +1189,34 @@ function renderOptHints(s) {
     msg = `${pinnedHi.join(", ")} hit the maximum and the target was still ` +
           `missed — ${target} N is beyond this stack at these conditions. ` +
           `Add an element, enlarge the chord, or lower the target.`;
+  }
+  if (s.objective === "max_downforce") {
+    // target-mode heuristics don't apply; say what the mode guaranteed
+    msg = null;
+    const w0 = ((s.candidates || [])[0] || {}).summary;
+    if (s.state === "done" && w0 && w0.frac_max != null) {
+      msg = `Maximum trusted downforce: every element held inside the 90% ` +
+            `free-air loading line (winner peaks at ` +
+            `${Math.round(w0.frac_max * 100)}%) — the regime where clean ` +
+            `designs measured ~14% optimistic against fine-mesh RANS, not ` +
+            `the 23–42% over-claim zone past the line.`;
+    }
+  }
+  if (s.load_cap_note === "baseline_exceeds_cap") {
+    const d = document.createElement("div");
+    d.className = "warning-item";
+    d.textContent = "The starting design already loads past the 90% trust " +
+      "line. Maximize mode will not follow it there — the winner can sit " +
+      "below the start's (over-claimed) number by design.";
+    host.appendChild(d);
+  }
+  if (s.conf_note === "baseline_below_floor") {
+    const d = document.createElement("div");
+    d.className = "warning-item";
+    d.textContent = "The starting design itself sits below the confidence " +
+      "floor; the search is only charged for leaning harder on distrusted " +
+      "data, but if nothing passes the floor the run will fail and say so.";
+    host.appendChild(d);
   }
   if (msg) {
     const d = document.createElement("div");

@@ -22,7 +22,7 @@ OFFLINE = ["test_manufacturing.py", "test_panel_validation.py",
            "test_cfd_case.py", "test_cfd_run.py",
            "test_optimizer_candidates.py", "test_shaping.py",
            "test_rules_envelope.py", "test_optimizer_target_modes.py",
-           "test_slot_signature.py"]
+           "test_slot_signature.py", "test_optimizer_objectives.py"]
 
 
 def free_port() -> int:

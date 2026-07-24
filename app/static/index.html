@@ -279,6 +279,13 @@
       <div class="opt-grid">
         <div class="opt-controls">
           <div class="fields two-col">
+            <label class="field"
+                   title="Hit a target: track the requested downforce, then minimize drag at the achievable level. Maximize downforce: most downforce the model can be TRUSTED about — every element is held inside the 90% loading line where RANS measured over-claims of 23–42%, and the winner is re-verified at full fidelity.">
+              <span class="f-label">Goal</span>
+              <span class="f-wrap"><select id="opt-objective" class="select-inline">
+                <option value="target">Hit a downforce target</option>
+                <option value="max_downforce">Maximize downforce (trusted)</option>
+              </select><i></i></span></label>
             <label class="field"><span class="f-label">Target</span>
               <span class="f-wrap"><input id="opt-target" type="number" step="10" value="250"><i>N</i></span></label>
             <label class="field"
@@ -299,6 +306,14 @@
             <label class="field" title="How strongly drag counts against a design. 0 = ignore drag; higher values trade downforce accuracy for cleaner, lower-drag settings.">
               <span class="f-label">Drag penalty</span>
               <span class="f-wrap"><input id="opt-drag-w" type="number" step="0.05" min="0" max="2" value="0.1"><i></i></span></label>
+            <label class="field"
+                   title="Optional efficiency floor: candidates must hold at least this downforce/drag ratio. Blank = off. Useful with Maximize downforce — pure maximization otherwise pays any drag price for the last newton.">
+              <span class="f-label">Min L/D</span>
+              <span class="f-wrap"><input id="opt-minld" type="number" step="0.5" min="0.5" max="50" placeholder="off"><i></i></span></label>
+            <label class="field"
+                   title="Viscous-data confidence floor (NeuralFoil's own confidence in each element's polar, 0–1). Candidates below the floor are dropped at the end and the search is steered away from them. 0.5 is the screener's bar and the default; raise it for conservative designs, lower toward 0 to accept anything (the badge still shows).">
+              <span class="f-label">Min confidence</span>
+              <span class="f-wrap"><input id="opt-minconf" type="number" step="0.05" min="0" max="1" value="0.5"><i></i></span></label>
           </div>
           <fieldset class="var-set">
             <legend>Free variables</legend>
