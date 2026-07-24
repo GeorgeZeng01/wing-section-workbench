@@ -11,7 +11,7 @@
 </script>
 <link rel="icon" href="/static/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" href="/static/favicon.png">
-<link rel="stylesheet" href="/static/css/app.css?v=17">
+<link rel="stylesheet" href="/static/css/app.css?v=18">
 </head>
 <body>
 
@@ -244,7 +244,7 @@
       </div>
       <div class="stat-grid">
         <div class="stat"><span class="s-label">C<sub>ΔF</sub> estimate</span><output id="r-cest">–</output></div>
-        <div class="stat"><span class="s-label">C<sub>ΔF</sub> inviscid gnd / free</span><output id="r-cinv">–</output></div>
+        <div class="stat"><span class="s-label" title="Inviscid downforce coefficient, in ground effect / in free air">C<sub>ΔF</sub> gnd / free</span><output id="r-cinv">–</output></div>
         <div class="stat"><span class="s-label">Ground gain</span><output id="r-gain">–</output></div>
         <div class="stat" id="drag-stat"><span class="s-label">Drag estimate</span><output id="r-drag">–</output><span class="s-sub" id="r-drag-split"></span></div>
         <div class="stat"><span class="s-label">L/D estimate</span><output id="r-ld">–</output></div>
@@ -301,23 +301,21 @@
       <div class="opt-grid">
         <div class="opt-controls">
           <div class="fields two-col">
-            <label class="field"
+            <label class="field full"
                    title="Hit a target: track the requested downforce, then minimize drag at the achievable level. Maximize downforce: most downforce the model can be TRUSTED about — every element is held inside the 90% loading line where RANS measured over-claims of 23–42%, and the winner is re-verified at full fidelity.">
               <span class="f-label">Goal</span>
               <span class="f-wrap"><select id="opt-objective" class="select-inline">
                 <option value="target">Hit a downforce target</option>
                 <option value="max_downforce">Maximize downforce (trusted)</option>
               </select><i></i></span></label>
-            <label class="field" id="opt-target-field"><span class="f-label">Target</span>
-              <span class="f-wrap"><input id="opt-target" type="number" step="10" value="250"><i>N</i></span></label>
-            <label class="field"
+            <label class="field full"
                    title="Global explores the whole variable space (differential evolution) before polishing — use it to find the best design for a target. Refine current skips the exploration and improves the design you have from where it is (Nelder–Mead) — quicker, stays in the same basin, ideal after small manual edits.">
               <span class="f-label">Search</span>
               <span class="f-wrap"><select id="opt-mode" class="select-inline">
                 <option value="global">Global (explore, then polish)</option>
                 <option value="local">Refine current design</option>
               </select><i></i></span></label>
-            <label class="field"
+            <label class="field full"
                    title="Fast/Standard stop as soon as the target is reached — quick, but repeated runs can land in different drag basins. Thorough explores the whole search space before refining (takes minutes) and converges to the same lowest-drag design on every run.">
               <span class="f-label">Effort</span>
               <span class="f-wrap"><select id="opt-budget" class="select-inline">
@@ -325,6 +323,8 @@
                 <option value="1500" selected>Standard</option>
                 <option value="4000">Thorough (reproducible)</option>
               </select><i></i></span></label>
+            <label class="field" id="opt-target-field"><span class="f-label">Target</span>
+              <span class="f-wrap"><input id="opt-target" type="number" step="10" value="250"><i>N</i></span></label>
             <label class="field" title="How strongly drag counts against a design. 0 = ignore drag; higher values trade downforce accuracy for cleaner, lower-drag settings.">
               <span class="f-label">Drag penalty</span>
               <span class="f-wrap"><input id="opt-drag-w" type="number" step="0.05" min="0" max="2" value="0.1"><i></i></span></label>
@@ -364,7 +364,10 @@
           <div class="progress" aria-hidden="true"><div id="opt-progress"></div></div>
           <div id="opt-status" class="note">idle — Fast/Standard stop early at the target; Thorough searches everything</div>
         </div>
-        <div class="opt-charts">
+        <div id="opt-charts" class="opt-charts empty">
+          <div id="opt-charts-empty" class="empty-note">Run the optimizer to
+            see the convergence history, the objective trend and the
+            downforce–drag Pareto front.</div>
           <div id="opt-conv" class="chart-host"></div>
           <div id="opt-obj" class="chart-host"></div>
           <div id="opt-pareto" class="chart-host"
@@ -474,7 +477,7 @@
         (simpleFoam + k-ω SST, moving ground) in Docker and compares the
         result against the panel estimate. Optional — the design workflow
         never requires it.</div>
-      <div class="chart-pair" style="margin-top:8px">
+      <div class="chart-pair rans-charts" style="margin-top:8px">
         <div id="rans-conv" class="chart-host"></div>
         <div id="rans-result"><div class="empty-note">No verification run yet.
           Set up a section, then Verify with RANS — a coarse run typically
@@ -686,7 +689,7 @@
   </div>
 </template>
 
-<script type="module" src="/static/js/shell.js?v=17"></script>
-<script type="module" src="/static/js/app.js?v=17"></script>
+<script type="module" src="/static/js/shell.js?v=18"></script>
+<script type="module" src="/static/js/app.js?v=18"></script>
 </body>
 </html>

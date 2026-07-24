@@ -232,6 +232,9 @@ body {
 .group-head { display: flex; align-items: center; justify-content: space-between; }
 .fields { display: grid; gap: 8px 10px; margin-bottom: 10px; }
 .fields.two-col { grid-template-columns: 1fr 1fr; }
+/* a field with a long descriptive control spans the full row so its select
+   label is not truncated mid-word in a half-width cell */
+.fields.two-col .field.full { grid-column: 1 / -1; }
 .field { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .field.inline { flex-direction: row; align-items: center; gap: 7px; }
 .f-label {
@@ -549,11 +552,15 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
 .sub-title { font: 600 var(--fs-0) var(--sans); letter-spacing: 0.1em;
              text-transform: uppercase; color: var(--ink-2); margin: 14px 0 8px; }
 
-.load-row { margin-bottom: 9px; }
-.load-head { display: flex; justify-content: space-between;
-             font: var(--fs-0) var(--mono); color: var(--ink-2); margin-bottom: 3px; }
-.load-head .gload { color: var(--good); }
-.load-head .gload.warn { color: var(--warning); }
+.load-row { margin-bottom: 11px; }
+.load-head { display: flex; justify-content: space-between; gap: 8px;
+             font: 600 var(--fs-1) var(--mono); color: var(--ink); }
+.load-head > span:first-child { text-transform: uppercase;
+             letter-spacing: 0.04em; }
+.load-sub { font: var(--fs-0) var(--mono); color: var(--ink-3);
+            margin: 1px 0 4px; line-height: 1.4; }
+.load-sub .gload { color: var(--good); }
+.load-sub .gload.warn { color: var(--warning); }
 .load-track {
   height: 8px; border-radius: 4px; background: var(--surface-2);
   border: 1px solid var(--hairline);
@@ -613,6 +620,10 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
 .chart-host.tall { min-height: 230px; }
 .chart-pair { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 @media (max-width: 900px) { .chart-pair { grid-template-columns: 1fr; } }
+/* RANS: before a run the convergence half is empty — hide it and let the
+   result note (which carries the empty state) take the full width */
+.rans-charts #rans-conv:empty { display: none; }
+.rans-charts:has(#rans-conv:empty) { grid-template-columns: 1fr; }
 
 .chart .grid { stroke: var(--grid-dot); stroke-width: 1; }
 .chart .axis { stroke: var(--hairline-2); stroke-width: 1; }
@@ -667,6 +678,12 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
 .progress > div.done { background: var(--good); }
 #opt-hints .warning-item { margin: 8px 0; }
 .opt-charts { display: grid; grid-auto-rows: minmax(190px, 1fr); gap: 8px; min-width: 0; }
+/* before a run the three chart hosts would be one large blank panel — show
+   a placeholder instead and collapse the empty grid */
+.opt-charts.empty { display: flex; align-items: center; justify-content: center; }
+.opt-charts.empty .chart-host, .opt-charts.empty #opt-pareto-note { display: none; }
+#opt-charts-empty { max-width: 34ch; text-align: center; line-height: 1.5; }
+.opt-charts:not(.empty) #opt-charts-empty { display: none; }
 .opt-best { border-left: 1px solid var(--hairline); padding-left: 16px; }
 .opt-best .sub-title { margin-top: 0; }
 #opt-cand-title { margin-top: 16px; }

@@ -1006,11 +1006,14 @@ function renderResults(res) {
       ` · <span class="gload${gf > 2.0 ? " warn" : ""}" title="realized ` +
       `ground-effect operating point: Cl ${fmtN(e.Cl_operating, 2)} — ` +
       `${fmtN(gf, 2)}× the isolated CLmax">ground load ${fmtN(gf, 2)}</span>`;
+    // the element label + loading % on one clean line; the detailed
+    // coefficients on a muted subline below so nothing wraps mid-metric
     row.innerHTML =
-      `<div class="load-head"><span>E${i + 1} ${esc(e.role)} · ` +
-      `Cl ${fmtN(e.Cl_checked, 2)} / ${fmtN(e.CL_max_isolated, 2)} · ` +
-      `ground ×${fmtN(e.ground_multiplier, 1)}${gload}</span>` +
+      `<div class="load-head"><span>E${i + 1} ${esc(e.role)}</span>` +
       `<span>${(frac * 100).toFixed(0)}%</span></div>` +
+      `<div class="load-sub">Cl ${fmtN(e.Cl_checked, 2)} / ` +
+      `${fmtN(e.CL_max_isolated, 2)} · ground ×${fmtN(e.ground_multiplier, 1)}` +
+      `${gload}</div>` +
       `<div class="load-track">` +
       `<div class="load-fill" style="width:${Math.min(frac / scale, 1) * 100}%;` +
       `background:${SERIES[i]}"></div>` +
@@ -1068,6 +1071,7 @@ function resetWorkspaceResults() {
   $("opt-obj").innerHTML = "";
   $("opt-pareto").innerHTML = "";
   $("opt-pareto-note").hidden = true;
+  $("opt-charts").classList.add("empty");   // back to the placeholder
   $("opt-progress").style.width = "0%";
   $("opt-progress").classList.remove("done");
   $("btn-opt-apply").disabled = true;
@@ -1689,6 +1693,7 @@ function renderOptimizer(s) {
   }
   $("opt-status").textContent = bits.join(" · ");
   if (s.history && s.history.length) {
+    $("opt-charts").classList.remove("empty");   // real charts now
     // the job's own set-point first: after a reload the client snapshot is
     // gone and the live form value may have been edited since
     const target = s.target_downforce_n ?? state.optTarget ?? state.target;
