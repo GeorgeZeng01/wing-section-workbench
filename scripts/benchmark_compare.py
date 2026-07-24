@@ -65,8 +65,11 @@ def main() -> int:
                                  sc.get("load_cap_note"),
                                  sc.get("objective")) if n]
             # a version that predates the objective option ACCEPTED it
-            # silently and ran the default target tracker — say so
-            if key.startswith("max_downforce") and not sc.get("objective"):
+            # silently and ran the default target tracker — say so (only
+            # judgeable on completed runs; older records omit the field
+            # on failures too)
+            if (key.startswith("max_downforce") and not sc.get("objective")
+                    and sc.get("state") == "done"):
                 notes.append("objective option silently ignored "
                              "(ran target-mode default)")
             if sc.get("state") != "done":

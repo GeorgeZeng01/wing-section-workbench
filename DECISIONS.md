@@ -1111,17 +1111,21 @@ reserved 35% of the budget) and minimizes drag inside a 0.8% deadzone
 spring at D*. Candidate selection re-scores the whole archive under the
 final objective so "candidate #1 has the lowest J" stays true, and the
 snapshot reports `dstar_n`/`target_note` so the UI quotes the measured
-floor ("about 66 N — more than the 5 N asked") instead of guessing from
+floor ("about 59 N — more than the 5 N asked") instead of guessing from
 pinned variables. Options considered: (a) meet-or-exceed hinge objective —
 rejected, target mode serves aero balance where overshoot is also wrong;
 (b) leave target mode alone and add a separate min-drag-at-target mode —
 rejected, the first-hitter/early-stop behavior is a defect, not a
 preference; (c) two-phase with penalty-gated D* (chosen). Measured on the
-fixed benchmark: 250 N winner drag 32.0 N -> 29.9 N with 296 vs 574
-evaluations; identical-runs-identical preserved; the hot-start do-no-harm
-guarantee (471 N baseline -> 482 N optimized) preserved. Note: in-band
-gap shading (0.8 %c is the band edge) is still penalty-free here by
-construction — pricing that is the recovery-metric decision below.
+fixed benchmark (docs/benchmarks): 250 N winner drag 32.02 -> 31.08 N at
+the Standard budget, with Fast and Thorough now landing on the same
+design (31.08 vs 31.05 N); within a single run the first on-target
+tracker hit carried 35.4 N against the descended winner's 29.9 N (the
+budget-500 regression test pins that spread). Identical-runs-identical
+preserved; the hot-start do-no-harm guarantee (471 N baseline -> 482 N
+optimized at full fidelity) preserved. Note: in-band gap shading (0.8 %c
+is the band edge) is still penalty-free here by construction — pricing
+that is the recovery-metric decision below.
 
 **Max-downforce mode: the loading band hardens at the measured trust
 line, cliff-free in the search, hard at the output.** The measured fact
@@ -1145,10 +1149,15 @@ scaling only, no output filter — rejected, the mode's entire output
 would be the over-claim regime the moment the penalty is out-bid;
 (c) ramp + wall + output guarantee (chosen). Reward is linear
 (60·(1 − downforce/baseline), scale fixed at run start) — no set-point,
-so the gradient must not vanish; measured on the fixed benchmark the mode
-lifts the two-element baseline 259 -> 286 N with the winner peaking at
-87% loading, and pulls the recorded near-stall specimen from 112% back
-to 90%.
+so the gradient must not vanish; measured on the fixed benchmark (after
+the review round below fixed the wall continuity and the clean-pool
+gate) the mode lifts the two-element baseline's 259.1 N claim to
+269.2 N with the winner riding the line at 90.0% loading, and pulls the
+recorded near-stall specimen from 112% back to 90%. Fine-mesh RANS
+measured the (pre-fix) max-mode winner at -19.2% — between the -14%
+clean anchor and the -23% loading-warned onset, consistent with
+optimism growing toward the line; the post-fix winner's fine run is in
+the calibration queue.
 
 **min_ld and min_confidence are floors with the same shape: soft hinge in
 the search, hard filter at the output.** `min_ld` (efficiency floor, the
@@ -1217,6 +1226,31 @@ the corner (gap <= ~1%c AND overlap < 0.5%c) with the recorded numbers
 quoted, in the analysis page and every optimizer candidate's warning
 count; no optimizer penalty is charged on geometry the record has not
 priced.
+
+**Adversarial review round (2026-07-23): 33 confirmed findings fixed;
+two accepted with rationale.** A five-dimension adversarial review of
+this branch's diff (each finding independently refuted-or-confirmed)
+caught, most importantly: the max-mode wall DIPPED to ~0 just past the
+0.90 line (the elif dropped the ramp's terminal value — the search was
+attracted into 0.90-0.908, the exact band the mode excludes), and the
+clean-pool gates tested the raw penalty including the ramp, which
+excluded the legitimate 0.885-0.90 shoulder from candidacy while
+admitting 0.90-0.9056 — the pool was inverted exactly across the trust
+line. Fix: the wall carries the ramp's terminal value, and the pools
+gate on `pen_gate` (penalty minus the max-mode loading shaping — the
+ramp is search pressure, not a verdict). Measured effect: the benchmark
+max-mode winner moved 259.1 -> 269.2 N, now riding the line at 90.0%
+loading. Also fixed: rule legality re-certified at full paneling before
+any candidate is returned; dropped winners promote the best survivor by
+the final objective (not a diversity pick); the solver guard made
+two-directional between single runs and the queue; user-stop verdicts
+mirror whether the stop demonstrably took effect; and a dozen smaller
+UI/report/test defects (see commit cc7d80f). Accepted without code
+change: the rule-preset PUT has no concurrency token (single-user
+localhost app; last-writer-wins on a hand-edited library is acceptable),
+and a ~one-poll race can conservatively label a residual-converged run
+"stopped by user" when the stop lands in the solver's final second —
+the mislabel direction withholds a k_g suggestion, never invents one.
 
 **RANS re-rank: the maximum-accuracy step is RANS at the END of the
 loop, not a different engine in it.** The user's ask was maximum

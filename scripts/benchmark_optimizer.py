@@ -120,16 +120,17 @@ def run_scenario(sc: dict) -> dict:
     out = {"supported": True, "state": job.state, "error": job.error,
            "elapsed_s": elapsed, "n_eval": job.n_eval,
            "n_infeasible": job.n_infeasible}
-    if job.state != "done":
-        return out
     snap = job.snapshot()
-    cands = snap.get("candidates") or []
-    out["n_candidates"] = len(cands)
-    # version-added fields pass through when present
+    # version-added fields pass through when present — including on failed
+    # runs (a loud guarantee failure still ran the requested objective)
     for k in ("dstar_n", "target_note", "load_cap_note", "conf_note",
               "objective"):
         if snap.get(k) is not None:
             out[k] = snap[k]
+    if job.state != "done":
+        return out
+    cands = snap.get("candidates") or []
+    out["n_candidates"] = len(cands)
     if snap.get("pareto"):
         out["pareto_n"] = len(snap["pareto"])
     if cands:
