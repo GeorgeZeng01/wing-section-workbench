@@ -134,10 +134,23 @@ export function lineChart(container, spec) {
       .filter(p => Number.isFinite(p[0]) && Number.isFinite(p[1]));
     if (!pts.length) continue;
     if (s.markers) {
-      for (const [px, py] of pts) {
-        el("circle", { cx: X(px), cy: Y(py), r: 2.6, fill: s.color,
-                       "fill-opacity": 0.9 }, svg);
-      }
+      pts.forEach(([px, py], pi) => {
+        const fill = (s.pointColors && s.pointColors[pi]) || s.color;
+        const c = el("circle", { cx: X(px), cy: Y(py),
+                                 r: s.onPointClick ? 3.5 : 2.6, fill,
+                                 "fill-opacity": 0.9 }, svg);
+        if (s.onPointClick) {
+          // generous invisible hit area — 3.5 px is a hover target, not
+          // a click target
+          const hit = el("circle", { cx: X(px), cy: Y(py), r: 9,
+                                     fill: "transparent",
+                                     style: "cursor:pointer" }, svg);
+          for (const node of (c && [c, hit]) || []) {
+            node.addEventListener("click", () => s.onPointClick(pi));
+            node.style.cursor = "pointer";
+          }
+        }
+      });
     }
     if (s.markers !== "only") {
       const d = pts.map((p, i) =>

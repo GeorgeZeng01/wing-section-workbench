@@ -1167,6 +1167,24 @@ winner was the worse default). Alternative considered: default the floor
 to "off" and enforce only when set — rejected as keeping the measured
 failure mode as the default output; floor 0 restores it explicitly.
 
+**Pareto front: mined from the archive at run end, re-analyzed at full
+fidelity, trust-colored, deliberately unfiltered.** The optimizer always
+archived every feasible evaluation with downforce AND drag, then threw
+the trade-off away; now the clean (penalty-gated) non-dominated set is
+downsampled to 24 points (extremes + farthest-point, knee-dense),
+re-analyzed at full paneling with the same trust summary candidates
+carry, and served in the snapshot as a clickable chart — click applies
+the design through the existing applyDesign path. The front is NOT run
+through the output filters: it is a view of the whole trade-off, and
+hiding the flagged region would misrepresent where the model stops being
+trustworthy — flagged points render amber instead. While the search
+runs, a strided downsample of the archive streams as a live grey cloud.
+Options considered: (a) expose the raw archive to the client and mine
+there — rejected, the front needs full-fidelity re-analysis and configs
+reconstructed server-side anyway; (b) live full-fidelity front during
+the run — rejected, up to 24 analyze() calls per poll; (c) final
+finalized front + live search-fidelity cloud (chosen).
+
 **Slot-flow trust metric: built, measured against the RANS record, and
 rejected — a geometric advisory ships instead.** The observed failure mode
 (flow detaching ahead of the main TE while the flap sits above the slot

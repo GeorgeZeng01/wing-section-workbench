@@ -1114,6 +1114,7 @@ function renderOptimizer(s) {
       height: 128,
     });
   }
+  renderPareto(s);
   if (s.best && s.variables) {
     const NAMES = { deflection_deg: "deflection", chord_ratio: "chord",
                     slot_gap_pct: "slot gap", slot_overlap_pct: "overlap",
@@ -1142,6 +1143,46 @@ function renderOptimizer(s) {
       `<div class="kv"><span>downforce</span><b>${s.best.downforce_n} N</b></div>` +
       `<div class="kv"><span>drag estimate</span><b>${s.best.drag_n} N</b></div>` +
       rows;
+  }
+}
+
+function renderPareto(s) {
+  const host = $("opt-pareto");
+  const note = $("opt-pareto-note");
+  const flagged = (p) => {
+    const f = p.summary || {};
+    return f.low_confidence || f.near_stall || f.slot_signature
+      || (f.frac_max ?? 0) > 0.9;
+  };
+  if (s.pareto && s.pareto.length) {
+    // finalized front: full-fidelity numbers, clickable, trust-colored
+    const pts = s.pareto.slice().sort((a, b) => a.drag_n - b.drag_n);
+    lineChart(host, {
+      series: [{
+        name: "front", color: SERIES[0], markers: "only",
+        x: pts.map(p => p.drag_n), y: pts.map(p => p.downforce_n),
+        pointColors: pts.map(p => (flagged(p) ? "#fab219" : SERIES[0])),
+        onPointClick: (i) => {
+          applyDesign(pts[i].config);
+          toast(`Pareto design applied — ${fmtN(pts[i].downforce_n, 0)} N ` +
+                `at ${fmtN(pts[i].drag_n)} N drag. Re-analyzing.`, "good");
+        },
+      }],
+      xLabel: "drag [N]", yLabel: "downforce [N]", height: 148,
+    });
+    note.hidden = false;
+  } else if (s.cloud && s.cloud.length
+             && (s.state === "running" || s.state === "finalizing")) {
+    // live evaluation cloud while the search runs (not clickable — these
+    // are search-fidelity numbers)
+    lineChart(host, {
+      series: [{ name: "evaluations", color: "#5a6a8a", markers: "only",
+                 x: s.cloud.map(c => c[1]), y: s.cloud.map(c => c[0]),
+                 pointColors: s.cloud.map(c => (c[2] ? "#fab219"
+                                                     : "#5a6a8a")) }],
+      xLabel: "drag [N]", yLabel: "downforce [N]", height: 148,
+    });
+    note.hidden = true;
   }
 }
 

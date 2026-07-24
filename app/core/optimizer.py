@@ -134,6 +134,8 @@ CAND_MAXDF_TOL = 0.05      # alternates within 5% of the best clean downforce
 MIN_LD_W = 40.0            # min_ld soft-hinge weight (mirror of the bands)
 LD_SLACK = 0.98            # output filter: ld >= 0.98 * min_ld
 
+PARETO_MAX = 24            # front points re-analyzed at full fidelity
+
 # viscous-data trust penalty. Soft by construction: a screened library stack
 # (confidence well above CONF_FLOOR, stalling inside the polar grid) pays
 # nothing, and even a fully flagged element costs about as much as an ~11%
@@ -596,6 +598,7 @@ class Job:
         self.load_cap_note = None  # "baseline_exceeds_cap" in max mode
         self.conf_note = None      # "baseline_below_floor"
         self._drop_stats = None    # output-filter drops, for the failure msg
+        self.pareto = None         # finalized (downforce, drag) front
         self.archive: list[dict] = []   # every feasible evaluation (for
                                         # candidate selection at the end)
         self.candidates = None     # ranked diverse designs, set on finish
@@ -1019,6 +1022,87 @@ class Job:
                                 "best_conf": best_conf, "best_ld": best_ld}
         return kept
 
+    def _pareto_front(self) -> list[dict]:
+        """Non-dominated (downforce up, drag down) set from the archive's
+        clean pool, downsampled to PARETO_MAX keeping both extremes plus
+        farthest-point density — knee-dense by construction."""
+        with self._lock:
+            archive = list(self.archive)
+        pool = [a for a in archive if a["penalty"] < PEN_OK] or archive
+        if not pool:
+            return []
+        # full-panel entries win near-duplicate downforce levels
+        pool.sort(key=lambda a: (-a["downforce_n"], a["drag_n"],
+                                 a.get("panels") != self._full_panels))
+        front, best_drag = [], None
+        for a in pool:
+            if best_drag is None or a["drag_n"] < best_drag - 1e-9:
+                front.append(a)
+                best_drag = a["drag_n"]
+        if len(front) <= PARETO_MAX:
+            return front
+        dns = [a["downforce_n"] for a in front]
+        drs = [a["drag_n"] for a in front]
+        span_d = (max(dns) - min(dns)) or 1.0
+        span_g = (max(drs) - min(drs)) or 1.0
+        picked = [front[0], front[-1]]
+        rest = front[1:-1]
+        while len(picked) < PARETO_MAX and rest:
+            best = max(rest, key=lambda a: min(
+                abs(a["downforce_n"] - p["downforce_n"]) / span_d
+                + abs(a["drag_n"] - p["drag_n"]) / span_g
+                for p in picked))
+            rest.remove(best)
+            picked.append(best)
+        picked.sort(key=lambda a: -a["downforce_n"])
+        return picked
+
+    def _finalize_pareto(self) -> list[dict]:
+        """Front points re-analyzed at full fidelity with trust summaries
+        and applicable configs. Deliberately NOT run through the output
+        filters: the front is a trust-colored view of the whole trade-off,
+        and applying a flagged point is the user's explicit, visible
+        choice — hiding the flagged region would misrepresent where the
+        model stops being trustworthy."""
+        out = []
+        for a in self._pareto_front():
+            cfg_c = apply_vector(self.config, self.variables,
+                                 np.array(a["x"]), self.shortlists)
+            try:
+                r = analysis.analyze(StackConfig.from_dict(cfg_c),
+                                     include_geometry=False)
+            except Exception:
+                continue
+            els = r["elements"]
+            conf_min = min(e["nf_confidence"] for e in els)
+            out.append({
+                "downforce_n": r["forces"]["downforce_n"],
+                "drag_n": r["forces"]["drag_total_n"],
+                "x": a["x"], "config": cfg_c,
+                "summary": {
+                    "efficiency_ld": r["forces"]["efficiency_ld"],
+                    "warnings": len(r["warnings"]),
+                    "confidence_min": round(conf_min, 3),
+                    "low_confidence": bool(conf_min < self.min_conf),
+                    "near_stall": any(
+                        (e["cd_lookup_capped"] or e["cl_max_at_grid_edge"])
+                        and e["loading_fraction"] > FLAG_LOAD_FRAC
+                        for e in els),
+                    "frac_max": round(max(e["loading_fraction"]
+                                          for e in els), 3),
+                    "slot_signature": bool(r.get("slot_signature")),
+                },
+            })
+        # full fidelity can reorder the coarse-search points: re-sort and
+        # prune whatever became dominated
+        out.sort(key=lambda p: -p["downforce_n"])
+        pruned, best_drag = [], None
+        for p in out:
+            if best_drag is None or p["drag_n"] < best_drag - 1e-9:
+                pruned.append(p)
+                best_drag = p["drag_n"]
+        return pruned
+
     def _guarantee_failure_message(self) -> str:
         d = self._drop_stats or {}
         parts = []
@@ -1284,7 +1368,9 @@ class Job:
                     # best, so best/result must follow the promoted design
                     best_cfg = candidates[0]["config"]
                     result = analysis.analyze(StackConfig.from_dict(best_cfg))
+                    pareto = self._finalize_pareto()
                     with self._lock:
+                        self.pareto = pareto
                         self.best = {**(self.best or {}),
                                      "x": candidates[0]["x"],
                                      "J": candidates[0]["J"],
@@ -1332,6 +1418,14 @@ class Job:
             eta = (elapsed * (1 - progress) / progress
                    if 0.02 < progress < 1.0 and self.state == "running"
                    else None)
+            # live trade-off cloud: a strided downsample of the archive,
+            # cheap enough to rebuild per poll (flag 0 clean / 1 penalized
+            # / 2 past the loading trust line)
+            stride = max(1, len(self.archive) // 250)
+            cloud = [[a["downforce_n"], a["drag_n"],
+                      (2 if (a.get("frac_max") or 0.0) > analysis.LOAD_WARN
+                       else 1 if a["penalty"] >= PEN_OK else 0)]
+                     for a in self.archive[::stride]][:250]
             return {
                 "id": self.id, "state": self.state, "error": self.error,
                 "n_eval": self.n_eval,
@@ -1355,6 +1449,9 @@ class Job:
                           else None,
                 "candidates": self.candidates
                               if self.state in ("done", "cancelled") else None,
+                "pareto": (self.pareto
+                           if self.state in ("done", "cancelled") else None),
+                "cloud": cloud,
             }
 
     def cancel(self):
