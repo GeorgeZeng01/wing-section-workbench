@@ -303,6 +303,7 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
   padding: 1px 6px; border-radius: 3px;
   background: var(--surface-3); color: var(--ink-2);
   border: 1px solid var(--hairline-2);
+  overflow-wrap: anywhere;   /* a malformed field can't force a scrollbar */
 }
 .badge.warn { color: var(--warning);
               border-color: color-mix(in srgb, var(--warning) 45%, transparent); }
@@ -655,7 +656,10 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
   border-radius: var(--r); padding: 9px 11px; margin: 7px 0;
 }
 .cand-head { display: flex; justify-content: space-between; gap: 8px;
+             flex-wrap: wrap; min-width: 0;
              align-items: baseline; font: var(--fs-1) var(--mono); color: var(--ink); }
+.cand-head > span:last-child { display: flex; flex-wrap: wrap; gap: 4px;
+                               justify-content: flex-end; }
 .cand-head b { color: var(--ink); }
 .cand-body { margin: 5px 0 8px; font: var(--fs-0) var(--mono);
              color: var(--ink-2); line-height: 1.55; }
@@ -739,6 +743,33 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
 .toast.info { border-left-color: var(--accent); }
 .toast.good { border-left-color: var(--good); }
 @keyframes slide-in { from { transform: translateX(12px); opacity: 0; } }
+
+/* pinned designs */
+.pins-sec { margin-top: 16px; border-top: 1px solid var(--hairline);
+            padding-top: 4px; }
+.pins-sec > .btn { margin-top: 8px; }
+.pin-row {
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 8px;
+  background: var(--surface-2); border: 1px solid var(--hairline);
+  border-radius: var(--r-s);
+  padding: 6px 9px; margin: 6px 0;
+}
+.pin-head { display: flex; flex-direction: column; gap: 1px; min-width: 0; }
+.pin-name { font: 600 var(--fs-1) var(--mono); color: var(--ink); }
+.pin-stats { font: var(--fs-0) var(--mono); color: var(--ink-3);
+             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pin-actions { display: flex; gap: 5px; flex: none; }
+
+/* unsaved-changes dot on the Save button */
+.btn.dirty::after {
+  content: "";
+  display: inline-block;
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--warning);
+  margin-left: 6px;
+  vertical-align: 1px;
+}
 
 /* scrollbars */
 * { scrollbar-width: thin; scrollbar-color: var(--hairline-2) transparent; }

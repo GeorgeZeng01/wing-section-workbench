@@ -1504,6 +1504,11 @@ class Job:
                 "dstar_n": (round(self.dstar, 1)
                             if self.dstar is not None else None),
                 "target_note": self.target_note,
+                # the run's own set-point: a re-attached client (page reload)
+                # has lost its launch snapshot and must not grade the run
+                # against a live form value edited since
+                "target_downforce_n": float(
+                    self.options.get("target_downforce_n", 200.0)),
                 "objective": self.objective_mode,
                 "load_cap_note": self.load_cap_note,
                 "conf_note": self.conf_note,

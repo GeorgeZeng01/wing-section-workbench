@@ -61,6 +61,14 @@ const state = {
   rulePresets: [],            // machine-level rule-envelope library
   ransRerank: null,           // last RANS re-rank rows (session-persisted)
   rerankPoll: null,
+  optResult: null,            // terminal optimizer status (session-persisted, trimmed)
+  ransResult: null,           // terminal RANS verify status (session-persisted)
+  ransRev: null,              // configRevision when the RANS run started
+  screenMeta: null,           // {elem, re, ncrit, count} the table was screened at
+  lastSweep: null,            // last operating-map response
+  pins: [],                   // pinned designs [{t, label, config, target, headline}]
+  geoValid: true,             // last geometry refresh succeeded
+  queueActive: false,         // a re-rank queue owns the RANS solver
 };
 
 const viewport = new Viewport($("viewport"));
@@ -93,6 +101,58 @@ function roleName(i) { return i === 0 ? "main" : `flap ${i}`; }
 function debounce(fn, ms) {
   let t = null;
   return (...a) => { clearTimeout(t); t = setTimeout(() => fn(...a), ms); };
+}
+
+// values interpolated into innerHTML templates can originate from a project
+// file — escape them so a crafted file cannot inject markup
+function esc(v) {
+  return String(v).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// fixed-point formatter that survives file-controlled junk: null, strings
+// and objects render as an en-dash instead of throwing
+function numf(v, d) {
+  return v != null && Number.isFinite(+v) ? (+v).toFixed(d) : "–";
+}
+
+// restored flow-field images must be inline raster data, nothing else — an
+// http(s) URL would phone home the moment a shared project opens, and a
+// crafted string could break out of the report's <img src="..."> attribute
+function safeFlow(o) {
+  if (!o || typeof o !== "object") return null;
+  const out = {};
+  for (const k of ["umag", "cp"]) {
+    if (typeof o[k] === "string"
+        && /^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/=]+$/.test(o[k])) {
+      out[k] = o[k];
+    }
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+// any job that owns server-side compute right now
+function jobsRunning() {
+  return !!(state.optJob || state.ransJob || state.queueActive);
+}
+
+/* unsaved-work indicator: the Save button carries a dot whenever the
+   workspace (config or results) has changed since the last save/open */
+let workspaceDirty = false;
+function markDirty() {
+  workspaceDirty = true;
+  syncSaveIndicator();
+}
+function clearDirty() {
+  workspaceDirty = false;
+  syncSaveIndicator();
+}
+function syncSaveIndicator() {
+  const b = $("btn-save");
+  b.classList.toggle("dirty", workspaceDirty);
+  b.title = workspaceDirty
+    ? "Save the project to a file — unsaved changes (Ctrl+S)"
+    : "Save the project to a file (Ctrl+S)";
 }
 
 /* ---------------- config form ---------------- */
@@ -130,8 +190,19 @@ function writeConfigToForm() {
     $("rule-xoff").value = env.x_offset_mm ?? 0;
     $("rule-preset").value = env.preset_name ?? "";
   }
+  syncVpRulesToggle();
   buildElementCards();
   updateTargetC();
+}
+
+/* the viewport's Rules checkbox draws the envelope box — meaningless while
+   no envelope is applied, so say so instead of a silent no-op */
+function syncVpRulesToggle() {
+  const has = !!state.config.rule_envelope;
+  $("vp-rules").disabled = !has;
+  $("vp-rules").closest("label").title = has
+    ? "Show the rule envelope box"
+    : "Enable Rules in the left panel first — there is no envelope to draw.";
 }
 
 function bindConfigInputs() {
@@ -244,6 +315,7 @@ function bindRules() {
       delete state.config.rule_envelope;
     }
     $("rules-body").hidden = !$("rules-on").checked;
+    syncVpRulesToggle();
     onConfigChanged();
   });
   for (const id of ["rule-len", "rule-height", "rule-clear", "rule-xoff"]) {
@@ -270,6 +342,23 @@ function bindRules() {
   });
   $("rule-preset-save").addEventListener("click", saveRulePreset);
   $("rule-preset-del").addEventListener("click", deleteRulePreset);
+  $("rule-preset-name").addEventListener("input", syncRulePresetButtons);
+  $("rule-preset").addEventListener("change", syncRulePresetButtons);
+  syncRulePresetButtons();
+}
+
+/* boundary states disable with the reason instead of toasting on click */
+function syncRulePresetButtons() {
+  const name = ($("rule-preset-name").value || "").trim();
+  $("rule-preset-save").disabled = !name;
+  $("rule-preset-save").title = name
+    ? "Save the current limits as a named preset"
+    : "Give the preset a name first (the Save as field).";
+  const sel = $("rule-preset").value;
+  $("rule-preset-del").disabled = !sel;
+  $("rule-preset-del").title = sel
+    ? `Delete the "${sel}" preset from this machine`
+    : "Select a preset to delete.";
 }
 
 function renderRulePresetOptions() {
@@ -287,6 +376,7 @@ function renderRulePresetOptions() {
     sel.appendChild(o);
   }
   sel.value = state.rulePresets.some((p) => p.name === cur) ? cur : "";
+  syncRulePresetButtons();
 }
 
 async function loadRulePresets() {
@@ -355,12 +445,20 @@ async function deleteRulePreset() {
 function buildElementCards() {
   const host = $("element-cards");
   host.innerHTML = "";
-  $("el-count").textContent = state.config.elements.length;
+  const n = state.config.elements.length;
+  $("el-count").textContent = n;
+  // boundary states disable with the reason instead of toasting on click
+  $("el-add").disabled = n >= 4;
+  $("el-add").title = n >= 4 ? "Maximum of 4 elements." : "Add a flap";
+  $("el-remove").disabled = n <= 1;
+  $("el-remove").title = n <= 1
+    ? "The main element cannot be removed." : "Remove last flap";
   state.config.elements.forEach((e, i) => host.appendChild(elementCard(e, i)));
-  state.polarElem = Math.min(state.polarElem, state.config.elements.length - 1);
+  state.polarElem = Math.min(state.polarElem, n - 1);
   buildViewportLegend();
   buildPolarChips();
   buildScreenerTargets();
+  syncOptimizerVars();
 }
 
 function elementCard(e, i) {
@@ -558,6 +656,34 @@ function usedCustomSpecs() {
   return used;
 }
 
+// the optimizer status carries fields only the live poll needs — drop the
+// evaluation cloud and the winner's full re-analysis before persisting
+function trimOptResult(s) {
+  if (!s) return null;
+  const { cloud, result, ...rest } = s;
+  return rest;
+}
+
+// everything computed for the current workspace, in exactly the shapes the
+// render functions consume — restored without recomputation
+function resultsSnapshot() {
+  return {
+    analysis: state.analysis,
+    analysis_stale: !!state.analysis && !$("results-stale").hidden,
+    optimizer: trimOptResult(state.optResult),
+    opt_target: state.optTarget,
+    rans: state.ransResult,
+    rans_stale: !!state.ransResult && state.ransRev != null
+                && configRevision > state.ransRev,
+    sweep: state.lastSweep,
+    sweep_stale: !!state.lastSweep && !$("map-stale").hidden,
+    // the full library screen is ~500 KB of JSON — persist the top slice
+    // (the table renders 60 rows; 150 keeps re-sorting useful)
+    screen: state.screenRows
+      ? { rows: state.screenRows.slice(0, 150), meta: state.screenMeta } : null,
+  };
+}
+
 function sessionSnapshot() {
   const custom = {};
   for (const spec of usedCustomSpecs()) {
@@ -565,9 +691,12 @@ function sessionSnapshot() {
       custom[spec] = state.customDat[spec];
     }
   }
-  return { config: state.config, target: state.target,
+  return { t: Date.now(),
+           config: state.config, target: state.target,
            airfoil_names: state.airfoilNames, custom_airfoils: custom,
-           rans_rerank: state.ransRerank };
+           rans_rerank: state.ransRerank,
+           pins: state.pins,
+           results: resultsSnapshot() };
 }
 
 // the desktop shell serves on a fresh port (= new origin) every launch, so
@@ -598,13 +727,28 @@ function flushSession() {
   if (!sessionReady) return;
   try {
     const snap = sessionSnapshot();
-    localStorage.setItem("wss-session", JSON.stringify(snap));
+    try { localStorage.setItem("wss-session", JSON.stringify(snap)); } catch {}
+    // the beacon quota is ~64 KB — a results-bearing snapshot can exceed it
+    // and be silently dropped. That is acceptable: the debounced writer
+    // already posted the full state moments ago, and restoreSession picks
+    // the NEWER of server/localStorage by timestamp, so a same-origin
+    // reload still gets the very last edits from localStorage.
     navigator.sendBeacon("/api/session",
       new Blob([JSON.stringify({ state: snap })], { type: "application/json" }));
   } catch { /* best effort */ }
 }
 window.addEventListener("pagehide", flushSession);
 window.addEventListener("beforeunload", flushSession);
+
+// editing speed/chord/nu/ncrit changes each element's Re — keep the polar
+// chips honest, and re-render the charts when the tab is being watched
+const schedulePolarSync = debounce(() => {
+  buildPolarChips();
+  if (document.querySelector('.tab[data-tab="polars"]').classList
+        .contains("active")) {
+    renderPolars();
+  }
+}, 600);
 
 function onConfigChanged() {
   configRevision++;
@@ -614,6 +758,8 @@ function onConfigChanged() {
   if (viewport.xcp != null) viewport.setCp(null);
   updateTargetC();
   scheduleGeometry();
+  schedulePolarSync();
+  markDirty();
   persistSession();
 }
 
@@ -654,10 +800,47 @@ async function refreshGeometry() {
       `ride height ${state.config.ride_height_mm} mm ` +
       `(${(geo.ride_height_c * 100).toFixed(1)}% chord)` + warn;
     $("vp-status").style.color = geo.warnings.length ? "var(--warning)" : "";
+    state.geoValid = true;
+    applyGeoValidity();
   } catch (e) {
     if (seq !== geoReqSeq) return;
     $("vp-status").textContent = e.message;
     $("vp-status").style.color = "var(--critical)";
+    state.geoValid = false;
+    applyGeoValidity();
+  }
+}
+
+/* while the configuration has no valid geometry, every action that consumes
+   it can only fail — disable them with the reason instead of five toasts.
+   Buttons that are busy with an in-flight run keep their own lock: forcing
+   them back on would allow concurrent duplicate runs. */
+function applyGeoValidity() {
+  const bad = !state.geoValid;
+  const reason = "The current configuration has no valid geometry — fix it " +
+    "first (the drawing panel's status line has the error).";
+  const setBtn = (el) => {
+    if (bad) {
+      el.disabled = true;
+      el.title = reason;
+    } else if (!el.classList.contains("busy")) {
+      el.disabled = false;
+      el.title = "";
+    }
+  };
+  setBtn($("btn-analyze"));
+  setBtn($("btn-sweep"));
+  document.querySelectorAll("[data-export]").forEach(setBtn);
+  setBtn($("btn-export-cfd"));
+  setBtn($("btn-report"));
+  // the optimizer start button additionally answers to its own job state —
+  // including the launch window before state.optJob is assigned
+  if (bad) {
+    $("btn-opt-run").disabled = true;
+    $("btn-opt-run").title = reason;
+  } else {
+    if (!state.optJob && !optLaunching) $("btn-opt-run").disabled = false;
+    $("btn-opt-run").title = "";
   }
 }
 
@@ -700,7 +883,29 @@ $("vp-fit").addEventListener("click", () => viewport.fit());
 /* ---------------- analysis + results ---------------- */
 
 function markStale() {
-  if (state.analysis) $("results-stale").hidden = false;
+  if (state.analysis) {
+    $("results-stale").hidden = false;
+    // the Cp chart in the dock shows the same outdated analysis — say so
+    // where the user is actually looking
+    if (!$("cp-chart").hidden) $("cp-stale").hidden = false;
+  }
+  // a RANS verdict describes the config it solved, not the edited one.
+  // Reset the text: a provenance message ("restored result…") may still be
+  // in the element from an earlier render and would mislabel a fresh run.
+  if (state.ransResult && state.ransRev != null
+      && configRevision > state.ransRev) {
+    $("rans-stale").textContent = "configuration changed since this " +
+      "verification — the verdict below describes the earlier design; " +
+      "re-verify";
+    $("rans-stale").hidden = false;
+    const kg = document.getElementById("btn-rans-apply-kg");
+    if (kg) {
+      kg.disabled = true;
+      kg.title = "Calibrated on an earlier configuration — re-verify first.";
+    }
+  }
+  // operating maps were swept for the previous configuration
+  if (state.lastSweep) $("map-stale").hidden = false;
 }
 
 let analyzeSeq = 0;
@@ -719,10 +924,14 @@ async function runAnalysis() {
     // only claim freshness if the form wasn't edited mid-flight
     if (configRevision === revAtStart) {
       $("results-stale").hidden = true;
+      $("cp-stale").hidden = true;
       viewport.setCp(res.coefficients.x_cp_c);
     } else {
       $("results-stale").hidden = false;
     }
+    syncPinButton();
+    markDirty();
+    persistSession();
   } catch (e) {
     if (seq === analyzeSeq) toast(`Analysis failed: ${e.message}`);
   } finally {
@@ -744,6 +953,7 @@ function renderTargetPill() {
 }
 
 function renderResults(res) {
+  if (!res?.coefficients || !res?.forces) return;   // file-controlled shape
   $("results-empty").hidden = true;
   $("results-body").hidden = false;
   const c = res.coefficients, f = res.forces;
@@ -770,8 +980,8 @@ function renderResults(res) {
 
   const host = $("r-loading");
   host.innerHTML = "";
-  res.elements.forEach((e, i) => {
-    const frac = e.loading_fraction;
+  (res.elements || []).forEach((e, i) => {
+    const frac = +e.loading_fraction || 0;
     const gf = e.loading_fraction_ground;
     const row = document.createElement("div");
     row.className = "load-row";
@@ -781,7 +991,7 @@ function renderResults(res) {
       `ground-effect operating point: Cl ${fmtN(e.Cl_operating, 2)} — ` +
       `${fmtN(gf, 2)}× the isolated CLmax">ground load ${fmtN(gf, 2)}</span>`;
     row.innerHTML =
-      `<div class="load-head"><span>E${i + 1} ${e.role} · ` +
+      `<div class="load-head"><span>E${i + 1} ${esc(e.role)} · ` +
       `Cl ${fmtN(e.Cl_checked, 2)} / ${fmtN(e.CL_max_isolated, 2)} · ` +
       `ground ×${fmtN(e.ground_multiplier, 1)}${gload}</span>` +
       `<span>${(frac * 100).toFixed(0)}%</span></div>` +
@@ -794,7 +1004,7 @@ function renderResults(res) {
 
   const w = $("r-warnings");
   w.innerHTML = "";
-  for (const msg of res.warnings) {
+  for (const msg of res.warnings || []) {
     const d = document.createElement("div");
     const crit = /separation|intersect|choke/.test(msg);
     d.className = "warning-item" + (crit ? " crit" : "");
@@ -805,19 +1015,206 @@ function renderResults(res) {
 
 $("btn-analyze").addEventListener("click", runAnalysis);
 
+/* Everything computed belongs to ONE workspace. Loading another project or
+   preset must clear it all — otherwise the old workspace's results keep
+   rendering under the new configuration, get pinned against it, and are
+   persisted and exported as if they described it. */
+function resetWorkspaceResults() {
+  state.analysis = null;
+  state.optResult = null;
+  state.optTarget = null;
+  state.ransResult = null;
+  state.ransRev = null;
+  state.ransCEst = null;
+  state.lastSweep = null;
+  state.screenRows = null;
+  state.screenMeta = null;
+  state.ransRerank = null;
+  ransFlowId = null;
+  ransFlowCache = null;
+  if (ransFlowUrl) { URL.revokeObjectURL(ransFlowUrl); ransFlowUrl = null; }
+  // results panel
+  $("results-body").hidden = true;
+  $("results-empty").hidden = false;
+  $("results-stale").hidden = true;
+  viewport.setCp(null);
+  // pressure
+  $("cp-chart").hidden = true;
+  $("cp-chart").innerHTML = "";
+  $("cp-empty").hidden = false;
+  $("cp-stale").hidden = true;
+  // optimizer
+  $("opt-best-body").textContent = "No run yet.";
+  $("opt-hints").innerHTML = "";
+  $("opt-candidates").innerHTML = "";
+  $("opt-cand-title").hidden = true;
+  $("opt-conv").innerHTML = "";
+  $("opt-obj").innerHTML = "";
+  $("opt-pareto").innerHTML = "";
+  $("opt-pareto-note").hidden = true;
+  $("opt-progress").style.width = "0%";
+  $("opt-progress").classList.remove("done");
+  $("btn-opt-apply").disabled = true;
+  $("rerank-title").hidden = true;
+  $("rerank-block").hidden = true;
+  $("rerank-table").innerHTML = "";
+  $("rerank-status").textContent = "";
+  $("opt-status").textContent = "idle";
+  syncOptObjectiveUI();   // expands "idle" into the mode's idle line
+  // RANS verify
+  $("rans-conv").innerHTML = "";
+  $("rans-result").innerHTML =
+    '<div class="empty-note">No verification run yet. Set up a section, ' +
+    'then Verify with RANS — a coarse run typically takes a few minutes.</div>';
+  $("rans-flow").hidden = true;
+  $("rans-stale").hidden = true;
+  $("rans-progress").style.width = "0%";
+  $("rans-progress").classList.remove("done");
+  // maps
+  $("map-downforce").innerHTML = "";
+  $("map-ld").innerHTML = "";
+  $("map-allowance").hidden = true;
+  $("map-stale").hidden = true;
+  $("map-note").textContent = "Sweep ride height or speed to map how the " +
+    "current design behaves away from its operating point.";
+  // screener
+  $("scr-table").innerHTML =
+    '<div class="empty-note">Run a screen to rank candidate airfoils for ' +
+    'an element.</div>';
+  $("scr-note").textContent =
+    "Ranks all 2,174 bundled sections at your Reynolds number.";
+  syncPinButton();
+}
+
+/* ---------------- pinned designs ----------------
+   Snapshot the current design + its analyzed numbers; restore or compare
+   any pin later. Pins travel with the session and the project file — the
+   iterate-and-justify record for a design report. */
+
+const MAX_PINS = 12;
+
+function syncPinButton() {
+  const b = $("btn-pin");
+  if (!state.analysis) {
+    b.disabled = true;
+    b.title = "Analyze the section first — a pin records the design with " +
+              "its analyzed numbers.";
+  } else if (state.pins.length >= MAX_PINS) {
+    b.disabled = true;
+    b.title = `Pin limit reached (${MAX_PINS}) — remove one to pin again.`;
+  } else {
+    b.disabled = false;
+    b.title = !$("results-stale").hidden
+      ? "The analysis is older than the current edits — the pin records " +
+        "the analyzed design, not the edited form."
+      : "Pin the current design and its results for later comparison.";
+  }
+}
+
+function pinCurrent() {
+  if (!state.analysis) return;
+  const f = state.analysis.forces;
+  state.pins.push({
+    t: new Date().toISOString(),
+    label: `#${state.pins.length + 1}`,
+    config: structuredClone(state.config),
+    target: state.target,
+    headline: {
+      downforce_n: f.downforce_n,
+      drag_n: f.drag_total_n,
+      ld: f.efficiency_ld,
+      warnings: (state.analysis.warnings || []).length,
+      elements: state.config.elements.length,
+    },
+  });
+  renderPins();
+  syncPinButton();
+  markDirty();
+  persistSession();
+  toast(`Design pinned (${fmtN(f.downforce_n, 0)} N).`, "good", 3000);
+}
+
+function renderPins() {
+  const host = $("pins-list");
+  host.innerHTML = "";
+  $("pins-empty").hidden = state.pins.length > 0;
+  state.pins.forEach((p, i) => {
+    const h = p.headline || {};   // pins can come from an edited file
+    const row = document.createElement("div");
+    row.className = "pin-row";
+    const head = document.createElement("div");
+    head.className = "pin-head";
+    const name = document.createElement("span");
+    name.className = "pin-name";
+    name.textContent = `${p.label} · ${fmtN(h.downforce_n, 0)} N`;
+    name.title = new Date(p.t).toLocaleString();
+    head.appendChild(name);
+    const stats = document.createElement("span");
+    stats.className = "pin-stats";
+    stats.textContent =
+      `drag ${fmtN(h.drag_n, 1)} N · L/D ${fmtN(h.ld, 1)}` +
+      ` · ${h.elements ?? "?"} el` +
+      (h.warnings ? ` · ${h.warnings} warn` : "");
+    head.appendChild(stats);
+    row.appendChild(head);
+    const actions = document.createElement("div");
+    actions.className = "pin-actions";
+    const apply = document.createElement("button");
+    apply.className = "btn tiny";
+    apply.textContent = "Restore";
+    apply.title = "Restore this pinned design (replaces the configuration " +
+                  "and re-analyzes)";
+    apply.addEventListener("click", async () => {
+      busy(apply, true);
+      state.config = withDefaults(structuredClone(p.config));
+      state.target = p.target;
+      // the config changed wholesale: everything computed for the previous
+      // design is now stale (RANS verdicts, maps, the k_g offer)
+      configRevision++;
+      markStale();
+      writeConfigToForm();
+      persistSession();
+      await refreshGeometry();
+      await runAnalysis();
+      busy(apply, false);
+      toast(`Pinned design ${p.label} restored.`, "good", 3000);
+    });
+    actions.appendChild(apply);
+    const del = document.createElement("button");
+    del.className = "btn tiny ghost";
+    del.textContent = "✕";
+    del.title = "Remove this pin";
+    del.addEventListener("click", () => {
+      state.pins.splice(i, 1);
+      renderPins();
+      syncPinButton();
+      markDirty();
+      persistSession();
+    });
+    actions.appendChild(del);
+    row.appendChild(actions);
+    host.appendChild(row);
+  });
+}
+
+$("btn-pin").addEventListener("click", pinCurrent);
+
 /* ---------------- pressure tab ---------------- */
 
 function renderCp(res) {
+  if (!Array.isArray(res?.cp_distributions)) return;
   const host = $("cp-chart");
   $("cp-empty").hidden = true;
   host.hidden = false;
   const mm = state.config.chord_mm;
   lineChart(host, {
     series: res.cp_distributions.map((d, i) => ({
+      // role can arrive from a project file — charts.js escapes series
+      // names at its innerHTML sink, so pass it through as plain text
       name: `E${i + 1} ${d.role}`,
       color: SERIES[i],
-      x: d.x.map(v => v * mm),
-      y: d.cp,
+      x: (d.x || []).map(v => v * mm),
+      y: d.cp || [],
     })),
     xLabel: "x [mm]", yLabel: "Cp (inviscid)", invertY: true, height: 235,
   });
@@ -890,15 +1287,34 @@ async function renderPolars(withXfoil = false) {
     const nf = await api.polar({ spec, re, ncrit: state.config.ncrit });
     const key = `${spec}|${Math.round(re)}|${state.config.ncrit}`;
     let xf = state.xfoilCache[key];
+    let xfJustFetched = false;
     if (withXfoil && !xf) {
       note.textContent = "running XFOIL — up to a minute…";
       xf = await api.polar({ spec, re, ncrit: state.config.ncrit,
                              engine: "xfoil" });
       state.xfoilCache[key] = xf;
+      xfJustFetched = true;
     }
     // element chip switched (or config changed) while we were fetching —
     // a newer render owns the charts now
-    if (seq !== polarReqSeq) return;
+    if (seq !== polarReqSeq) {
+      if (xfJustFetched) {
+        const stillSelected =
+          Math.min(state.polarElem, state.config.elements.length - 1) === i;
+        if (stillSelected) {
+          // a config nudge/theme flip re-rendered without the overlay while
+          // XFOIL ran — re-render now that the cache has it
+          renderPolars();
+        } else {
+          // the minute-long run DID finish — it sits in the cache; say so
+          // instead of silently discarding the wait
+          toast(`XFOIL polar for ${state.airfoilNames[spec] || spec} is ` +
+                `ready — it shows when that element is selected again.`,
+                "info", 6000);
+        }
+      }
+      return;
+    }
     const series = (xk, yk) => {
       const s = [{ name: "NeuralFoil", color: SERIES[i],
                    x: nf[xk], y: nf[yk] }];
@@ -920,16 +1336,37 @@ async function renderPolars(withXfoil = false) {
       `L/D max ${m.LD_max.toFixed(0)} @ CL ${m.CL_at_LD_max.toFixed(2)} · ` +
       `confidence ${(m.confidence_at_CL_max * 100).toFixed(0)}%` +
       (xf ? ` · XFOIL: ${xf.alpha.length} converged points` : "");
+    syncXfoilButton();
   } catch (err) {
     if (seq !== polarReqSeq) return;
     note.textContent = `polar failed: ${err.message}`;
   }
 }
 
+/* the button reflects the overlay state for the CURRENT selection: a cached
+   overlay renders automatically, so clicking again would be a silent no-op */
+function syncXfoilButton() {
+  const b = $("btn-xfoil");
+  if (b.classList.contains("busy")) return;
+  const i = Math.min(state.polarElem, state.config.elements.length - 1);
+  const spec = state.geo?.design?.[i]?.airfoil_eff
+    || state.config.elements[i].airfoil;
+  const has = !!state.xfoilCache[
+    `${spec}|${Math.round(elementRe(i))}|${state.config.ncrit}`];
+  b.disabled = has;
+  b.textContent = has ? "XFOIL shown" : "Add XFOIL reference";
+  b.title = has
+    ? "The XFOIL overlay for this element at this Re is displayed."
+    : "Overlay an XFOIL run for the selected element (takes up to a minute)";
+}
+
 $("btn-xfoil").addEventListener("click", async () => {
   busy($("btn-xfoil"), true);
   await renderPolars(true);
-  busy($("btn-xfoil"), false);
+  const b = $("btn-xfoil");
+  b.classList.remove("busy");
+  b.disabled = false;
+  syncXfoilButton();
 });
 
 /* ---------------- optimizer tab ---------------- */
@@ -953,6 +1390,7 @@ async function reattachOptimizer() {
       // the same session); after a genuine reload it is already null
       $("btn-opt-run").disabled = true;
       $("btn-opt-cancel").disabled = false;
+      setOptControlsLocked(true);
       pollOptimizer();
     }
   } catch { /* rediscovery is best-effort */ }
@@ -961,16 +1399,98 @@ $("btn-opt-cancel").addEventListener("click", async () => {
   if (state.optJob) { try { await api.optimizeCancel(state.optJob); } catch {} }
 });
 $("btn-opt-apply").addEventListener("click", applyBestDesign);
-$("ov-af").addEventListener("change", () => {
-  $("ov-af-pool").disabled = !$("ov-af").checked;
-});
-$("opt-objective").addEventListener("change", () => {
+$("ov-af").addEventListener("change", syncAfPool);
+
+function syncAfPool() {
+  const on = $("ov-af").checked;
+  const pool = $("ov-af-pool");
+  pool.disabled = !on || pool.dataset.locked === "1";
+  pool.title = on ? ""
+    : "Enable Airfoil selection above to choose where candidates come from.";
+}
+
+/* the whole form follows the objective, not just the target field: the idle
+   status line, the Effort tooltip and the target pill all describe
+   target-mode behavior that max mode does not have */
+function syncOptObjectiveUI({ statusToo = true } = {}) {
   const isMax = $("opt-objective").value === "max_downforce";
   $("opt-target").disabled = isMax;
   $("opt-target").title = isMax
     ? "Ignored while maximizing — the loading trust line is the constraint"
     : "";
-});
+  // only the idle line follows the mode — a finished run's summary stays
+  if (statusToo && !state.optJob
+      && $("opt-status").textContent.startsWith("idle")) {
+    $("opt-status").textContent = isMax
+      ? "idle — maximize searches up to the 90% loading trust line; no " +
+        "early stop at any target"
+      : "idle — Fast/Standard stop early at the target; Thorough searches " +
+        "everything";
+  }
+  $("opt-budget").title = isMax
+    ? "Effort budget. In maximize mode every level searches the trusted " +
+      "ceiling — there is no early stop; Thorough is the reproducible search."
+    : "Fast/Standard stop as soon as the target is reached — quick, but " +
+      "repeated runs can land in different drag basins. Thorough explores " +
+      "the whole search space before refining (takes minutes) and " +
+      "converges to the same lowest-drag design on every run.";
+  $("r-target-pill").title = isMax
+    ? "Grades the analysis against the downforce target — informational " +
+      "only while the optimizer maximizes (max mode ignores the target)."
+    : "";
+}
+$("opt-objective").addEventListener("change", syncOptObjectiveUI);
+
+/* "Thorough (reproducible)" is a global-mode contract: local refinement
+   just gets a larger budget from it */
+function syncOptModeUI() {
+  const local = $("opt-mode").value === "local";
+  const thorough = $("opt-budget").querySelector('option[value="4000"]');
+  thorough.textContent = local
+    ? "Thorough (larger refine budget)" : "Thorough (reproducible)";
+  thorough.title = local
+    ? "Refine current design keeps the search in the same basin — a bigger " +
+      "budget refines further, but the reproducible full-space search " +
+      "needs Search = Global."
+    : "Explores the whole search space before refining; converges to the " +
+      "same lowest-drag design on every run.";
+}
+$("opt-mode").addEventListener("change", syncOptModeUI);
+
+/* flap-only free variables need a flap to exist */
+function syncOptimizerVars() {
+  const single = state.config.elements.length === 1;
+  for (const id of ["ov-defl", "ov-pos", "ov-chord"]) {
+    const el = $(id);
+    el.disabled = single || el.dataset.locked === "1";
+    el.closest("label").title = single
+      ? "Needs a flap — add an element (+) to free this variable." : "";
+  }
+}
+
+/* a running job snapshots its options at launch — lock the controls so
+   mid-run edits are not silently ignored */
+const OPT_CONTROLS = ["opt-objective", "opt-target", "opt-mode", "opt-budget",
+  "opt-drag-w", "opt-minld", "opt-minconf", "ov-aoa", "ov-defl", "ov-pos",
+  "ov-chord", "ov-af", "ov-shape", "ov-af-pool"];
+
+function setOptControlsLocked(on) {
+  for (const id of OPT_CONTROLS) {
+    const el = $(id);
+    el.dataset.locked = on ? "1" : "";
+    el.disabled = on;
+    if (on) el.title = "Locked while the search runs — settings apply to " +
+                       "the next run.";
+  }
+  if (!on) {
+    // restore the state-dependent gating the blanket unlock would lose
+    for (const id of OPT_CONTROLS) $(id).title = "";
+    syncOptObjectiveUI({ statusToo: false });
+    syncOptModeUI();
+    syncOptimizerVars();
+    syncAfPool();
+  }
+}
 
 // manufacturing guard: with prep off, the optimizer tunes knife-edge
 // trailing edges that change once the wing is made buildable. Ask before
@@ -1003,10 +1523,15 @@ $("mfg-guard-anyway").addEventListener("click", async () => {
 $("mfg-guard-cancel").addEventListener("click", () =>
   $("mfg-guard-dialog").close());
 
+// covers the window between the pre-request disable and state.optJob
+// assignment, during which a geometry refresh could re-enable the button
+let optLaunching = false;
+
 async function launchOptimization() {
   // disable BEFORE the request: a double-click on the button must not
   // spawn two concurrent server-side search jobs
-  if ($("btn-opt-run").disabled) return;
+  if ($("btn-opt-run").disabled || optLaunching) return;
+  optLaunching = true;
   $("btn-opt-run").disabled = true;
   const dragW = parseFloat($("opt-drag-w").value);
   // snapshot the target: charts and hints must describe THIS run even if
@@ -1035,6 +1560,7 @@ async function launchOptimization() {
         options.opt_chords, options.opt_airfoils, options.opt_shape]
         .some(Boolean)) {
     toast("Enable at least one variable group.", "info");
+    optLaunching = false;
     $("btn-opt-run").disabled = false;
     return;
   }
@@ -1050,6 +1576,7 @@ async function launchOptimization() {
       "a flap — add an element, or enable stack angle, airfoil selection " +
       "or airfoil shape.";
     host.appendChild(d);
+    optLaunching = false;
     $("btn-opt-run").disabled = false;
     return;
   }
@@ -1060,10 +1587,13 @@ async function launchOptimization() {
     state.optResult = null;
     $("btn-opt-cancel").disabled = false;
     $("btn-opt-apply").disabled = true;
+    setOptControlsLocked(true);
     pollOptimizer();
   } catch (e) {
     toast(`Could not start optimization: ${e.message}`);
     $("btn-opt-run").disabled = false;
+  } finally {
+    optLaunching = false;
   }
 }
 
@@ -1081,6 +1611,7 @@ function pollOptimizer() {
         state.optJob = null;   // else reattachOptimizer is dead forever
         $("btn-opt-run").disabled = false;
         $("btn-opt-cancel").disabled = true;
+        setOptControlsLocked(false);
         if (s.state === "failed") toast(`Optimization failed: ${s.error}`);
         if (s.best_config) {
           state.optResult = s;
@@ -1089,6 +1620,7 @@ function pollOptimizer() {
           if (s.candidates && s.candidates.length) {
             $("rerank-title").hidden = false;
             $("rerank-block").hidden = false;
+            gateRerank();
           }
         } else if (s.state === "done") {
           $("opt-best-body").textContent =
@@ -1097,6 +1629,9 @@ function pollOptimizer() {
         }
         renderOptHints(s);
         renderCandidates(s);
+        // finished results are workspace state now — they survive restarts
+        markDirty();
+        persistSession();
       }
     } catch (e) {
       // a single failed poll (network blip, server hiccup) must not orphan
@@ -1108,6 +1643,7 @@ function pollOptimizer() {
       state.optJob = null;   // the promised tab re-attach needs this clear
       $("btn-opt-run").disabled = false;
       $("btn-opt-cancel").disabled = true;
+      setOptControlsLocked(false);
       toast(`Lost the optimization job: ${e.message} — reopen the ` +
             `Optimizer tab to re-attach if it is still running.`);
     }
@@ -1127,7 +1663,9 @@ function renderOptimizer(s) {
   }
   $("opt-status").textContent = bits.join(" · ");
   if (s.history && s.history.length) {
-    const target = state.optTarget ?? state.target;
+    // the job's own set-point first: after a reload the client snapshot is
+    // gone and the live form value may have been edited since
+    const target = s.target_downforce_n ?? state.optTarget ?? state.target;
     const isMax = s.objective === "max_downforce";
     lineChart($("opt-conv"), {
       series: [{ name: "downforce", color: SERIES[0],
@@ -1157,13 +1695,16 @@ function renderOptimizer(s) {
                     dx: "slot dx", dy: "slot dy",
                     shape_b25: "camber @25%", shape_b55: "camber @55%",
                     shape_b80: "camber @80%", shape_ts: "thickness" };
+    // airfoil names, variable keys and values can arrive from a project
+    // file — escape strings and coerce numerics before innerHTML
     const afRows = (s.best.airfoils || []).map((a, i) =>
-      `<div class="kv"><span>E${i + 1} airfoil</span><b>${a}</b></div>`).join("");
+      `<div class="kv"><span>E${i + 1} airfoil</span><b>${esc(a)}</b></div>`).join("");
     const rows = afRows + s.variables.map((v, i) => {
       if (v.key === "airfoil_idx") return "";   // shown by name above
       const label = v.elem == null ? "stack angle"
-        : `E${v.elem + 1} ${NAMES[v.key] || v.key}`;
-      const val = s.best.x[i];
+        : `E${v.elem + 1} ${NAMES[v.key] || esc(v.key)}`;
+      const val = +(s.best.x?.[i]);
+      if (!Number.isFinite(val)) return "";
       const unit =
         v.key === "slot_gap_pct" || v.key === "slot_overlap_pct"
           ? `${val.toFixed(1)} %c`
@@ -1176,8 +1717,8 @@ function renderOptimizer(s) {
       return `<div class="kv"><span>${label}</span><b>${unit}</b></div>`;
     }).join("");
     $("opt-best-body").innerHTML =
-      `<div class="kv"><span>downforce</span><b>${s.best.downforce_n} N</b></div>` +
-      `<div class="kv"><span>drag estimate</span><b>${s.best.drag_n} N</b></div>` +
+      `<div class="kv"><span>downforce</span><b>${esc(s.best.downforce_n)} N</b></div>` +
+      `<div class="kv"><span>drag estimate</span><b>${esc(s.best.drag_n)} N</b></div>` +
       rows;
   }
 }
@@ -1207,6 +1748,9 @@ function renderPareto(s) {
       xLabel: "drag [N]", yLabel: "downforce [N]", height: 148,
     });
     note.hidden = false;
+    host.title = "Every clean design the search evaluated, as the " +
+      "downforce–drag trade-off. Blue points are trusted; amber points " +
+      "carry a trust flag. Click a front point to apply that design.";
   } else if (s.cloud && s.cloud.length
              && (s.state === "running" || s.state === "finalizing")) {
     // live evaluation cloud while the search runs (not clickable — these
@@ -1219,6 +1763,9 @@ function renderPareto(s) {
       xLabel: "drag [N]", yLabel: "downforce [N]", height: 148,
     });
     note.hidden = true;
+    host.title = "Search-fidelity evaluation cloud (not clickable) — the " +
+      "finalized front replaces it, with clickable points, when the run " +
+      "finishes.";
   }
 }
 
@@ -1276,10 +1823,14 @@ async function startRerank() {
   try {
     await api.ransQueueStart(items, $("rr-mesh").value);
     $("btn-rerank-cancel").disabled = false;
+    $("rr-mesh").disabled = true;
+    state.queueActive = true;
+    updateSolverButtons();
     pollRerank();
   } catch (e) {
     toast(`Could not start the verification queue: ${e.message}`);
     busy($("btn-rerank"), false);
+    gateRerank();
   }
 }
 
@@ -1290,6 +1841,9 @@ function pollRerank() {
     clearInterval(state.rerankPoll);
     busy($("btn-rerank"), false);
     $("btn-rerank-cancel").disabled = true;
+    $("rr-mesh").disabled = false;
+    state.queueActive = false;
+    updateSolverButtons();
     if (msg) toast(msg);
   };
   state.rerankPoll = setInterval(async () => {
@@ -1304,11 +1858,13 @@ function pollRerank() {
         return;
       }
       misses = 0;
+      state.queueActive = ["pending", "running"].includes(queue.state);
       renderRerank(queue);
       if (["done", "failed", "cancelled"].includes(queue.state)) {
         detach(queue.state === "failed"
           ? `Verification queue failed: ${queue.error}` : null);
         state.ransRerank = queue.rows;
+        markDirty();
         persistSession();
       }
     } catch {
@@ -1412,7 +1968,7 @@ function renderOptHints(s) {
     if (x - v.lo < 0.03 * span) pinnedLo.push(nm);
     else if (v.hi - x < 0.03 * span) pinnedHi.push(nm);
   });
-  const target = state.optTarget ?? state.target;
+  const target = s.target_downforce_n ?? state.optTarget ?? state.target;
   // same on-target tolerance the optimizer applies to candidates (3%, min 1 N)
   const hit = Math.abs(s.best.downforce_n - target) <= Math.max(0.03 * target, 1);
   let msg = null;
@@ -1507,6 +2063,10 @@ async function applyDesign(cfgIn) {
     if (e.dx != null) e.dx = Math.round(e.dx * 1000) / 1000;
     if (e.dy != null) e.dy = Math.round(e.dy * 1000) / 1000;
   }
+  // the applied design is a different configuration: verdicts, maps and
+  // pressure plots computed for the previous one are stale from here on
+  configRevision++;
+  markStale();
   // cfg is a snapshot of the configuration from when the run STARTED —
   // adopt only the optimizer-owned fields so edits made since (speed, ride
   // height, manufacturing, …) survive the apply
@@ -1567,12 +2127,12 @@ function renderCandidates(s) {
         `at the pre-stall polar (drag understated), or its polar never ` +
         `stalled in the analyzed range (CL_max is a lower bound, not a ` +
         `stall). Verify with RANS.">near stall</span>` : "") +
-      (f.warnings ? `<span class="badge warn">${f.warnings} warning` +
-                    `${f.warnings > 1 ? "s" : ""}</span>` : "");
+      (f.warnings ? `<span class="badge warn">${esc(f.warnings)} warning` +
+                    `${+f.warnings > 1 ? "s" : ""}</span>` : "");
     const head = document.createElement("div");
     head.className = "cand-head";
     head.innerHTML =
-      `<span><b>#${c.rank}</b> ${fmtN(dn, 0)} N · drag ${fmtN(drag, 1)} N` +
+      `<span><b>#${esc(c.rank)}</b> ${fmtN(dn, 0)} N · drag ${fmtN(drag, 1)} N` +
       (ld != null ? ` · L/D ${fmtN(ld, 1)}` : "") +
       (f.confidence_min != null
         ? ` · conf ${Math.round(f.confidence_min * 100)}%` : "") +
@@ -1587,7 +2147,8 @@ function renderCandidates(s) {
     const shapeByElem = {};
     (s.variables || []).forEach((v, i) => {
       if (v.key === "airfoil_idx") return;
-      const val = c.x[i];
+      const val = +(c.x?.[i]);
+      if (!Number.isFinite(val)) return;
       if (v.key && v.key.startsWith("shape_")) {
         (shapeByElem[v.elem] = shapeByElem[v.elem] || {})[v.key] = +val;
         return;
@@ -1638,8 +2199,33 @@ function buildScreenerTargets() {
     o.textContent = `E${i + 1} ${roleName(i)}`;
     sel.appendChild(o);
   });
-  if (prev !== "" && +prev < state.config.elements.length) sel.value = prev;
+  if (prev !== "" && +prev < state.config.elements.length) {
+    sel.value = prev;
+  } else if (prev !== "" && state.screenRows) {
+    // the element the table was screened for no longer exists — say so
+    // instead of silently retargeting E1
+    $("scr-note").textContent = `E${+prev + 1} was removed — the table ` +
+      `below was screened for it; re-screen for the selected element.`;
+  }
+  syncScreenerProvenance();
 }
+
+/* the results table is tied to the element/Re it was screened at — warn
+   when the selection or the config has drifted away from that */
+function syncScreenerProvenance() {
+  const meta = state.screenMeta;
+  if (!meta || !state.screenRows) return;
+  const idx = parseInt($("scr-elem").value || "0", 10);
+  const reNow = Math.round(elementRe(idx));
+  const drift = Math.abs(reNow - meta.re) / Math.max(meta.re, 1);
+  if (idx !== meta.elem || drift > 0.15) {
+    $("scr-note").textContent =
+      `table screened for E${meta.elem + 1} at Re ${fmtRe(meta.re)} — ` +
+      `E${idx + 1} runs at Re ${fmtRe(reNow)}; re-screen before using ` +
+      `these rankings.`;
+  }
+}
+$("scr-elem").addEventListener("change", syncScreenerProvenance);
 
 // prefill must not clobber hand-edited values on every tab visit; switching
 // the target element is an explicit request to prefill again
@@ -1698,9 +2284,15 @@ $("btn-screen").addEventListener("click", async () => {
       include_low_confidence: true,
     });
     state.screenRows = res.rows;
+    state.screenMeta = {
+      elem: parseInt($("scr-elem").value || "0", 10),
+      re, ncrit: state.config.ncrit, count: res.count,
+    };
     $("scr-note").textContent =
       `${res.count} sections passed the filters — click a column to sort.`;
     renderScreenTable();
+    markDirty();
+    persistSession();
   } catch (e) {
     $("scr-note").textContent = "";
     toast(`Screening failed: ${e.message}`);
@@ -1733,17 +2325,18 @@ function renderScreenTable() {
   const host = $("scr-table");
   const th = SCR_COLS.map(([k, label]) =>
     `<th data-k="${k}" class="${k === key ? "sorted" : ""}">${label}</th>`).join("");
+  // rows can be restored from a project file — escape every interpolation
   const trs = top.map(r => {
     const tds = SCR_COLS.map(([k]) => {
       let v = r[k];
       if (v == null) v = "–";
       if (k === "CL_max" && r.CL_max_lower_bound) {
         return `<td title="polar had not stalled by the last analyzed ` +
-               `angle — CL_max is a lower bound">≥ ${v}</td>`;
+               `angle — CL_max is a lower bound">≥ ${esc(v)}</td>`;
       }
-      return `<td>${v}</td>`;
+      return `<td>${esc(v)}</td>`;
     }).join("");
-    return `<tr>${tds}<td><button class="btn ghost" data-use="${r.spec}">Use</button></td></tr>`;
+    return `<tr>${tds}<td><button class="btn ghost" data-use="${esc(r.spec)}">Use</button></td></tr>`;
   }).join("");
   host.innerHTML =
     `<table class="data-table"><thead><tr>${th}<th></th></tr></thead>` +
@@ -1782,7 +2375,16 @@ function renderScreenTable() {
     b.addEventListener("click", () => {
       const idx = parseInt($("scr-elem").value || "0", 10);
       selectAirfoil(idx, b.dataset.use, b.dataset.use);
-      toast(`E${idx + 1} set to ${b.dataset.use}.`, "good");
+      const meta = state.screenMeta;
+      const reNow = Math.round(elementRe(idx));
+      if (meta && Math.abs(reNow - meta.re) / Math.max(meta.re, 1) > 0.15) {
+        toast(`E${idx + 1} set to ${b.dataset.use} — note: it was ranked ` +
+              `at Re ${fmtRe(meta.re)}, but E${idx + 1} runs at ` +
+              `Re ${fmtRe(reNow)}. Re-screen to rank at the right Reynolds ` +
+              `number.`, "info", 8000);
+      } else {
+        toast(`E${idx + 1} set to ${b.dataset.use}.`, "good");
+      }
     });
   });
 }
@@ -1796,17 +2398,39 @@ const MAP_DEFAULTS = {
 const MAP_LABELS = { ride_height_mm: "ride height [mm]", speed_ms: "speed [m/s]" };
 const MAP_UNITS = { ride_height_mm: "mm", speed_ms: "m/s" };
 
+// hand-edited ranges are remembered per variable — switching ride height →
+// speed → ride height must not destroy the range the user set up
+const mapRanges = structuredClone(MAP_DEFAULTS);
+let mapVarPrev = $("map-var").value;
+
 $("map-var").addEventListener("change", () => {
-  const d = MAP_DEFAULTS[$("map-var").value];
+  mapRanges[mapVarPrev] = {
+    from: parseFloat($("map-from").value),
+    to: parseFloat($("map-to").value),
+    steps: parseInt($("map-steps").value, 10),
+  };
+  const v = $("map-var").value;
+  const d = mapRanges[v] || MAP_DEFAULTS[v];
   $("map-from").value = d.from;
   $("map-to").value = d.to;
   $("map-steps").value = d.steps;
+  mapVarPrev = v;
+  // the charts still show the previous variable's sweep — flag them
+  if (state.lastSweep && state.lastSweep.variable !== v) {
+    $("map-stale").textContent = `charts show the last ` +
+      `${MAP_LABELS[state.lastSweep.variable] || "sweep"} — re-sweep for ` +
+      `${MAP_LABELS[v]}`;
+    $("map-stale").hidden = false;
+  }
 });
 
 $("btn-sweep").addEventListener("click", runSweep);
 
+let sweepSeq = 0;
+
 async function runSweep() {
   const btn = $("btn-sweep");
+  if (btn.classList.contains("busy")) return;   // one sweep at a time
   const variable = $("map-var").value;
   const from = parseFloat($("map-from").value);
   const to = parseFloat($("map-to").value);
@@ -1821,11 +2445,24 @@ async function runSweep() {
   }
   const values = Array.from({ length: steps }, (_, i) =>
     +(from + ((to - from) * i) / (steps - 1)).toFixed(4));
+  const seq = ++sweepSeq;
+  const revAtStart = configRevision;
   busy(btn, true);
   $("map-note").textContent = "sweeping…";
   try {
     const res = await api.sweep(state.config, variable, values);
+    if (seq !== sweepSeq) return;   // a newer sweep owns the charts
     renderSweep(res);
+    // only claim freshness if the form wasn't edited mid-flight
+    if (configRevision === revAtStart) {
+      $("map-stale").hidden = true;
+      $("map-stale").textContent = "configuration changed since this " +
+        "sweep — re-sweep to update the maps";
+    } else {
+      $("map-stale").hidden = false;
+    }
+    markDirty();
+    persistSession();
   } catch (e) {
     $("map-note").textContent = "";
     toast(`Sweep failed: ${e.message}`);
@@ -1835,7 +2472,7 @@ async function runSweep() {
 }
 
 function renderSweep(res) {
-  state.lastSweep = res;   // kept for theme-switch re-inking
+  state.lastSweep = res;   // kept for theme re-inking + workspace persistence
   const variable = res.variable;
   const xLabel = MAP_LABELS[variable] || variable;
   const unit = MAP_UNITS[variable] || "";
@@ -1912,51 +2549,142 @@ function renderSweep(res) {
 
 /* ---------------- RANS verify tab ---------------- */
 
-let ransChecked = false;
+/* Docker availability, shared by the verify tab and the re-rank queue.
+   Good news latches (the server caches the probe); unavailability re-checks
+   on every ask so starting Docker Desktop is picked up. */
+let ransAvail = null;
+
+async function checkRansAvailable() {
+  if (ransAvail?.available) return ransAvail;
+  try {
+    ransAvail = await api.ransAvailability();
+  } catch (e) {
+    ransAvail = { available: false, probe_error: e.message };
+  }
+  return ransAvail;
+}
+
+/* the single verify run and the re-rank queue share one solver — reflect
+   the mutex on both start buttons instead of letting a click 409 */
+function updateSolverButtons() {
+  const runBtn = $("btn-rans-run");
+  if (state.queueActive) {
+    runBtn.disabled = true;
+    runBtn.title = "The optimizer's re-rank queue is using the solver — " +
+                   "wait for it or cancel it from the Optimizer tab.";
+  } else if (ransAvail?.available && !state.ransJob) {
+    runBtn.disabled = false;
+    runBtn.title = "";
+  }
+  gateRerank();
+}
+
+/* Verify-shortlist gating: needs candidates, Docker, and a free solver */
+async function gateRerank() {
+  const btn = $("btn-rerank");
+  if (btn.classList.contains("busy")) return;   // the queue itself runs
+  if (!rerankItems().length) {
+    btn.disabled = true;
+    btn.title = "Run the optimizer first — the queue verifies its shortlist.";
+    return;
+  }
+  if (state.queueActive) {
+    btn.disabled = true;
+    btn.title = "A re-rank queue is already using the solver.";
+    return;
+  }
+  if (state.ransJob) {
+    btn.disabled = true;
+    btn.title = "A RANS verify run is using the solver — wait for it or " +
+                "cancel it in the RANS verify tab.";
+    return;
+  }
+  const a = await checkRansAvailable();
+  // the world may have moved while the probe ran — never enable against
+  // stale pre-await state
+  if (btn.classList.contains("busy") || state.queueActive || state.ransJob) {
+    return;
+  }
+  if (!a.available) {
+    btn.disabled = true;
+    btn.title = `Docker unavailable (${a.detail || a.probe_error ||
+      "not running"}) — start Docker Desktop first; the queue runs OpenFOAM ` +
+      `in a container.`;
+    return;
+  }
+  btn.disabled = false;
+  btn.title = "Runs the shortlist through the 2D RANS truth case, one at a " +
+              "time, then re-ranks by measured downforce.";
+}
 
 async function refreshRansAvailability() {
-  // a job the page does not know about (reload, second window, dropped
-  // poll) is re-attached first — its id is server-side state. A finished
-  // one renders its result; a live one resumes polling.
-  if (!state.ransJob && !$("rans-result").querySelector(".kv")) {
+  // the re-rank queue owns the solver while it runs: do not adopt its
+  // active row as "our" verify job — cancelling it would silently kill the
+  // queue, and its result describes a shortlist candidate, not the current
+  // configuration
+  let queue = null;
+  try { ({ queue } = await api.ransQueueCurrent()); } catch {}
+  const queueLive = queue && ["pending", "running"].includes(queue.state);
+  state.queueActive = !!queueLive;
+  if (queueLive) {
+    const act = (queue.active != null && queue.rows?.[queue.active])
+      ? ` — solving ${queue.rows[queue.active].label}` : "";
+    $("rans-status").textContent =
+      `the optimizer's re-rank queue is using the solver${act}. Its ` +
+      `progress and results live in the Optimizer tab.`;
+    updateSolverButtons();
+  } else if (!state.ransJob) {
+    // a job the page does not know about (reload, second window, dropped
+    // poll) is re-attached — unless it was a queue row, whose result
+    // belongs to the Optimizer tab, not to the current config. A LIVE run
+    // always wins over a restored display; a done run is adopted only when
+    // it is not the one already shown (id check — a session-restored result
+    // must not block re-attaching a newer run).
     try {
       const cur = await api.ransCurrent();
-      if (cur.job_id && ["pending", "running"].includes(cur.state)) {
+      const queueOwned = !!queue?.rows?.some((r) => r.job_id === cur.job_id);
+      if (cur.job_id && !queueOwned
+          && ["pending", "running"].includes(cur.state)) {
         state.ransJob = cur.job_id;
         $("btn-rans-run").disabled = true;
         $("btn-rans-cancel").disabled = false;
+        $("rans-stale").hidden = true;
+        $("rans-flow").hidden = true;
+        $("rans-result").innerHTML =
+          '<div class="empty-note">Re-attached to a running verification…</div>';
         pollRans();
-      } else if (cur.job_id && cur.state === "done") {
+      } else if (cur.job_id && !queueOwned && cur.state === "done"
+                 && state.ransResult?.id !== cur.job_id) {
         const s = await api.ransStatus(cur.job_id);
+        state.ransResult = s;
+        state.ransRev = null;   // solved before this page session
         renderRans(s);
-        renderRansResult(s);
+        renderRansResult(s, { provenance: "reattached" });
         showRansFlow(s.id);
+      } else if (cur.job_id && queueOwned && cur.state === "done"
+                 && !state.ransResult) {
+        $("rans-status").textContent = "idle — the last solver run belonged " +
+          "to the optimizer's re-rank queue (see the Optimizer tab). Verify " +
+          "the current configuration with the button above.";
       }
     } catch { /* rediscovery is best-effort */ }
   }
-  // the good-news probe latches (the server caches it anyway); the
-  // unavailable state must NOT latch — the note tells the user to start
-  // Docker Desktop and reopen the tab, and reopening has to re-check
-  if (ransChecked) return;
   const note = $("rans-note");
-  try {
-    const a = await api.ransAvailability();
-    if (a.available) {
-      ransChecked = true;
-      note.textContent = a.image_present
-        ? `Docker ${a.docker} ready · ${a.image}`
-        : `Docker ${a.docker} ready — the OpenFOAM image downloads on the ` +
-          `first run (~1 GB, one time)`;
-      if (!state.ransJob) $("btn-rans-run").disabled = false;
-    } else {
-      note.textContent = `Docker unavailable (${a.detail || "not running"}) — ` +
-        `start Docker Desktop and reopen this tab, or generate the case in ` +
-        `the Export tab and run it in WSL.`;
-      $("btn-rans-run").disabled = true;
-    }
-  } catch (e) {
-    note.textContent = `Could not check Docker: ${e.message}`;
+  const a = await checkRansAvailable();
+  if (a.available) {
+    note.textContent = a.image_present
+      ? `Docker ${a.docker} ready · ${a.image}`
+      : `Docker ${a.docker} ready — the OpenFOAM image downloads on the ` +
+        `first run (~1 GB, one time)`;
+  } else if (a.probe_error) {
+    note.textContent = `Could not check Docker: ${a.probe_error}`;
+  } else {
+    note.textContent = `Docker unavailable (${a.detail || "not running"}) — ` +
+      `start Docker Desktop and reopen this tab, or generate the case in ` +
+      `the Export tab and run it in WSL.`;
   }
+  if (!a.available) $("btn-rans-run").disabled = true;
+  updateSolverButtons();
 }
 
 $("btn-rans-run").addEventListener("click", startRansVerify);
@@ -1984,12 +2712,18 @@ async function startRansVerify() {
     // whatever the form says later — snapshot the estimate at start
     state.ransCEst = state.analysis?.coefficients?.C_downforce_estimated
       ?? null;
+    state.ransRev = configRevision;   // ties the verdict to this config
     $("btn-rans-run").disabled = true;
     $("btn-rans-cancel").disabled = false;
+    $("rans-mesh").disabled = true;   // snapshotted at start — lock mid-run
+    $("rans-iters").disabled = true;
+    $("rans-stale").hidden = true;
     $("rans-conv").innerHTML = "";   // previous run's chart is not this run
     $("rans-flow").hidden = true;
+    ransFlowCache = null;
     $("rans-result").innerHTML =
       '<div class="empty-note">Verification running…</div>';
+    updateSolverButtons();
     pollRans();
   } catch (e) {
     toast(`Could not start the RANS run: ${e.message}`);
@@ -2015,6 +2749,9 @@ function pollRans() {
         $("btn-rans-run").disabled = false;
         $("btn-rans-cancel").disabled = true;
         $("btn-rans-stop").disabled = true;
+        $("rans-mesh").disabled = false;
+        $("rans-iters").disabled = false;
+        updateSolverButtons();
         if (s.state === "failed") {
           toast("RANS verification failed — details in the RANS tab.", "err");
           $("rans-result").innerHTML = "";
@@ -2030,8 +2767,17 @@ function pollRans() {
             'kept for inspection.</div>';
         }
         if (s.state === "done") {
-          renderRansResult(s);
+          state.ransResult = s;
+          // a mid-run config edit means this verdict describes the design
+          // at start, not the current form — say so and hold back the
+          // one-click k_g calibration (same guard runAnalysis has)
+          const edited = state.ransRev != null
+            && configRevision !== state.ransRev;
+          renderRansResult(s, { provenance: edited ? "edited" : "fresh" });
+          if (edited) $("rans-stale").hidden = false;
           showRansFlow(s.id);
+          markDirty();
+          persistSession();
         }
       }
     } catch (e) {
@@ -2046,6 +2792,9 @@ function pollRans() {
       $("btn-rans-run").disabled = false;
       $("btn-rans-cancel").disabled = true;
       $("btn-rans-stop").disabled = true;
+      $("rans-mesh").disabled = false;
+      $("rans-iters").disabled = false;
+      updateSolverButtons();
       toast(`Lost the RANS job: ${e.message} — reopen this tab to ` +
             `re-attach if it is still running.`);
     }
@@ -2057,11 +2806,13 @@ function renderRans(s) {
   $("rans-progress").style.width = pct + "%";
   $("rans-progress").classList.toggle("done", s.state === "done");
   const bits = [s.state === "running" ? (s.phase || "running") : s.state];
-  if (s.mesh) bits.push(`${s.mesh.n_cells.toLocaleString()} cells`);
+  if (s.mesh && Number.isFinite(+s.mesh.n_cells)) {
+    bits.push(`${(+s.mesh.n_cells).toLocaleString()} cells`);
+  }
   if (s.iteration) bits.push(`iteration ${s.iteration} / ${s.n_iters}`);
-  if (s.latest) bits.push(`Cl ${s.latest.cl.toFixed(3)}`,
-                          `Cd ${s.latest.cd.toFixed(4)}`);
-  bits.push(`${Math.round(s.elapsed_s)}s`);
+  if (s.latest) bits.push(`Cl ${numf(s.latest.cl, 3)}`,
+                          `Cd ${numf(s.latest.cd, 4)}`);
+  bits.push(`${Math.round(+s.elapsed_s || 0)}s`);
   $("rans-status").textContent = bits.join(" · ");
   if (s.history && s.history.length > 1) {
     const cEst = s.result?.panel?.c_est ?? state.ransCEst;
@@ -2077,22 +2828,38 @@ function renderRans(s) {
   }
 }
 
-function renderRansResult(s) {
+function renderRansResult(s, { provenance = "fresh" } = {}) {
   const r = s.result;
   if (!r) return;
   const host = $("rans-result");
+  // a verdict that predates this page session (re-attached or restored)
+  // cannot be tied to the current form — say which config it describes
+  if (provenance !== "fresh") {
+    $("rans-stale").textContent = provenance === "restored"
+      ? "restored result — it describes the configuration it was saved " +
+        "with; re-verify to check the current one"
+      : provenance === "edited"
+      ? "the configuration was edited while this run solved — the verdict " +
+        "describes the design at start; re-verify"
+      : "re-attached result from an earlier run — it may describe an " +
+        "earlier configuration; re-verify to be sure";
+    $("rans-stale").hidden = false;
+  }
   const p = r.panel;
   const pct = (v) => v == null ? "–"
     : `${v > 0 ? "+" : ""}${(+v).toFixed(1)}%`;
+  // every value below can arrive from a project file: numerics through
+  // numf (no .toFixed on junk), free strings through esc (innerHTML sink)
   const rows = [
-    ["Sectional Cl — RANS", `${r.cl_rans.toFixed(3)} ± ${r.cl_rans_std.toFixed(3)}`],
-    ["Sectional Cl — panel C_est", p ? (+p.c_est).toFixed(3) : "–"],
+    ["Sectional Cl — RANS", `${numf(r.cl_rans, 3)} ± ${numf(r.cl_rans_std, 3)}`],
+    ["Sectional Cl — panel C_est", p ? numf(p.c_est, 3) : "–"],
     ["Cl delta (RANS vs estimate)", pct(r.delta_cl_pct)],
-    ["Profile Cd — RANS", r.cd_rans.toFixed(4)],
-    ["Profile Cd — panel stack", p ? (+p.cd_profile).toFixed(4) : "–"],
-    ["Downforce at RANS Cl", `${r.downforce_n_at_rans_cl} N`],
-    ["Downforce — panel estimate", p ? `${p.downforce_n} N` : "–"],
-    ["Iterations", `${r.n_iters_run} (${r.stop_reason}; tail mean of ${r.tail_rows})`],
+    ["Profile Cd — RANS", numf(r.cd_rans, 4)],
+    ["Profile Cd — panel stack", p ? numf(p.cd_profile, 4) : "–"],
+    ["Downforce at RANS Cl", `${esc(r.downforce_n_at_rans_cl)} N`],
+    ["Downforce — panel estimate", p ? `${esc(p.downforce_n)} N` : "–"],
+    ["Iterations", `${esc(r.n_iters_run)} (${esc(r.stop_reason)}; ` +
+      `tail mean of ${esc(r.tail_rows)})`],
   ];
   host.innerHTML = rows.map(([k, v]) =>
     `<div class="kv"><span>${k}</span><b>${v}</b></div>`).join("");
@@ -2142,23 +2909,32 @@ function renderRansResult(s) {
     d.innerHTML = `<span title="Pinning the ground-gain factor to this value
       makes the studio estimate reproduce the RANS sectional load at this
       operating point.">suggested k<sub>g</sub></span>
-      <b>${r.suggested_k_g}
+      <b>${esc(r.suggested_k_g)}
       <button id="btn-rans-apply-kg" class="btn tiny">Apply</button></b>`;
     host.appendChild(d);
-    $("btn-rans-apply-kg").addEventListener("click", () => {
-      state.config.k_g = r.suggested_k_g;
-      writeConfigToForm();
-      onConfigChanged();
-      toast(`k_g pinned to ${r.suggested_k_g} — re-analyze to see the ` +
-            `calibrated estimate.`, "good", 6000);
-    });
+    const kg = $("btn-rans-apply-kg");
+    if (provenance !== "fresh") {
+      // k_g calibrated on another (or unknown) config must not be pinned
+      // onto this one with one click
+      kg.disabled = true;
+      kg.title = "Calibrated on the configuration this run verified — " +
+                 "re-verify the current configuration to calibrate k_g.";
+    } else {
+      kg.addEventListener("click", () => {
+        state.config.k_g = r.suggested_k_g;
+        writeConfigToForm();
+        onConfigChanged();
+        toast(`k_g pinned to ${r.suggested_k_g} — re-analyze to see the ` +
+              `calibrated estimate.`, "good", 6000);
+      });
+    }
   }
   const note = document.createElement("p");
   note.className = "note";
   note.style.marginTop = "6px";
   note.innerHTML = `2D section truth check: RANS Cd is profile drag only —
     induced drag is a 3D effect and is compared in the studio's totals, not
-    here. Case retained at <code>${r.case_dir}</code> (fields, logs,
+    here. Case retained at <code>${esc(r.case_dir)}</code> (fields, logs,
     ParaView-openable <code>case.foam</code>).`;
   host.appendChild(note);
 }
@@ -2168,6 +2944,7 @@ function renderRansResult(s) {
 let ransFlowId = null;
 let ransFlowUrl = null;   // objectURL of the currently shown image
 let ransFlowSeq = 0;
+let ransFlowCache = null; // {umag?, cp?} dataURLs restored from a project file
 
 async function showRansFlow(jobId, field = "umag") {
   ransFlowId = jobId;
@@ -2177,6 +2954,19 @@ async function showRansFlow(jobId, field = "umag") {
   $("rans-flow-cp").classList.toggle("active", field === "cp");
   const img = $("rans-flow-img");
   const note = $("rans-flow-note");
+  // a restored workspace carries the rendered images, not a live job
+  if (!jobId && ransFlowCache) {
+    if (ransFlowCache[field]) {
+      img.src = ransFlowCache[field];
+      img.style.opacity = "";
+      note.textContent = "restored from the project file — same view as " +
+        "the drawing: as driven, ground at the bottom, flow left to right";
+    } else {
+      note.textContent = "this field was not saved with the project — " +
+        "re-verify to render it";
+    }
+    return;
+  }
   note.textContent = "rendering the flow field…";
   img.style.opacity = "0.4";
   // fetched (not img.src) so a failure can show the server's actual reason
@@ -2206,9 +2996,9 @@ async function showRansFlow(jobId, field = "umag") {
 }
 
 $("rans-flow-umag").addEventListener("click", () =>
-  ransFlowId && showRansFlow(ransFlowId, "umag"));
+  (ransFlowId || ransFlowCache) && showRansFlow(ransFlowId, "umag"));
 $("rans-flow-cp").addEventListener("click", () =>
-  ransFlowId && showRansFlow(ransFlowId, "cp"));
+  (ransFlowId || ransFlowCache) && showRansFlow(ransFlowId, "cp"));
 
 /* ---------------- export tab ---------------- */
 
@@ -2278,6 +3068,288 @@ $("exp-dlg-download").addEventListener("click", async () => {
 });
 $("exp-dlg-close").addEventListener("click", () => $("export-dialog").close());
 
+/* ---------------- design report (self-contained HTML) ---------------- */
+
+/* the live drawing, serialized standalone: computed styles are inlined so
+   the SVG renders identically outside the app's stylesheets */
+function svgSnapshot() {
+  const src = $("viewport");
+  if (!src.childNodes.length) return "";
+  const clone = src.cloneNode(true);
+  const srcEls = [src, ...src.querySelectorAll("*")];
+  const dstEls = [clone, ...clone.querySelectorAll("*")];
+  const PROPS = ["fill", "stroke", "stroke-width", "stroke-dasharray",
+                 "stroke-linejoin", "opacity", "font-family", "font-size",
+                 "font-weight", "letter-spacing", "text-anchor"];
+  srcEls.forEach((sEl, i) => {
+    const d = dstEls[i];
+    if (!(d instanceof Element) || d === clone) return;
+    const cs = getComputedStyle(sEl);
+    let style = "";
+    for (const p of PROPS) {
+      const v = cs.getPropertyValue(p);
+      if (v) style += `${p}:${v};`;
+    }
+    d.setAttribute("style", style);
+    d.removeAttribute("class");
+  });
+  const W = src.clientWidth || 800, H = src.clientHeight || 400;
+  clone.removeAttribute("class");
+  clone.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+  clone.setAttribute("viewBox", `0 0 ${W} ${H}`);
+  clone.setAttribute("width", "100%");
+  clone.removeAttribute("height");
+  // the sheet itself is a CSS background — bake it in as the first rect
+  const bg = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+  bg.setAttribute("width", W);
+  bg.setAttribute("height", H);
+  bg.setAttribute("fill", getComputedStyle(document.documentElement)
+    .getPropertyValue("--sheet").trim() || "#ffffff");
+  clone.insertBefore(bg, clone.firstChild);
+  return clone.outerHTML;
+}
+
+function reportKv(rows) {
+  return `<table class="kv">` + rows
+    .filter(([, v]) => v != null && v !== "")
+    .map(([k, v]) => `<tr><td>${esc(k)}</td><td>${esc(v)}</td></tr>`)
+    .join("") + `</table>`;
+}
+
+async function buildReport() {
+  const c = state.config;
+  const now = new Date();
+  const sec = [];
+
+  sec.push(`<h1>Wing section design report</h1>
+    <p class="meta">${esc(now.toLocaleString())} · Wing Section Studio</p>`);
+
+  // configuration
+  const elRows = c.elements.map((e, i) =>
+    `<tr><td>E${i + 1} ${roleName(i)}</td>` +
+    `<td>${esc(state.airfoilNames[e.airfoil] || e.airfoil)}</td>` +
+    `<td>${i === 0 ? "100" : (e.chord_ratio * 100).toFixed(1)}%</td>` +
+    `<td>${i === 0 ? "–" : fmtN(e.deflection_deg, 1) + "°"}</td>` +
+    `<td>${e.slot_gap_pct != null ? fmtN(e.slot_gap_pct, 1) + "%c" : "–"}</td>` +
+    `<td>${e.slot_overlap_pct != null ? fmtN(e.slot_overlap_pct, 1) + "%c" : "–"}</td></tr>`
+  ).join("");
+  const m = c.manufacturing;
+  const env = c.rule_envelope;
+  sec.push(`<h2>Configuration</h2>` + reportKv([
+    ["Speed", `${c.speed_ms} m/s`],
+    ["Ride height", `${c.ride_height_mm} mm`],
+    ["Main chord", `${c.chord_mm} mm`],
+    ["Span", `${c.span_mm} mm`],
+    ["Stack angle", `${c.stack_aoa_deg}°`],
+    ["N_crit", c.ncrit],
+    ["Air density", `${c.rho} kg/m³`],
+    ["Viscous efficiency", c.viscous_efficiency],
+    ["3D efficiency", c.efficiency_3d],
+    ["Span efficiency", c.span_efficiency],
+    ["Ground gain k_g", c.k_g != null ? c.k_g : "auto"],
+    ["Target downforce", `${state.target} N`],
+    ["Manufacturing prep", m
+      ? `TE ${m.te_gap_mm} mm (${m.te_mode})` +
+        (m.min_thickness_mm ? `, min thickness ${m.min_thickness_mm} mm` : "")
+      : "off"],
+    ["Rule envelope", env
+      ? [env.max_length_mm != null ? `length ≤ ${env.max_length_mm} mm` : "",
+         env.max_height_mm != null ? `height ≤ ${env.max_height_mm} mm` : "",
+         env.min_ground_clearance_mm != null
+           ? `clearance ≥ ${env.min_ground_clearance_mm} mm` : ""]
+          .filter(Boolean).join(", ") + (env.preset_name ? ` (${env.preset_name})` : "")
+      : "off"],
+  ]) +
+  `<table class="grid"><tr><th>Element</th><th>Airfoil</th><th>Chord</th>` +
+  `<th>Deflection</th><th>Slot gap</th><th>Overlap</th></tr>${elRows}</table>`);
+
+  // drawing
+  const svg = svgSnapshot();
+  if (svg) sec.push(`<h2>Section drawing</h2><div class="fig">${svg}</div>`);
+
+  // analysis results
+  const a = state.analysis;
+  if (a) {
+    const f = a.forces, co = a.coefficients;
+    sec.push(`<h2>Analysis</h2>` + reportKv([
+      ["Estimated downforce", `${fmtN(f.downforce_n, 0)} N`],
+      ["Drag estimate", `${fmtN(f.drag_total_n, 1)} N ` +
+        `(${fmtN(f.drag_induced_n, 1)} induced · ${fmtN(f.drag_profile_n, 1)} profile)`],
+      ["L/D estimate", fmtN(f.efficiency_ld, 1)],
+      ["C_ΔF estimate", fmtN(co.C_downforce_estimated, 2)],
+      ["C_ΔF inviscid gnd / free", `${fmtN(co.C_downforce_inviscid_ground, 2)} / ` +
+        `${fmtN(co.C_downforce_inviscid_free, 2)}`],
+      ["Centre of pressure", `${(co.x_cp_c * c.chord_mm).toFixed(0)} mm`],
+      ["k_g used", co.k_ground_realization != null
+        ? `${fmtN(co.k_ground_realization, 2)} (${co.k_ground_source || "auto"})` : "–"],
+    ]) +
+    `<table class="grid"><tr><th>Element</th><th>Cl</th><th>CL_max</th>` +
+    `<th>Loading</th><th>Ground ×</th></tr>` +
+    a.elements.map((e, i) =>
+      `<tr><td>E${i + 1} ${esc(e.role)}</td><td>${fmtN(e.Cl_checked, 2)}</td>` +
+      `<td>${fmtN(e.CL_max_isolated, 2)}</td>` +
+      `<td>${(e.loading_fraction * 100).toFixed(0)}%</td>` +
+      `<td>${fmtN(e.ground_multiplier, 1)}</td></tr>`).join("") +
+    `</table>` +
+    (a.warnings.length
+      ? `<div class="warn"><b>Warnings</b><ul>` +
+        a.warnings.map(w => `<li>${esc(w)}</li>`).join("") + `</ul></div>`
+      : ""));
+  }
+
+  // optimizer summary
+  const o = state.optResult;
+  if (o?.best) {
+    sec.push(`<h2>Optimization</h2>` + reportKv([
+      ["Objective", o.objective === "max_downforce"
+        ? "Maximize downforce (trusted)" : "Hit a downforce target"],
+      ["Best downforce", `${o.best.downforce_n} N`],
+      ["Best drag", `${o.best.drag_n} N`],
+      ["Evaluations", o.n_eval],
+    ]) + ((o.candidates || []).length
+      ? `<table class="grid"><tr><th>#</th><th>Downforce</th><th>Drag</th>` +
+        `<th>L/D</th><th>Flags</th></tr>` +
+        o.candidates.map(cd => {
+          const s = cd.summary || {};
+          const flags = [s.low_confidence ? "low conf" : "",
+                         s.near_stall ? "near stall" : "",
+                         s.slot_signature ? "slot corner" : ""]
+            .filter(Boolean).join(", ") || "clean";
+          return `<tr><td>${cd.rank}</td>` +
+            `<td>${fmtN(s.downforce_n ?? cd.downforce_n, 0)} N</td>` +
+            `<td>${fmtN(s.drag_total_n ?? cd.drag_n, 1)} N</td>` +
+            `<td>${s.efficiency_ld != null ? fmtN(s.efficiency_ld, 1) : "–"}</td>` +
+            `<td>${esc(flags)}</td></tr>`;
+        }).join("") + `</table>` : ""));
+  }
+
+  // RANS verification
+  const rs = state.ransResult?.result;
+  if (rs) {
+    sec.push(`<h2>RANS verification</h2>` + reportKv([
+      ["Sectional Cl — RANS", `${numf(rs.cl_rans, 3)} ± ${numf(rs.cl_rans_std, 3)}`],
+      ["Sectional Cl — panel estimate", rs.panel ? numf(rs.panel.c_est, 3) : "–"],
+      ["Cl delta", rs.delta_cl_pct != null
+        ? `${rs.delta_cl_pct > 0 ? "+" : ""}${fmtN(rs.delta_cl_pct, 1)}%` : "–"],
+      ["Downforce at RANS Cl", `${rs.downforce_n_at_rans_cl} N`],
+      ["Converged", rs.converged ? "yes" : (rs.user_stopped
+        ? "stopped by user (preview)" : "NO — mid-transient snapshot")],
+      ["Iterations", `${rs.n_iters_run} (${rs.stop_reason})`],
+      ["Suggested k_g", rs.suggested_k_g != null ? rs.suggested_k_g : "–"],
+      ["Mesh caution", rs.mesh_caution ? "coarse mesh — screening only" : ""],
+    ]));
+    // re-validated: a restored cache must stay inline image data
+    const flow = safeFlow(await captureRansFlow());
+    if (flow?.umag) {
+      sec.push(`<div class="fig"><img src="${flow.umag}" ` +
+               `alt="RANS velocity field"><p class="meta">Velocity field — ` +
+               `as driven, ground at the bottom, flow left to right</p></div>`);
+    }
+  }
+
+  // re-rank table
+  if (state.ransRerank?.length) {
+    sec.push(`<h2>RANS re-rank of the shortlist</h2>` +
+      `<table class="grid"><tr><th>#</th><th>Design</th><th>Panel N</th>` +
+      `<th>RANS N</th><th>Δ%</th><th>Verdict</th></tr>` +
+      state.ransRerank.map(r =>
+        `<tr><td>${r.rank ?? "–"}</td><td>${esc(r.label)}</td>` +
+        `<td>${r.panel_downforce_n != null ? fmtN(r.panel_downforce_n, 0) : "–"}</td>` +
+        `<td>${r.rans_downforce_n != null ? fmtN(r.rans_downforce_n, 0) : "–"}</td>` +
+        `<td>${r.delta_cl_pct != null
+          ? (r.delta_cl_pct > 0 ? "+" : "") + fmtN(r.delta_cl_pct, 1) : "–"}</td>` +
+        `<td>${esc(r.verdict || r.state || "–")}</td></tr>`).join("") +
+      `</table>`);
+  }
+
+  // operating map summary
+  if (state.lastSweep) {
+    const pts = state.lastSweep.points.filter(
+      p => !p.error && Number.isFinite(p.downforce_n));
+    if (pts.length) {
+      let pk = pts[0];
+      for (const p of pts) if (p.downforce_n > pk.downforce_n) pk = p;
+      sec.push(`<h2>Operating map</h2>` + reportKv([
+        ["Swept variable", MAP_LABELS[state.lastSweep.variable]
+          || state.lastSweep.variable],
+        ["Range", `${pts[0].value} – ${pts[pts.length - 1].value} ` +
+          `${MAP_UNITS[state.lastSweep.variable] || ""}`],
+        ["Peak downforce", `${fmtN(pk.downforce_n, 0)} N at ${pk.value} ` +
+          `${MAP_UNITS[state.lastSweep.variable] || ""}`],
+      ]));
+    }
+  }
+
+  // pinned designs
+  if (state.pins.length) {
+    sec.push(`<h2>Design iterations (pinned)</h2>` +
+      `<table class="grid"><tr><th>Pin</th><th>Date</th><th>Elements</th>` +
+      `<th>Downforce</th><th>Drag</th><th>L/D</th><th>Warnings</th></tr>` +
+      state.pins.map(p => {
+        const h = p.headline || {};
+        return `<tr><td>${esc(p.label)}</td>` +
+          `<td>${esc(new Date(p.t).toLocaleDateString())}</td>` +
+          `<td>${esc(h.elements ?? "–")}</td>` +
+          `<td>${fmtN(h.downforce_n, 0)} N</td>` +
+          `<td>${fmtN(h.drag_n, 1)} N</td>` +
+          `<td>${fmtN(h.ld, 1)}</td>` +
+          `<td>${esc(h.warnings || "–")}</td></tr>`;
+      }).join("") +
+      `</table>`);
+  }
+
+  sec.push(`<p class="meta">Estimates from the studio's panel + viscous
+    model; RANS rows are OpenFOAM (simpleFoam, k-ω SST, moving ground)
+    section truth checks. See the workflow guide for model limits.</p>`);
+
+  const html = `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<title>Wing section design report — ${esc(now.toISOString().slice(0, 10))}</title>
+<style>
+  body { font: 14px/1.5 "Segoe UI", system-ui, sans-serif; color: #1c2433;
+         max-width: 860px; margin: 32px auto; padding: 0 20px; }
+  h1 { font-size: 24px; margin: 0 0 2px; }
+  h2 { font-size: 16px; margin: 26px 0 8px; border-bottom: 1px solid #c3cbda;
+       padding-bottom: 4px; }
+  .meta { color: #5c6980; font-size: 12px; }
+  table { border-collapse: collapse; margin: 8px 0; font-size: 13px; }
+  table.kv td { padding: 3px 14px 3px 0; vertical-align: top; }
+  table.kv td:first-child { color: #5c6980; white-space: nowrap; }
+  table.grid { width: 100%; }
+  table.grid th, table.grid td { border: 1px solid #d7dce6; padding: 4px 8px;
+       text-align: left; }
+  table.grid th { background: #f0f2f6; font-weight: 600; }
+  .fig { margin: 12px 0; border: 1px solid #d7dce6; border-radius: 4px;
+         overflow: hidden; }
+  .fig img { max-width: 100%; display: block; }
+  .fig svg { display: block; }
+  .warn { background: #fdf6e7; border: 1px solid #e5cf9a; border-radius: 4px;
+          padding: 8px 12px; margin: 10px 0; font-size: 13px; }
+  .warn ul { margin: 6px 0 0; padding-left: 20px; }
+  @media print { body { margin: 10mm auto; } h2 { break-after: avoid; } }
+</style></head><body>${sec.join("\n")}</body></html>`;
+
+  const blob = new Blob([html], { type: "text/html" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `wing_design_report_${now.toISOString().slice(0, 10)}.html`;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 5000);
+}
+
+$("btn-report").addEventListener("click", async () => {
+  const b = $("btn-report");
+  busy(b, true);
+  try {
+    await buildReport();
+    toast("Design report saved — open it in a browser or print to PDF.",
+          "good", 5000);
+  } catch (e) {
+    toast(`Report failed: ${e.message}`);
+  } finally {
+    busy(b, false);
+  }
+});
+
 /* ---------------- presets + project files ---------------- */
 
 async function loadPresets() {
@@ -2293,10 +3365,22 @@ async function loadPresets() {
     });
     sel.addEventListener("change", () => {
       if (sel.value === "") return;
+      if (jobsRunning()) {
+        toast("A run is still using the solver — wait for it to finish or " +
+              "cancel it before loading a preset.", "info", 6000);
+        sel.value = "";
+        return;
+      }
       const p = presets[+sel.value];
+      // a preset is a new design context: the old workspace's results
+      // must not survive under it
+      resetWorkspaceResults();
+      configRevision++;
       state.config = withDefaults(structuredClone(p.config));
       state.target = p.target_downforce_n ?? state.target;
       writeConfigToForm();
+      renderPins();
+      markDirty();
       persistSession();
       refreshGeometry().then(runAnalysis);
       sel.value = "";
@@ -2304,7 +3388,57 @@ async function loadPresets() {
   } catch { /* presets are optional */ }
 }
 
-$("btn-save").addEventListener("click", async () => {
+function blobToDataURL(blob) {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(r.result);
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(blob);
+  });
+}
+
+// the flow-field renders live in the server's job registry, which forgets
+// them on restart — embed them in the project file while they are fetchable
+async function captureRansFlow() {
+  if (ransFlowCache) return ransFlowCache;   // restored images stay valid
+  const id = state.ransResult?.id;
+  if (!id || state.ransResult.state !== "done") return null;
+  const grab = async (field) => {
+    try {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 5000);
+      const res = await fetch(`/api/rans/${id}/flow?field=${field}`,
+                              { signal: ctl.signal });
+      clearTimeout(t);
+      if (res.ok) return await blobToDataURL(await res.blob());
+    } catch { /* best effort — the verdict saves either way */ }
+    return null;
+  };
+  const [umag, cp] = await Promise.all([grab("umag"), grab("cp")]);
+  const out = {};
+  if (umag) out.umag = umag;
+  if (cp) out.cp = cp;
+  if (!Object.keys(out).length) return null;
+  ransFlowCache = out;   // later saves skip the refetch
+  return out;
+}
+
+$("btn-save").addEventListener("click", saveProject);
+
+async function saveProject() {
+  // capturing flow images is async — one save at a time, with the spinner
+  const saveBtn = $("btn-save");
+  if (saveBtn.classList.contains("busy")) return;
+  busy(saveBtn, true);
+  try {
+    await saveProjectInner();
+  } finally {
+    busy(saveBtn, false);
+    syncSaveIndicator();
+  }
+}
+
+async function saveProjectInner() {
   const custom = {};
   for (const spec of usedCustomSpecs()) {
     if (state.customDat[spec]) {
@@ -2323,28 +3457,132 @@ $("btn-save").addEventListener("click", async () => {
       }
     }
   }
+  const flow = await captureRansFlow();
   const blob = new Blob([JSON.stringify({
-    app: "wing-section-studio", version: 1,
+    app: "wing-section-studio", version: 2,
+    saved_at: new Date().toISOString(),
     config: state.config, target_downforce_n: state.target,
     airfoil_names: state.airfoilNames, custom_airfoils: custom,
+    pins: state.pins,
+    rans_rerank: state.ransRerank,
+    results: resultsSnapshot(),
+    rans_flow: flow,
   }, null, 2)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = "wing_section_project.json";
+  const stamp = new Date().toISOString().slice(0, 10);
+  a.download = `wing_project_${stamp}.json`;
   a.click();
   setTimeout(() => URL.revokeObjectURL(a.href), 5000);
-});
+  clearDirty();
+  toast("Project saved — configuration, pins and all computed results.",
+        "good", 4000);
+}
 
-$("btn-open").addEventListener("click", () => $("file-project").click());
+/* Restore every saved result into the exact render paths the live flows
+   use — no recomputation. Shapes come from resultsSnapshot(), but the
+   payload may be a hand-edited file: each section is isolated so one
+   corrupt block skips itself instead of aborting the whole restore. */
+function restoreResults(r) {
+  if (!r || typeof r !== "object") return;
+  const attempt = (what, fn) => {
+    try { fn(); } catch (e) {
+      console.warn(`workspace restore: ${what} skipped —`, e);
+    }
+  };
+  attempt("analysis", () => {
+    if (!r.analysis) return;
+    state.analysis = r.analysis;
+    renderResults(r.analysis);
+    renderCp(r.analysis);
+    if (r.analysis_stale) {
+      $("results-stale").hidden = false;
+      $("cp-stale").hidden = false;
+    } else {
+      $("results-stale").hidden = true;
+      $("cp-stale").hidden = true;
+      const xcp = +r.analysis?.coefficients?.x_cp_c;
+      if (Number.isFinite(xcp)) viewport.setCp(xcp);
+    }
+  });
+  attempt("optimizer results", () => {
+    if (!r.optimizer || !r.optimizer.best_config) return;
+    state.optResult = r.optimizer;
+    state.optTarget = Number.isFinite(r.opt_target) ? r.opt_target : null;
+    renderOptimizer(r.optimizer);
+    renderOptHints(r.optimizer);
+    renderCandidates(r.optimizer);
+    $("btn-opt-apply").disabled = false;
+    if (r.optimizer.candidates?.length) {
+      $("rerank-title").hidden = false;
+      $("rerank-block").hidden = false;
+      gateRerank();
+    }
+  });
+  attempt("RANS result", () => {
+    if (!r.rans || !r.rans.result) return;
+    state.ransResult = r.rans;
+    state.ransRev = r.rans_stale ? -1 : null;
+    renderRans(r.rans);
+    renderRansResult(r.rans, { provenance: "restored" });
+    if (ransFlowCache) {
+      showRansFlow(null);   // rendered from the project file's images
+    } else if (r.rans.id) {
+      // the server may still hold the job (same-process reload) — probe
+      // quietly and only surface the flow view if it is actually there
+      $("rans-flow").hidden = true;
+      fetch(`/api/rans/${encodeURIComponent(r.rans.id)}/flow?field=umag`)
+        .then((res) => { if (res.ok) showRansFlow(r.rans.id); })
+        .catch(() => {});
+    } else {
+      $("rans-flow").hidden = true;
+    }
+  });
+  attempt("operating map", () => {
+    if (!r.sweep) return;
+    renderSweep(r.sweep);
+    if (r.sweep_stale) $("map-stale").hidden = false;
+  });
+  attempt("screener table", () => {
+    if (!r.screen || !Array.isArray(r.screen.rows)) return;
+    state.screenRows = r.screen.rows;
+    state.screenMeta = r.screen.meta || null;
+    renderScreenTable();
+    if (state.screenMeta?.count != null) {
+      $("scr-note").textContent = `${state.screenMeta.count} sections ` +
+        `passed the filters (restored) — click a column to sort.`;
+    }
+    syncScreenerProvenance();
+  });
+  syncPinButton();
+}
+
+$("btn-open").addEventListener("click", () => {
+  if (jobsRunning()) {
+    toast("A run is still using the solver — wait for it to finish or " +
+          "cancel it before opening another project.", "info", 6000);
+    return;
+  }
+  $("file-project").click();
+});
 $("file-project").addEventListener("change", async () => {
   const f = $("file-project").files[0];
   $("file-project").value = "";
   if (!f) return;
+  if (jobsRunning()) {
+    toast("A run is still using the solver — wait for it to finish or " +
+          "cancel it before opening another project.", "info", 6000);
+    return;
+  }
   try {
     const p = JSON.parse(await f.text());
     if (!Array.isArray(p.config?.elements) || !p.config.elements.length) {
       throw new Error("not a project file (no elements)");
     }
+    // the old workspace's computations end here — nothing from it may
+    // render under, be pinned against, or persist with the new project
+    resetWorkspaceResults();
+    configRevision++;
     // re-register embedded custom airfoils; server may assign new ids
     const remap = {};
     for (const [spec, dat] of Object.entries(p.custom_airfoils || {})) {
@@ -2362,11 +3600,29 @@ $("file-project").addEventListener("change", async () => {
     Object.assign(state.airfoilNames, p.airfoil_names || {});
     state.config = withDefaults(p.config);
     state.target = p.target_downforce_n ?? 250;
+    state.pins = Array.isArray(p.pins) ? p.pins : [];
+    if (Array.isArray(p.rans_rerank)) {
+      state.ransRerank = p.rans_rerank;
+      $("rerank-title").hidden = false;
+      $("rerank-block").hidden = false;
+      renderRerank({ rows: state.ransRerank });
+      gateRerank();
+    }
+    ransFlowCache = safeFlow(p.rans_flow);
     writeConfigToForm();
-    persistSession();
+    renderPins();
     await refreshGeometry();
-    runAnalysis();
-    toast("Project loaded.", "good");
+    if (p.version >= 2 && p.results) {
+      // a full workspace: restore the saved results instead of recomputing
+      restoreResults(p.results);
+      toast("Project loaded — configuration, pins and saved results.",
+            "good", 5000);
+    } else {
+      runAnalysis();
+      toast("Project loaded.", "good");
+    }
+    persistSession();
+    clearDirty();
   } catch (e) {
     toast(`Could not open project: ${e.message}`);
   }
@@ -2391,14 +3647,20 @@ async function checkHealth() {
 /* ---------------- boot ---------------- */
 
 async function restoreSession() {
+  // both copies carry a timestamp: the pagehide beacon can silently drop a
+  // large payload (64 KB quota), so the server copy is NOT guaranteed
+  // fresher — take whichever snapshot is newer
+  let server = null, local = null;
+  try { server = (await api.session()).state; } catch {}
+  try { local = JSON.parse(localStorage.getItem("wss-session")); } catch {}
+  const valid = (s) => !!s?.config?.elements?.length;
   let saved = null;
-  // the server copy first: it is written by every session regardless of
-  // origin, so it is always at least as fresh as this origin's localStorage
-  try { saved = (await api.session()).state; } catch {}
-  if (!saved?.config?.elements?.length) {
-    try { saved = JSON.parse(localStorage.getItem("wss-session")); } catch {}
+  if (valid(server) && valid(local)) {
+    saved = (+local.t || 0) > (+server.t || 0) ? local : server;
+  } else {
+    saved = valid(server) ? server : (valid(local) ? local : null);
   }
-  if (!saved?.config?.elements?.length) return false;
+  if (!saved) return false;
   try {
     // uploaded airfoils live in server memory: re-register any the session used
     const remap = {};
@@ -2421,7 +3683,9 @@ async function restoreSession() {
     if (Array.isArray(saved.rans_rerank)) {
       state.ransRerank = saved.rans_rerank;
     }
-    return true;
+    if (Array.isArray(saved.pins)) state.pins = saved.pins;
+    return saved.results && typeof saved.results === "object"
+      ? saved.results : true;
   } catch {
     return false;
   }
@@ -2443,9 +3707,22 @@ async function boot() {
   const restored = await restoreSession();
   sessionReady = true;   // flushes may persist state from here on
   writeConfigToForm();
-  // draw the section, but leave analysis to the user — the results panel
-  // explains the two actions
-  refreshGeometry();
+  renderPins();
+  syncPinButton();
+  syncOptObjectiveUI();
+  syncOptModeUI();
+  syncAfPool();
+  syncSaveIndicator();
+  // draw the section first, then re-render every result the session carried
+  // — the workspace comes back exactly as it was left, computations
+  // included. A corrupt snapshot must not abort boot: the rest of the app
+  // (re-attach, shortcuts, dialogs) still has to wire up.
+  await refreshGeometry();
+  if (restored && typeof restored === "object") {
+    try { restoreResults(restored); } catch (e) {
+      console.warn("session results restore skipped —", e);
+    }
+  }
   reattachOptimizer();   // a reload must not orphan a running search
 
   // re-attach a running verification queue, or restore the last table
@@ -2456,13 +3733,39 @@ async function boot() {
       $("rerank-block").hidden = false;
       busy($("btn-rerank"), true);
       $("btn-rerank-cancel").disabled = false;
+      $("rr-mesh").disabled = true;
+      state.queueActive = true;
+      updateSolverButtons();
       pollRerank();
     } else if (state.ransRerank && state.ransRerank.length) {
       $("rerank-title").hidden = false;
       $("rerank-block").hidden = false;
       renderRerank({ rows: state.ransRerank });
+      gateRerank();
     }
   } catch { /* rediscovery is best-effort */ }
+
+  // keyboard shortcuts: the three highest-traffic actions. Never inside a
+  // modal dialog (the dialog's own controls answer there) and never on key
+  // auto-repeat (a held Ctrl+S must not queue a stack of saves).
+  window.addEventListener("keydown", (e) => {
+    const mod = e.ctrlKey || e.metaKey;
+    if (!mod || e.repeat) return;
+    if (document.querySelector("dialog[open]")) return;
+    if (e.key === "s" || e.key === "S") {
+      e.preventDefault();
+      saveProject();   // internally single-flight
+    } else if (e.key === "o" || e.key === "O") {
+      e.preventDefault();
+      $("btn-open").click();   // carries the jobs-running guard
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      if (!$("btn-analyze").disabled
+          && !$("btn-analyze").classList.contains("busy")) {
+        runAnalysis();
+      }
+    }
+  });
 
   if (restored) {
     toast("Continuing where you left off — use Load preset… to start fresh.",

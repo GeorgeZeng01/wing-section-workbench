@@ -208,8 +208,13 @@ export function lineChart(container, spec) {
       dots[si].style.display = "";
       dots[si].setAttribute("cx", X(sx));
       dots[si].setAttribute("cy", Y(sy));
+      // series names can carry user/file-originated text — escape them,
+      // this string lands in the tooltip via innerHTML
+      const safeName = String(s.name).replace(/[&<>"']/g, (c) =>
+        ({ "&": "&amp;", "<": "&lt;", ">": "&gt;",
+           '"': "&quot;", "'": "&#39;" }[c]));
       rows.push(`<span class="tip-swatch" style="background:${s.color}"></span>` +
-                `${s.name}&nbsp;<b>${fmt(sy)}</b>`);
+                `${safeName}&nbsp;<b>${fmt(sy)}</b>`);
       cross.setAttribute("x1", X(sx));
       cross.setAttribute("x2", X(sx));
     });

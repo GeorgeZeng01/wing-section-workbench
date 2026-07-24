@@ -11,7 +11,7 @@
 </script>
 <link rel="icon" href="/static/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" href="/static/favicon.png">
-<link rel="stylesheet" href="/static/css/app.css?v=11">
+<link rel="stylesheet" href="/static/css/app.css?v=13">
 </head>
 <body>
 
@@ -254,6 +254,14 @@
       <div id="r-loading"></div>
       <div id="r-warnings" class="warnings"></div>
     </div>
+    <div class="pins-sec">
+      <h3 class="sub-title">Pinned designs</h3>
+      <div id="pins-empty" class="empty-note">Pin analyzed designs to build
+        a compared iteration record — pins restore with one click and are
+        saved with the project.</div>
+      <div id="pins-list"></div>
+      <button id="btn-pin" class="btn small" disabled>Pin current design</button>
+    </div>
   </aside>
 
   <!-- ============ bottom dock ============ -->
@@ -270,6 +278,8 @@
 
     <div id="tab-pressure" class="tab-page active" role="tabpanel">
       <div class="empty-note" id="cp-empty">Pressure distributions appear here after an analysis.</div>
+      <div id="cp-stale" class="stale-note" hidden>configuration changed —
+        re-analyze to update the pressure distributions</div>
       <div id="cp-chart" class="chart-host tall" hidden></div>
     </div>
 
@@ -428,6 +438,8 @@
         <span id="map-note" class="note">Sweep ride height or speed to map
           how the current design behaves away from its operating point.</span>
       </div>
+      <div id="map-stale" class="stale-note" hidden>configuration changed
+        since this sweep — re-sweep to update the maps</div>
       <div class="chart-pair">
         <div id="map-downforce" class="chart-host"></div>
         <div id="map-ld" class="chart-host"></div>
@@ -455,6 +467,9 @@
         <span id="rans-note" class="note">checking Docker…</span>
       </div>
       <div class="progress" aria-hidden="true"><div id="rans-progress"></div></div>
+      <div id="rans-stale" class="stale-note" hidden>configuration changed
+        since this verification — the verdict below describes the earlier
+        design; re-verify</div>
       <div id="rans-status" class="note">idle — runs the OpenFOAM truth case
         (simpleFoam + k-ω SST, moving ground) in Docker and compares the
         result against the panel estimate. Optional — the design workflow
@@ -494,6 +509,9 @@
         <label class="check"
                title="Adds a bounding box as 4 lines on their own HITBOX layer — horizontals touching the lowest and highest points, verticals touching the leftmost and rightmost points of all airfoils together. Instant overall dimensions in CAD; delete the HITBOX layer when done.">
           <input id="exp-hitbox" type="checkbox"> Bounding-box lines (DXF)</label>
+        <span class="note">Orientation applies to DXF, SVG and CSV (the ZIP
+          always writes both frames); entity and bounding box are
+          DXF-only.</span>
       </div>
       <div class="export-grid">
         <div class="export-card">
@@ -521,6 +539,14 @@
           <p>Every contour point in millimeters as CSV with element metadata —
              for spreadsheets or custom tooling.</p>
           <button class="btn" data-export="csv">Export CSV</button>
+        </div>
+        <div class="export-card">
+          <h3>Design report</h3>
+          <p>Self-contained HTML report: configuration, section drawing,
+             analysis, optimizer and RANS summaries, and the pinned-design
+             iteration record. Open anywhere; print to PDF for the design
+             documentation.</p>
+          <button id="btn-report" class="btn">Export report</button>
         </div>
         <div class="export-card">
           <h3>OpenFOAM case</h3>
@@ -660,7 +686,7 @@
   </div>
 </template>
 
-<script type="module" src="/static/js/shell.js?v=11"></script>
-<script type="module" src="/static/js/app.js?v=11"></script>
+<script type="module" src="/static/js/shell.js?v=13"></script>
+<script type="module" src="/static/js/app.js?v=13"></script>
 </body>
 </html>
