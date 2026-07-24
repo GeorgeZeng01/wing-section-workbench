@@ -1,12 +1,12 @@
 {
- "git_rev": "1407db3",
- "timestamp_utc": "2026-07-24T03:43:07+00:00",
+ "git_rev": "12dbfcd",
+ "timestamp_utc": "2026-07-24T04:12:48+00:00",
  "scenarios": {
   "low_target_60n": {
    "supported": true,
    "state": "done",
    "error": null,
-   "elapsed_s": 25.0,
+   "elapsed_s": 28.2,
    "n_eval": 1097,
    "n_infeasible": 0,
    "n_candidates": 1,
@@ -74,7 +74,7 @@
    "supported": true,
    "state": "done",
    "error": null,
-   "elapsed_s": 19.9,
+   "elapsed_s": 22.3,
    "n_eval": 829,
    "n_infeasible": 0,
    "n_candidates": 6,
@@ -142,7 +142,7 @@
    "supported": true,
    "state": "done",
    "error": null,
-   "elapsed_s": 81.1,
+   "elapsed_s": 119.8,
    "n_eval": 3770,
    "n_infeasible": 0,
    "n_candidates": 6,
@@ -210,7 +210,7 @@
    "supported": true,
    "state": "done",
    "error": null,
-   "elapsed_s": 222.0,
+   "elapsed_s": 76.4,
    "n_eval": 2017,
    "n_infeasible": 0,
    "n_candidates": 1,
@@ -279,20 +279,20 @@
    "supported": true,
    "state": "done",
    "error": null,
-   "elapsed_s": 44.9,
+   "elapsed_s": 47.7,
    "n_eval": 2060,
    "n_infeasible": 0,
    "n_candidates": 5,
    "pareto_n": 24,
    "winner": {
-    "J": -5.591,
+    "J": -6.368,
     "penalty": null,
-    "claimed_downforce_n": 256.9,
-    "claimed_drag_n": 34.55,
+    "claimed_downforce_n": 259.1,
+    "claimed_drag_n": 34.99,
     "on_target": false,
     "summary": {
-     "downforce_n": 256.9,
-     "drag_total_n": 34.6,
+     "downforce_n": 259.1,
+     "drag_total_n": 35.0,
      "efficiency_ld": 7.4,
      "warnings": 1,
      "confidence_min": 0.91,
@@ -300,16 +300,16 @@
      "near_stall": false
     },
     "design": {
-     "stack_aoa_deg": -3.75082,
+     "stack_aoa_deg": -4.0,
      "deflections_deg": [
       0,
-      21.72723
+      22.38399
      ],
      "slot_gaps_pct": [
-      0.82251
+      0.81198
      ],
      "slot_overlaps_pct": [
-      0.1626
+      0.0956
      ],
      "airfoils": [
       "s1223",
@@ -318,35 +318,35 @@
     },
     "measured": {
      "feasible": true,
-     "downforce_n": 256.9,
-     "drag_n": 34.55,
-     "ld": 7.44,
-     "frac_max": 0.875,
+     "downforce_n": 259.1,
+     "drag_n": 34.99,
+     "ld": 7.4,
+     "frac_max": 0.876,
      "fracs": [
-      0.875,
-      0.621
+      0.876,
+      0.635
      ],
      "gaps_pct": [
-      0.82
+      0.81
      ],
      "overlaps_pct": [
-      0.16
+      0.1
      ],
      "confidence_min": 0.91
     }
    },
    "archive": {
     "n_total": 2060,
-    "n_clean": 146,
+    "n_clean": 175,
     "clean_downforce_min": 85.5,
-    "clean_downforce_max": 256.9
+    "clean_downforce_max": 261.6
    }
   },
   "max_downforce_ld14": {
    "supported": true,
    "state": "failed",
    "error": "no design holds L/D >= 14.0 (best found 12.7). Lower the efficiency floor or free more variables",
-   "elapsed_s": 40.0,
+   "elapsed_s": 83.1,
    "n_eval": 1899,
    "n_infeasible": 0
   }

@@ -1485,7 +1485,13 @@ function renderCandidates(s) {
     const drag = f.drag_total_n ?? c.drag_n;
     const ld = f.efficiency_ld;
     const badges =
-      (c.on_target ? "" : `<span class="badge warn">off target</span>`) +
+      // "off target" is meaningless while maximizing — there is no target
+      (c.on_target || s.objective === "max_downforce"
+        ? "" : `<span class="badge warn">off target</span>`) +
+      (f.slot_signature ? `<span class="badge warn" title="Slot at the ` +
+        `workable floor with no overlap tuck — the corner the inviscid ` +
+        `model over-rates; no recorded RANS point supports it. See the ` +
+        `analysis warning.">slot corner</span>` : "") +
       (f.low_confidence ? `<span class="badge warn" title="NeuralFoil ` +
         `confidence is below 50% on at least one section — the viscous ` +
         `data behind this design is an extrapolation, not a prediction. ` +
