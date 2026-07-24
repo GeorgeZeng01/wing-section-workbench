@@ -803,8 +803,8 @@ decision EXCLUDES the first 500 rows outright (a decay-then-recover
 startup — the usual potentialFoam-initialized shape on a separated case —
 has a mean-crossing where naive half-windows cancel and a premature stop
 would have been labelled converged; reproduced numerically and pinned in
-the suite), the minimum gate is skip + two full windows, the criterion
-must hold on three consecutive polls, and the finalize verdict checks the
+the suite), the minimum gate is skip + full windows, the criterion
+must hold across repeated evaluations, and the finalize verdict checks the
 OUTCOME rather than the request — a writeNow the solver never noticed
 (the run reached the cap anyway) is judged by its history, never trusted.
 A force-stopped case's controlDict is restored to `endTime` afterwards so
@@ -814,6 +814,11 @@ limit cycle (Cl 2.71 ± 0.15); the fine three-element case that motivated
 all of this converges at ~11,000 iterations to Cl 8.62 ± 0.07 — its
 3,000-iteration snapshot had been 21 % low, and the graceful stop was
 validated live against the real solver through the bind mount.
+(Both the detector and that 8.62 figure were superseded in the 2026-07-24
+round below: the drift test now spans three windows, re-arms on new rows
+rather than wall-clock polls, and gates every verdict branch on the final
+history — and 8.62 belongs to a hotter validity-boundary config, not to
+the three-element design a user is likely to open.)
 
 **Flow-field view: the solved section rendered in-app, no ParaView.** The
 cases are one cell thick, so the internal field IS the cross-section:
@@ -1306,6 +1311,81 @@ against reference geometry, and either dies with the layer anyway;
 geometry is noise. Available in both frames (the design frame has no
 ground line, but its box is still meaningful).
 
+## RANS realism and verdict honesty (2026-07-24)
+
+A saved three-element design read RANS Cl 7.48 against a panel estimate of
+4.51 — "+66 %" — and the run was suspected of being unphysical. Four
+controlled A/B solves on that exact configuration (recorded in
+`docs/calibration/LOG.md`) found the solver was substantially right and
+three separate presentation and setup faults were making it look wrong.
+
+**The domain was a wind tunnel.** At 8 chords the slip ceiling was
+inflating Cl by ~5 % and Cd by ~24 % on a section running sectional
+Cl ~7.5 — blockage, not aerodynamics. Doubling the height to 16 chords
+costs ~6 % more cells because the far field is coarse. Alternatives
+considered: a far-field/Riemann boundary condition (correct but changes
+the case class and its validation history for a bias the taller box
+removes outright), or an analytic blockage correction applied to the
+reported forces (rejected — a correction the user cannot see is worse
+than a mesh that does not need one).
+
+**Fully-turbulent SST is the conservative choice here, and that was
+measured rather than assumed.** The obvious suspicion at Re 4.7e5 on an
+S1223 is that ignoring transition inflates lift. The γ-Reθ transition
+model was run on the same mesh and read **26 % HIGHER** Cl — laminar runs
+thin the boundary layers in the favorable ground-effect gradient. So the
+shipped setup understates rather than overstates, and no model switch was
+added; the finding is documented in the generated case README instead of
+becoming a knob nobody can calibrate.
+
+**The "+66 %" was the estimate being conservative, not the truth model
+being wrong.** The k_g realization curve is calibrated on the two-element
+baseline; this stack realizes k_g ≈ 0.37 of its inviscid gain against the
+curve's 0.158. The curve was NOT refitted — fitting a config-blind curve
+to one config is curve-fitting a design, the same reasoning that rejected
+a refit in the cross-referencing campaign. Instead the model's scope is
+now stated where it is used: `analyze()` warns on three-plus-element
+heavily loaded stacks that the estimate is expected to run conservative
+there, and the RANS card says so beside the delta rather than presenting a
+bare percentage the user must interpret alone.
+
+**A number is now allowed to say it is not finished.** The reported ±
+was a population standard deviation over a drifting tail — for a ramp that
+is range/√12, i.e. a deterministic function of the drift rate, so a run
+still climbing advertised 0.24 % precision. The tail statistic is now
+detrended (scatter about the tail's own trend line) and the drift is
+reported separately, signed: a rising history labels its own mean a lower
+bound. Verdicts were tightened to match: the drift test spans three
+windows because two read flat at every zero-crossing (one window past an
+overshoot peak, or at a node of a slow oscillation riding a climb), the
+stop criterion re-arms on new rows rather than wall-clock polls (a fine
+mesh advances only a few iterations per second, so consecutive polls
+re-judged the same data), and EVERY finalize branch is gated on the final
+history — previously an early exit with exit code 0 could mint
+"residuals converged" plus a k_g calibration constant from a drifting
+tail. The stop mechanism now explains an exit; only the history certifies
+a result.
+
+**Every run measures its own trustworthiness.** Cases write yPlus and
+wallShearStress fields beside each field set, and the app reports measured
+y+ and a per-element attachment verdict from reversed wall shear. This is
+the check a bare Cl cannot give: on the case in question it showed the
+main element attached and the 27° flap attached at 2.7 % reversed faces —
+the high load is an attached multi-slot system working, which is the
+difference between a number to trust and a number to re-run. Rejected
+alternative: inferring separation from the force history's oscillation
+amplitude — indirect, and it conflates limit-cycle sampling with flow
+state.
+
+**Mesh: per-element boundary-layer caps and a resolved slot throat.** The
+layer stack was capped globally by the tightest clearance anywhere in the
+geometry, so a 1.3 %c slot gap starved the main element's stack to ~19 %
+of its physical boundary layer. Each element is now capped by the
+clearances it actually faces, and each slot throat carries a refinement
+box guaranteeing ≥ 8 cells across the jet on every preset. The meshed wall
+polyline is also densified independently of the panel count — surface
+resolution used to be whatever the panel solver happened to want.
+
 ## Known limitations
 
 Documented, not fixed. The custom-airfoil registry lives in server memory
@@ -1319,7 +1399,16 @@ cross-referenced on the two-element baseline (validated h/c 0.086–0.114
 and 0.429, optimistic below h/c 0.08, conservative mid-height — see
 `docs/calibration/`), but that validity map is single-section,
 single-config evidence from a fully-turbulent 2D truth model: it has not
-been generalized across stacks, speeds, or transition behavior, and
-tunnel data remains the unarbitrated referee. Steady RANS at racing
-heights runs a genuine limit cycle (±7 % at the 30 mm anchor), so every
-calibration number carries that band.
+been generalized across stacks or speeds, and tunnel data remains the
+unarbitrated referee. Steady RANS at racing heights runs a genuine limit
+cycle (±7 % at the 30 mm anchor), so every calibration number carries that
+band. Two boundaries were probed in the 2026-07-24 round and remain open:
+transition behavior is now measured at ONE point (γ-Reθ read 26 % above
+fully-turbulent SST on the three-element case, so the shipped truth model
+is conservative there — one configuration, not a trend), and the estimate's
+conservatism on multi-element high-coupling stacks is recorded at two
+points (implied k_g 0.37 and 0.43 against a curve giving 0.12–0.16)
+without a refit, because a config-blind curve cannot be honestly fitted to
+configuration-dependent error. The curve's shape is a two-element
+artifact; treat estimates on three-plus-element stacks as lower bounds
+until RANS says otherwise.

@@ -904,6 +904,20 @@ def part_i(made):
         "90&nbsp;% loading warning line measured 23–30&nbsp;% optimistic "
         "even at the validated heights — when the loading meters warn, "
         "believe them over the bands."))
+    s.append(body(
+        "A second caveat, and the more surprising one: those bands were "
+        "measured on a <i>two-element</i> section, and the ride-height "
+        "curve behind them cannot see how strongly a given stack couples "
+        "to the road. On three-element, heavily loaded sections the error "
+        "reverses and grows — fine-mesh runs measured such stacks realising "
+        "0.37–0.43 of their inviscid ground gain where the curve offers "
+        "0.12–0.16, so the estimate ran 35–65&nbsp;% <i>conservative</i>. "
+        "The application raises an estimate-fidelity warning on those "
+        "designs. The response is calibration rather than suspicion: verify "
+        "in RANS and pin the suggested ground-gain factor from a converged "
+        "run. Direction matters here — a conservative estimate means the "
+        "wing makes more than the number in front of you, which is a "
+        "different problem from one that flatters a design."))
     s.append(h3("The RANS case"))
     s.append(body(
         "Everything this tool reports screens and ranks; RANS decides. Both "
@@ -919,16 +933,19 @@ def part_i(made):
         "three-dimensional effect a section case cannot see, so it is "
         "compared against the estimate's profile share, never the total."))
     s.append(kv_table([
-        ("Coarse (~15k cells)", "A first look — does the flow stay attached, "
+        ("Coarse (~21k cells)", "A first look — does the flow stay attached, "
          "is the case healthy. Converges in about a minute, but it is a "
-         "screening number only: calibration testing measured the coarse "
-         "mesh reading validated operating points 22–35&nbsp;% below "
-         "fine-mesh truth at racing and mid ride heights (the venturi gap is "
-         "under-resolved), and the result says so."),
-        ("Medium (~40k cells)", "The standard confirmation run for a "
+         "screening number only: on the two-element baseline the coarse "
+         "mesh read validated operating points 22–35&nbsp;% below fine-mesh "
+         "truth at racing and mid ride heights (the venturi gap was "
+         "under-resolved), and the result says so. That bias is "
+         "configuration-dependent rather than a fixed offset — it did not "
+         "reproduce on a three-element case — so treat it as an unknown of "
+         "that order, not a correction you can apply."),
+        ("Medium (~46k cells)", "The standard confirmation run for a "
          "shortlisted design; typically a few minutes. Agreed with the fine "
          "mesh within the oscillation band at the calibration anchor."),
-        ("Fine (~90k cells)", "Final numbers, calibration-grade comparisons, "
+        ("Fine (~95k cells)", "Final numbers, calibration-grade comparisons, "
          "and the grid-sensitivity check for a design you intend to commit "
          "to. Heavily loaded sections can need many thousands of iterations "
          "here — let it run."),
@@ -943,19 +960,33 @@ def part_i(made):
         "starts the solver in a container, and streams live convergence — "
         "iteration count, lift and drag, and the lift history charted "
         "against the panel estimate. The run stops itself as soon as the "
-        "force history is statistically flat (or the solver's residuals "
-        "converge first), so the generous iteration cap is an upper bound, "
-        "not a duration."))
+        "force history is statistically flat, so the generous iteration cap "
+        "is an upper bound, not a duration. Do not expect the solver's own "
+        "residual thresholds to end a loaded high-lift case — they are a "
+        "backstop that does not fire on this class of flow, which is "
+        "precisely why the force history is the criterion."))
     s.append(body(
         "A finished run reports the RANS coefficients — the mean over the "
-        "settled tail of the history, with the residual oscillation as a "
-        "±&nbsp;band — beside the panel estimate, the equivalent downforce "
-        "at the wing's reference area, and the drag comparison. If the run "
-        "hit its iteration cap while the lift was still trending, the "
-        "result is labelled "
-        f"{B('NOT CONVERGED')} in plain terms: the numbers are a "
-        "mid-transient snapshot, and the remedy — raise the cap and rerun — "
-        "is stated with it."))
+        "settled tail of the history, with the scatter about that tail's "
+        "own trend as a ±&nbsp;band — beside the panel estimate, the "
+        "equivalent downforce at the wing's reference area, and the drag "
+        "comparison. The ± deliberately excludes any residual drift: a "
+        "still-moving mean would otherwise advertise a precision it does "
+        "not have. Whenever the history is still trending — whether the run "
+        "hit its cap, stopped early, or was stopped by hand — the result is "
+        "labelled "
+        f"{B('NOT CONVERGED')} in plain terms, its mean is named a lower or "
+        "upper bound according to which way it is moving, and the remedy — "
+        "raise the cap and rerun — is stated with it."))
+    s.append(body(
+        "Every run also reports what it measured at the walls: the solved "
+        f"{B('y+')} per element, and an {B('attachment verdict')} read from "
+        "the sign of the wall shear — the fraction of each element's "
+        "surface carrying reversed flow. This is the check a lift "
+        "coefficient alone cannot give you. A high load with the elements "
+        "attached is a working multi-element system; the same number with a "
+        "flap largely reversed is a separated solution that happens to "
+        "average high, and the two call for opposite design responses."))
     s.append(body(
         "Two more things arrive with the result. First, the "
         f"{B('suggested ground-gain factor')}: the pinned calibration value "

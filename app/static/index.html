@@ -602,12 +602,27 @@
     blank for the automatic ride-height curve, or pin it 0–1 against RANS or
     tunnel data. The advanced constants <code>gain_cap_ratio</code> and
     <code>choke_h_c</code> are available at the config/API level.</p>
+    <p><b>Scope of the calibration.</b> That curve was fitted on the
+    <b>two-element</b> baseline, and it cannot see how strongly a stack is
+    coupled to the road. On three-plus-element, heavily loaded sections it
+    runs <b>conservative</b>: fine-mesh RANS has measured such stacks
+    realizing k<sub>g</sub> ≈ 0.37–0.43 of the inviscid gain where the curve
+    offers 0.12–0.16, i.e. 35–65% more downforce than estimated. An
+    estimate-fidelity warning fires on those designs. The fix is calibration,
+    not a fudge: verify in <b>RANS verify</b> and apply the suggested
+    k<sub>g</sub> from a converged run.</p>
     <p><b>Element loading.</b> Each element's free-air inviscid load (×η) is
     checked against its isolated CL<sub>max</sub> from NeuralFoil at the
     element's own Reynolds number — the classical high-lift load budget.
     Warnings start at 90%, criticals at 110%.</p>
     <p><b>Drag.</b> Two parts. <i>Profile drag</i>: each element's section
     drag from its polar, looked up at the ground-effect operating point.
+    Ground effect routinely carries an element past its isolated stall CL,
+    beyond where its polar has data — the lookup then reads the pre-stall
+    cap, so the figure is a <b>floor</b>. The app marks it and the resulting
+    L/D with <code>≥</code>/<code>≤</code> when that happens; fine-mesh RANS
+    has measured several times more section drag at heavy loading, so
+    confirm drag with RANS before trading on it.
     <i>Induced drag</i> — usually the larger part: computed from the same
     downforce the tool reports,
     <code>CDi = CL²/(π·AR·e)·φ</code>, where <code>e</code> is the span

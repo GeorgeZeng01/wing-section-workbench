@@ -137,9 +137,15 @@ and case-template items):
 
 - gmsh mesh of the installed section in meters — unstructured triangles
   graded from the wing outward, quad boundary layers on the airfoil walls
-  and on the ground under the wing, first layer at y+ ≈ 1 for the
-  configured Reynolds number. Three presets: coarse ≈ 15k, medium ≈ 40k,
-  fine ≈ 90k cells.
+  (each element's stack capped by the clearances it actually faces) and a
+  refinement box across every slot throat so the jet keeps at least eight
+  cells. The ground carries no layer stack — gmsh can only terminate one
+  mid-wall by staircasing it into slivers that break the solve — so the
+  y+-adaptive wall treatment handles it. The first wall layer targets
+  y+ ≈ 1 at the configured Reynolds number; the solved `yPlus` field
+  beside each written time step is the measured value. Three presets on
+  the two-element baseline: coarse ≈ 21k, medium ≈ 46k, fine ≈ 95k cells
+  (a three-element stack runs higher).
 - `simpleFoam` + k-ω SST with a ground plane **moving at the freestream
   speed** (the wing-fixed frame of a car), y+-adaptive wall treatment, and
   a `forceCoeffs` function object with `liftDir (0 -1 0)` — reported Cl is
@@ -153,11 +159,15 @@ wsl -d Ubuntu -- bash run.sh
 ```
 
 The script converts the mesh, fixes patch types, runs `checkMesh` and
-`simpleFoam`, and writes the final coefficients to `results.txt`.
-Sectional downforce per unit span is `L' = Cl · ½ρU²c`; compare it with
-the studio's estimate and recalibrate the `k_g` / viscous-efficiency knobs
-against it. Each case's `README.txt` documents its exact numbers and
-conventions.
+`simpleFoam`, and writes the final coefficients to `results.txt` — with the
+Cl drift across the trailing iterations and a `NOT CONVERGED` banner when
+the history is still trending. Expect a loaded high-lift case to use its
+whole iteration budget: the `residualControl` thresholds are a backstop
+that does not fire on this class of case. Sectional downforce per unit span
+is `L' = Cl · ½ρU²c`; compare it with the studio's estimate and recalibrate
+the `k_g` / viscous-efficiency knobs against it. Each case's `README.txt`
+documents its exact numbers and conventions, including the domain size and
+the fully-turbulent turbulence treatment.
 
 ### In-app verification (Docker)
 
@@ -167,7 +177,11 @@ builds the identical mesh and case, runs it in a local Docker container
 Docker results are interchangeable), shows live solver convergence, and
 finishes with the RANS coefficients side by side with the studio estimate —
 including the pinned `k_g` that would make the estimate reproduce the RANS
-sectional load, applied with one click. Entirely opt-in: the button only
+sectional load, applied with one click (offered only from a run whose force
+history actually converged). Each run also reports its measured y+ and a
+per-element attachment verdict read from the wall shear field, so a high
+load can be told apart from a separated one; a run still trending labels
+its own mean a bound rather than a result. Entirely opt-in: the button only
 enables when Docker Desktop is running, one run at a time, cancellable.
 Working cases land under `app_data/rans/` (the newest few are kept) with
 full logs and a ParaView-openable `case.foam`. The 2D case's drag is
@@ -208,7 +222,11 @@ past 2× the isolated stall limit flags the estimate as optimistic.
 Drag has two parts: per-element profile drag from each section's polar at
 its realized ground-effect operating CL — clamped to the pre-stall branch of
 the polar, and each element reports when that clamp engaged
-(`cd_lookup_capped`) — plus induced drag from the reported downforce,
+(`cd_lookup_capped`). Ground effect routinely pushes an element past its
+isolated stall CL, so that clamp is the normal case rather than an edge
+case: the stack profile drag and the L/D built on it are then floors and
+ceilings respectively, reported as `drag_profile_is_lower_bound` and shown
+with `≥`/`≤` in the UI. Plus induced drag from the reported downforce,
 `CDi = CL²/(π·AR·e)·φ`, where `e` is the span-efficiency input and
 `φ = (16h/b)²/(1+(16h/b)²)` is the classical ground-effect reduction —
 induced drag dominates the total for a loaded front wing, and wings gain
@@ -219,6 +237,16 @@ All raw inviscid values are reported next to every estimate. Treat the
 estimate as a screening and ranking number: confirm shortlisted designs with
 RANS (the repository's OpenFOAM pipeline) or tunnel data, and recalibrate
 the knobs against those results.
+
+The `k_g` curve was calibrated on the **two-element** baseline and is blind
+to how strongly a given stack couples to the road, so its error is
+configuration-dependent rather than a fixed offset. On three-plus-element,
+heavily loaded sections fine-mesh RANS has measured implied `k_g` of
+0.37–0.43 against the curve's 0.12–0.16 — the estimate runs 35–65 %
+conservative there, and says so in a warning. Below the choke onset
+(h/c ≈ 0.08) it runs optimistic instead. Both bands are recorded with their
+evidence in `docs/calibration/`; the honest fix in either direction is to
+verify in RANS and pin `k_g` from a converged run, not to nudge the curve.
 
 Validation: the panel method agrees with the exact Kármán–Trefftz
 closed-form solution within ~0.5 %, with an independent linear-vorticity
