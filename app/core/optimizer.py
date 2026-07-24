@@ -458,6 +458,30 @@ class Job:
             except (KeyError, ValueError) as exc:
                 raise ValueError(f"element {i + 1}: airfoil spec {spec!r} "
                                  f"cannot be resolved ({exc})")
+        # rule envelope: a start that already breaks the rules refuses
+        # eagerly with a plain message. Rules are legality, not preference —
+        # unlike the soft bands there is no do-no-harm widening for them,
+        # so a violating start could never produce a feasible evaluation.
+        if config.get("rule_envelope"):
+            from . import geometry as geo_mod
+            cfg0 = StackConfig.from_dict(config)
+            try:
+                installed0 = geo_mod.install_stack(
+                    geo_mod.build_stack(cfg0), cfg0.ride_height_c)
+            except Exception:
+                installed0 = None   # geometry trouble surfaces per-eval
+            rules0 = (geo_mod.envelope_check(installed0, cfg0)
+                      if installed0 is not None else None)
+            if rules0 is not None and not rules0["ok"]:
+                v = rules0["violations"][0]
+                label = geo_mod._RULE_LABELS.get(v["rule"], v["rule"])
+                more = (f" (and {len(rules0['violations']) - 1} more rule"
+                        f"{'s' if len(rules0['violations']) > 2 else ''})"
+                        if len(rules0["violations"]) > 1 else "")
+                raise ValueError(
+                    f"the starting design already violates rule '{label}' "
+                    f"by {v['by_mm']:.1f} mm{more} — fix the design or "
+                    f"relax the envelope before optimizing")
         # re-optimizing an already-shaped design: unwrap the shape spec and
         # seed the shape variables from it, so refinement continues from the
         # current shape instead of stacking a second modification on top

@@ -84,6 +84,49 @@ class ManufacturingSpec:
 
 
 @dataclass
+class RuleEnvelopeSpec:
+    """Optional user-entered rule envelope (FSAE-style geometric box).
+
+    Competition rules change every season, so every limit is entered by the
+    user — nothing here is hardcoded to any rulebook. All limits are in mm,
+    measured in the installed (as-driven) frame at the configured ride
+    height, ground at y = 0. Every limit is optional; None means the axis
+    is unconstrained.
+
+    max_length_mm            cap on the installed streamwise extent
+    max_height_mm            cap on the highest point above the ground
+    min_ground_clearance_mm  floor under the lowest point
+    x_offset_mm              where the drawn box starts along x (display
+                             anchor only — compliance uses extents, not
+                             position, since the section can be mounted
+                             anywhere along the car)
+    preset_name              label of the preset these values came from
+                             (display only)
+    """
+    max_length_mm: float | None = None
+    max_height_mm: float | None = None
+    min_ground_clearance_mm: float | None = None
+    x_offset_mm: float = 0.0
+    preset_name: str | None = None
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "RuleEnvelopeSpec":
+        if not isinstance(d, dict):
+            raise ValueError("rule_envelope must be an object")
+        def _opt(key):
+            v = d.get(key)
+            return None if v is None else float(v)
+        name = d.get("preset_name")
+        return cls(
+            max_length_mm=_opt("max_length_mm"),
+            max_height_mm=_opt("max_height_mm"),
+            min_ground_clearance_mm=_opt("min_ground_clearance_mm"),
+            x_offset_mm=float(d.get("x_offset_mm", 0.0) or 0.0),
+            preset_name=None if name is None else str(name),
+        )
+
+
+@dataclass
 class StackConfig:
     elements: list[ElementSpec] = field(default_factory=lambda: [ElementSpec()])
     stack_aoa_deg: float = 0.0
@@ -103,6 +146,7 @@ class StackConfig:
     choke_h_c: float = 0.045          # venturi-choke ride height, chords
     n_panels_per_side: int = 70
     manufacturing: ManufacturingSpec | None = None
+    rule_envelope: RuleEnvelopeSpec | None = None
 
     @property
     def chord_m(self) -> float:
@@ -142,6 +186,8 @@ class StackConfig:
             kw["n_panels_per_side"] = int(d["n_panels_per_side"])
         if d.get("manufacturing") is not None:
             kw["manufacturing"] = ManufacturingSpec.from_dict(d["manufacturing"])
+        if d.get("rule_envelope") is not None:
+            kw["rule_envelope"] = RuleEnvelopeSpec.from_dict(d["rule_envelope"])
         cfg = cls(elements=els, **kw)
         _validate(cfg)
         return cfg
@@ -188,6 +234,24 @@ def _validate(cfg: StackConfig) -> None:
         if not (math.isfinite(m.min_thickness_mm)
                 and 0.0 <= m.min_thickness_mm <= 50.0):
             raise ValueError("min_thickness_mm must be 0..50 mm")
+    env = cfg.rule_envelope
+    if env is not None:
+        for name, lo, hi in (("max_length_mm", 10.0, 20000.0),
+                             ("max_height_mm", 1.0, 5000.0),
+                             ("min_ground_clearance_mm", 0.0, 1000.0)):
+            v = getattr(env, name)
+            if v is not None and not (math.isfinite(v) and lo <= v <= hi):
+                raise ValueError(f"rule_envelope.{name} must be a finite "
+                                 f"value in {lo}..{hi} mm (or omitted)")
+        if not (math.isfinite(env.x_offset_mm)
+                and -20000.0 <= env.x_offset_mm <= 20000.0):
+            raise ValueError("rule_envelope.x_offset_mm must be a finite "
+                             "value in -20000..20000 mm")
+        if (env.max_height_mm is not None
+                and env.min_ground_clearance_mm is not None
+                and env.min_ground_clearance_mm >= env.max_height_mm):
+            raise ValueError("rule_envelope: min_ground_clearance_mm must be "
+                             "below max_height_mm — the box is empty")
     for i, e in enumerate(cfg.elements):
         for f, lo, hi in (("chord_ratio", 0.05, 1.0),
                           ("deflection_deg", -90.0, 90.0),
@@ -396,6 +460,86 @@ def stack_extents(elements: list[dict]) -> dict:
     }
 
 
+# compliance tolerance: measured extents within this of a limit still pass,
+# so a design tuned to sit exactly on a rule line is not failed by float
+# jitter (0.01 mm is far below any manufacturing tolerance)
+ENVELOPE_TOL_MM = 0.01
+
+
+def envelope_check(installed: list[dict], cfg: StackConfig) -> dict | None:
+    """Rule-envelope compliance of the installed stack, in mm.
+
+    The single source of truth for rule checking: geometry_report (UI
+    warnings + viewport), quick_objective_eval (optimizer feasibility gate),
+    and the optimizer's eager start refusal all call this, so they can
+    never disagree. Returns None when no envelope is configured; otherwise
+    {ok, extents_mm, violations: [{rule, edge, value_mm, limit_mm, by_mm}]}
+    where edge is one of "length" | "top" | "bottom" (the viewport colors
+    the matching box edge).
+    """
+    env = cfg.rule_envelope
+    if env is None:
+        return None
+    ext = stack_extents(installed)
+    mm = cfg.chord_mm
+    length = (ext["x_max"] - ext["x_min"]) * mm
+    top = ext["y_max"] * mm
+    bottom = ext["y_min"] * mm
+    violations = []
+    if (env.max_length_mm is not None
+            and length > env.max_length_mm + ENVELOPE_TOL_MM):
+        violations.append({
+            "rule": "max_length_mm", "edge": "length",
+            "value_mm": round(length, 2), "limit_mm": env.max_length_mm,
+            "by_mm": round(length - env.max_length_mm, 2)})
+    if (env.max_height_mm is not None
+            and top > env.max_height_mm + ENVELOPE_TOL_MM):
+        violations.append({
+            "rule": "max_height_mm", "edge": "top",
+            "value_mm": round(top, 2), "limit_mm": env.max_height_mm,
+            "by_mm": round(top - env.max_height_mm, 2)})
+    if (env.min_ground_clearance_mm is not None
+            and bottom < env.min_ground_clearance_mm - ENVELOPE_TOL_MM):
+        violations.append({
+            "rule": "min_ground_clearance_mm", "edge": "bottom",
+            "value_mm": round(bottom, 2),
+            "limit_mm": env.min_ground_clearance_mm,
+            "by_mm": round(env.min_ground_clearance_mm - bottom, 2)})
+    return {
+        "ok": not violations,
+        "extents_mm": {"length": round(length, 2), "top": round(top, 2),
+                       "bottom": round(bottom, 2)},
+        "violations": violations,
+    }
+
+
+_RULE_LABELS = {"max_length_mm": "max length",
+                "max_height_mm": "max height above ground",
+                "min_ground_clearance_mm": "min ground clearance"}
+
+
+def envelope_warnings(rules: dict | None) -> list[str]:
+    """Prose for the report's warning list, derived from envelope_check."""
+    if not rules or rules["ok"]:
+        return []
+    out = []
+    for v in rules["violations"]:
+        label = _RULE_LABELS.get(v["rule"], v["rule"])
+        if v["edge"] == "bottom":
+            out.append(
+                f"Rule '{label}': lowest point {v['value_mm']:.1f} mm is "
+                f"under the required {v['limit_mm']:.1f} mm by "
+                f"{v['by_mm']:.1f} mm — raise the ride height or thin the "
+                f"stack.")
+        else:
+            what = ("installed length" if v["edge"] == "length"
+                    else "highest point")
+            out.append(
+                f"Rule '{label}': {what} {v['value_mm']:.1f} mm exceeds the "
+                f"{v['limit_mm']:.1f} mm limit by {v['by_mm']:.1f} mm.")
+    return out
+
+
 def manufacturing_report(cfg: StackConfig, design: list[dict]) -> list[str]:
     """Annotate design elements with as-built mm data; returns warnings.
 
@@ -511,11 +655,15 @@ def geometry_report(cfg: StackConfig) -> dict:
                 f"Bring the flap closer (less negative overlap) or relax "
                 f"the gap.")
     warnings += manufacturing_report(cfg, design)
+    rules = envelope_check(installed, cfg)
+    warnings += envelope_warnings(rules)
     te_clear = min(e["coords"][:, 1].min() for e in installed)
     m = cfg.manufacturing
     return {
         "design": [_elem_out(e) for e in design],
         "installed": [_elem_out(e) for e in installed],
+        "installed_extents_c": stack_extents(installed),
+        "rules": rules,
         "system_chord_c": ext["system_chord_c"],
         "system_chord_mm": ext["system_chord_c"] * cfg.chord_mm,
         "ride_height_c": cfg.ride_height_c,

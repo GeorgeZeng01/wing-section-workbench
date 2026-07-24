@@ -365,6 +365,13 @@ def quick_objective_eval(cfg: StackConfig, model_size: str = "large") -> dict:
     if any(e.get("intersects") for e in design):
         return {"feasible": False, "reason": "intersection"}
     installed = geometry.install_stack(design, cfg.ride_height_c)
+    # rule envelope is a hard legality constraint: outside the box is
+    # infeasible by name, checked before the (much costlier) panel solve
+    rules = geometry.envelope_check(installed, cfg)
+    if rules is not None and not rules["ok"]:
+        v = rules["violations"][0]
+        return {"feasible": False,
+                "reason": f"rule: {v['rule']} by {v['by_mm']:.1f} mm"}
     coords = [e["coords"] for e in installed]
     try:
         free, ground = panel.solve_pair(coords, 0.0)
