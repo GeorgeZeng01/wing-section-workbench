@@ -75,11 +75,14 @@ def run_one(ride: float, mesh: str, iters: int, label: str,
         defl = float(cfg["elements"][1].get("deflection_deg", 0.0)) \
             if len(cfg.get("elements", [])) > 1 else 0.0
         speed = float(cfg.get("speed_ms", 15.0))
+    # the calibration abscissa must use the chord of the stack actually run
+    # — a --config stack is not guaranteed to be the 350 mm baseline
+    chord_mm = float(cfg.get("chord_mm", 350.0))
     t0 = time.time()
     row = {"timestamp_utc": datetime.now(timezone.utc).isoformat(
                timespec="seconds"),
            "label": label, "ride_height_mm": ride,
-           "h_over_c": round(ride / 350.0, 4), "mesh": mesh,
+           "h_over_c": round(ride / chord_mm, 4), "mesh": mesh,
            "stack_aoa_deg": aoa, "defl2_deg": defl, "speed_ms": speed,
            "n_iters_cap": iters}
     try:

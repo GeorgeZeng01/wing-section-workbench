@@ -192,7 +192,15 @@ class StackConfig:
         if d.get("k_g") is not None:
             kw["k_g"] = float(d["k_g"])
         if "n_panels_per_side" in d and d["n_panels_per_side"]:
-            kw["n_panels_per_side"] = int(d["n_panels_per_side"])
+            import math
+            # int(inf) raises OverflowError, which is not a validation error
+            # to API callers — reject non-finite counts the same way as any
+            # other out-of-band value
+            npv = float(d["n_panels_per_side"])
+            if not math.isfinite(npv):
+                raise ValueError("n_panels_per_side must be a finite value "
+                                 "in 10..200")
+            kw["n_panels_per_side"] = int(npv)
         if d.get("manufacturing") is not None:
             kw["manufacturing"] = ManufacturingSpec.from_dict(d["manufacturing"])
         if d.get("rule_envelope") is not None:
@@ -337,10 +345,36 @@ def min_dist_to_polyline(pt: np.ndarray, coords: np.ndarray) -> float:
     return float(np.min(np.hypot(*(pt - proj).T)))
 
 
+def _edges_cross(a: np.ndarray, b: np.ndarray) -> bool:
+    """Proper (interior) crossing between any edge of polygon a and any edge
+    of polygon b, closing segments included. Strict inequalities: contours
+    that merely touch are not intersecting."""
+    p, q = a, np.roll(a, -1, axis=0)
+    r, s = b, np.roll(b, -1, axis=0)
+    u = (q - p)[:, None, :]
+    d1 = np.cross(u, r[None, :, :] - p[:, None, :])
+    d2 = np.cross(u, s[None, :, :] - p[:, None, :])
+    v = (s - r)[None, :, :]
+    d3 = np.cross(v, p[:, None, :] - r[None, :, :])
+    d4 = np.cross(v, q[:, None, :] - r[None, :, :])
+    return bool(((d1 * d2 < 0) & (d3 * d4 < 0)).any())
+
+
 def polygons_intersect(a: np.ndarray, b: np.ndarray) -> bool:
+    # vertex containment alone misses a through-crossing whose vertices all
+    # sit outside the other polygon (thin regions at coarse panelizations),
+    # so the edges must be tested too; containment stays as the early accept
+    # and still catches one polygon swallowing the other whole
     from matplotlib.path import Path as MplPath
-    return bool(MplPath(a).contains_points(b).any()
-                or MplPath(b).contains_points(a).any())
+    a = np.asarray(a, float)
+    b = np.asarray(b, float)
+    if (a[:, 0].min() > b[:, 0].max() or b[:, 0].min() > a[:, 0].max()
+            or a[:, 1].min() > b[:, 1].max() or b[:, 1].min() > a[:, 1].max()):
+        return False
+    if bool(MplPath(a).contains_points(b).any()
+            or MplPath(b).contains_points(a).any()):
+        return True
+    return _edges_cross(a, b)
 
 
 def _solve_dy_for_gap(prev_coords: np.ndarray, flap_local: np.ndarray,
@@ -646,6 +680,28 @@ def manufacturing_report(cfg: StackConfig, design: list[dict]) -> list[str]:
                 f"{e['role']}: TE thickness is {m.te_gap_mm / c_mm * 100:.1f}% "
                 f"of its {c_mm:.0f} mm chord — expect extra drag; consider a "
                 f"smaller TE thickness or a larger flap chord.")
+        else:
+            # the ratio gate above uses the requested gap, but the thickness
+            # floor reshapes wherever the SECTION thins below it — a small
+            # flap can carry a long constant-thickness slab while staying
+            # under the 3% line, so the plateau is measured on the as-built
+            # contour instead of inferred from the request
+            xs = np.linspace(0.60, float(uc[:, 0].max()) - 0.002, 200)
+            t_b = mfg_mod.thickness_at(uc, xs)
+            t_r = mfg_mod.thickness_at(uc_raw, xs)
+            on_floor = t_b <= info["te_gap"] + 0.002
+            k = len(xs)
+            while k and on_floor[k - 1]:
+                k -= 1
+            raised = float(np.max((t_b - t_r)[xs < 0.85], initial=0.0))
+            if k < len(xs) and xs[k] < 0.85 and raised > 0.002:
+                warnings.append(
+                    f"{e['role']}: the {m.te_gap_mm:.1f} mm TE floor holds "
+                    f"the section at constant thickness from "
+                    f"{xs[k] * 100:.0f}%c to the trailing edge "
+                    f"({te_mm / c_mm * 100:.1f}% of its {c_mm:.0f} mm chord) "
+                    f"— expect extra drag; consider a smaller TE thickness "
+                    f"or a larger flap chord.")
     return warnings
 
 

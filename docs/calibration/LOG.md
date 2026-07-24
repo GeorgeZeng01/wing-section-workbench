@@ -388,3 +388,43 @@ high-coupling geometries. Direction is safe (the wing delivers MORE
 than claimed) but Pareto fronts are shape-distorted in that class.
 Candidate predictor for a future leg: the c_ground/c_free ratio,
 already computed per evaluation. Not acted on yet — one point.
+
+## 2026-07-24 — Domain/turbulence A-B on the user's live 3-element case
+
+Trigger: a saved 3-element project (all-S1223, deflections 8.9/27 deg,
+gaps 1.3 %c, h/c 0.114, Re 467k) read RANS Cl 7.48 (hand-stopped at
+8,204 of 10,000, still climbing) against C_est 4.51 — "+66 %", and the
+run was suspected unrealistic. Four probes on the exact saved config:
+
+- `probe-base` (coarse 16k cells, old 8-chord domain, 8,000 iters):
+  Cl 7.587 ± 0.088, flat (−0.04 %/window). Coarse ≈ fine for THIS
+  config — the −29 % coarse bias recorded on the 2-element baseline
+  does not generalize.
+- `probe-ytop` (identical but 16-chord domain): Cl 7.210, Cd 0.130 vs
+  0.171. THE 8-CHORD SLIP CEILING WAS INFLATING Cl ~5 % AND Cd ~24 %
+  (tunnel confinement). Cost of the taller box: +5.6 % cells.
+  ACTION: Y_TOP_C raised 8 -> 16 in cfd.py.
+- `probe-lm` (kOmegaSSTLM gamma-ReThetat transition, coarse): Cl 9.588,
+  tightly converged — the transition model reads 26 % HIGHER than
+  fully-turbulent SST (long laminar runs thin the boundary layers in
+  the favorable ground-effect gradients). Fully-turbulent SST is the
+  CONSERVATIVE turbulence treatment here, not an optimistic one; no
+  model switch shipped, verdict documented in the case README.
+- `probe-finecont` (the user's retained fine case continued 8,204 ->
+  12,000): Cl 7.587 ± 0.014, drift 0.077 %/window — converged. The
+  memory that "the aggressive 3-element converges at Cl 8.6" belongs
+  to a HOTTER config from the validity-boundary probe, not this one.
+
+Wall-state truth on the retained fine fields (new wallShearStress
+diagnostics): main element attached (5.7 % reversed faces), element 2
+carries a separation pocket (21.7 %), the 27-deg flap is ATTACHED
+(2.7 %) — the high Cl is the self-consistent product of an attached
+multi-slot system in strong ground effect, not a solver artifact.
+
+Conclusion: RANS-implied k_g for this case is ~0.37 (after removing
+the ~5 % confinement) vs the auto curve's 0.158 — a second recorded
+point in the high-coupling conservative class flagged in the 07-23
+entry (stage3b knee, implied 0.431). The estimate, not the RANS, is
+the outlier; analyze() now emits an estimate-fidelity note on 3+
+element heavily loaded stacks, and the RANS card explains the
+conservatism instead of presenting a bare "+66 %".

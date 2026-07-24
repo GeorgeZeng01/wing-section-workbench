@@ -52,6 +52,16 @@ All inviscid inputs to the estimate are reported alongside it. Treat the
 estimate as a screening number for optimization ranking; RANS or tunnel data
 remain the truth model, and the knobs should be recalibrated against them
 when available.
+
+Calibration scope: the k_g(h/c) auto curve and the trust bands were fitted
+and measured on the TWO-ELEMENT sharp baseline. The curve is config-blind —
+it cannot know that a multi-slot, heavily cambered stack realizes a far
+larger share of its inviscid gain (2026-07 fine-mesh measurement on the
+aggressive 3-element at h/c 0.114: RANS-implied k_g ~ 0.37 vs the curve's
+0.158, i.e. the estimate ran ~35-40% conservative after removing the old
+domain-confinement bias). analyze() emits an estimate-fidelity note on
+such configs, and the RANS verify tab's suggested k_g is the calibration
+lever.
 """
 
 from __future__ import annotations
@@ -328,6 +338,25 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
             f"estimate as optimistic and the profile drag (capped at the "
             f"pre-stall polar) as understated; verify with RANS or tunnel "
             f"data.")
+    # the drag lookup caps at the pre-stall polar; an element carried past
+    # its isolated CL_max by ground effect and slot dumping has no honest
+    # drag on that polar at all (fine-mesh record: section Cd ~4x the
+    # capped stack value on the aggressive 3-element). Even the shipped
+    # default rides the cap (main at 1.58x CL_max) — that is ROUTINE in
+    # ground effect, so a warning here would be permanent wallpaper. The
+    # caveat travels on the numbers instead: the forces block marks the
+    # profile drag and L/D as lower bounds, and the >2x screening
+    # allowance above stays the loud line.
+    capped_roles = [e["role"] for e in elements if e["cd_lookup_capped"]]
+    if len(design) >= 3 and any(e["loading_fraction_ground"] > 1.3
+                                for e in elements):
+        warnings.append(
+            "estimate fidelity: the k_g realization curve is calibrated on "
+            "the two-element baseline — on multi-element, heavily loaded "
+            "stacks fine-mesh RANS measured ~35-65% MORE downforce than "
+            "estimated (the estimate is conservative here, the opposite "
+            "failure mode of the sub-choke band). Verify with RANS and "
+            "apply the suggested k_g to recalibrate.")
     sig_warnings = slot_signature_warnings(design)
     warnings += sig_warnings
     if cfg.ride_height_c < HC_CHOKE_OPTIMISM:
@@ -379,6 +408,8 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
             "downforce_inviscid_n": round(downforce_n_inviscid, 1),
             "drag_total_n": round(drag_total_n, 1),
             "drag_profile_n": round(drag_profile_n, 2),
+            "drag_profile_is_lower_bound": bool(capped_roles),
+            "drag_capped_roles": capped_roles,
             "drag_induced_n": round(drag_induced, 1),
             "induced_model": induced_detail,
             "efficiency_ld": round(downforce_n / drag_total_n, 1)
@@ -532,6 +563,8 @@ def _sweep_point(cfg: StackConfig, design: list[dict], installed: list[dict],
             ground_hot += 1
     if ground_hot:
         n_warnings += 1                           # combined allowance message
+    if len(design) >= 3 and frac_ground_max > 1.3:
+        n_warnings += 1                           # estimate-fidelity note
     if any(cfg.element_re(i) < viscous.RE_FLOOR for i in range(len(design))):
         n_warnings += 1                           # combined Re-floor caveat
     if cfg.ride_height_c < HC_CHOKE_OPTIMISM:

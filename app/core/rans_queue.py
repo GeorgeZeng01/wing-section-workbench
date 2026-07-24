@@ -3,8 +3,10 @@
 The panel model navigates; RANS measures. This queue takes the finalists
 (winner, candidates, a Pareto pick) and runs each through the existing
 cfd_run pipeline one at a time — the one-job guard is real: Docker/WSL2
-is a single-lane resource — then re-ranks by MEASURED downforce and
-classifies each delta against the recorded calibration classes.
+is a single-lane resource — then re-ranks the rows under the objective
+the shortlist was optimized for (measured drag at the target level for
+target mode, measured downforce for max-downforce) and classifies each
+delta against the recorded calibration classes.
 
 The queue never spends solver hours on an illegal design: every item is
 rule-envelope-checked eagerly at submission, same gate as the optimizer.
@@ -27,16 +29,30 @@ MAX_ITEMS = 8
 # warned/flagged classes -23..-42%, and the mid-height conservative band
 # up to +67%. -20% splits the recorded clean cluster from the recorded
 # over-claim cluster with margin on both sides.
+# FINE-MESH classes only: the same record measured coarse reading a
+# validated point 29% LOW at racing height but 33% HIGH at 90 mm, and
+# medium scattering -2..-20% across tiny geometry changes ("medium is not
+# calibration-grade at racing height"). The bias flips sign with ride
+# height, so no shifted/widened band pair can correct it — coarse/medium
+# verdicts are demoted to screening wording instead of re-thresholded.
 HEALTHY_LO = -20.0
 CONSERVATIVE_HI = 5.0
 
+# target-mode ranking: a row within this fraction of the target counts as
+# on-level and competes on measured drag. Wider than the optimizer's 3%
+# construction tolerance because the measured side carries the fine-mesh
+# limit-cycle band (~±7% at racing height, docs/calibration).
+RANK_TARGET_TOL = 0.05
 
-def classify(result: dict) -> str:
+
+def classify(result: dict, mesh_size: str = "fine") -> str:
     if not result.get("converged"):
         return "no verdict (not converged)"
     d = result.get("delta_cl_pct")
     if d is None:
         return "no panel comparison"
+    if mesh_size != "fine":
+        return "screening only (mesh below calibration grade)"
     if d < HEALTHY_LO:
         return "over-claims"
     if d > CONSERVATIVE_HI:
@@ -44,9 +60,33 @@ def classify(result: dict) -> str:
     return "healthy band"
 
 
+def _shortlist_objective() -> tuple[str, float | None]:
+    """The objective of the optimizer run this shortlist came from.
+
+    The API does not carry it, but the queue and the optimizer share a
+    process: the most recent run that produced candidates is the run the
+    'verify shortlist' button reads its items from. Falls back to
+    measured-downforce ranking when no such run exists (e.g. a shortlist
+    restored from a saved session after a server restart)."""
+    try:
+        from . import optimizer
+        job = optimizer.last_candidate_job()
+        if job is not None and job.objective_mode == "target":
+            # the level the run actually held: D* when the target was
+            # unreachable and the run said so, else the target itself
+            level = (float(job.dstar) if job.dstar is not None
+                     else float(job.options.get("target_downforce_n",
+                                                200.0)))
+            return "target", level
+    except Exception:
+        pass
+    return "max_downforce", None
+
+
 class QueueJob:
     def __init__(self, items: list[dict], mesh_size: str = "medium",
-                 max_iters: int = 10000):
+                 max_iters: int = 10000, objective: str | None = None,
+                 target_downforce_n: float | None = None):
         self.id = uuid.uuid4().hex[:12]
         if not isinstance(items, list) or not items:
             raise ValueError("nothing to verify — the queue needs at least "
@@ -55,8 +95,18 @@ class QueueJob:
             raise ValueError(f"at most {MAX_ITEMS} designs per queue")
         if mesh_size not in ("coarse", "medium", "fine"):
             raise ValueError("mesh_size must be coarse, medium or fine")
+        if objective not in (None, "target", "max_downforce"):
+            raise ValueError("objective must be 'target' or 'max_downforce'")
         self.mesh_size = str(mesh_size)
         self.max_iters = int(max_iters)
+        self.objective = objective
+        self.target_downforce_n = (float(target_downforce_n)
+                                   if target_downforce_n is not None
+                                   else None)
+        if self.objective is None:
+            self.objective, inferred = _shortlist_objective()
+            if self.target_downforce_n is None:
+                self.target_downforce_n = inferred
         self.rows: list[dict] = []
         for i, it in enumerate(items):
             if not isinstance(it, dict):
@@ -85,6 +135,7 @@ class QueueJob:
                 "state": "queued", "job_id": None,
                 "panel_downforce_n": claim,
                 "cl_rans": None, "cd_rans": None, "rans_downforce_n": None,
+                "drag_rans_n": None, "case_dir": None,
                 "delta_cl_pct": None, "converged": None, "stop_reason": None,
                 "mesh_caution": None, "verdict": None, "error": None,
                 "rank": None,
@@ -129,9 +180,18 @@ class QueueJob:
                             if r2["state"] == "queued":
                                 r2["state"] = "skipped"
                     break
-                job = cfd_run.get(jid)
+                # job_id is recorded BEFORE the first registry read: the
+                # crash-recovery path below can only cancel an in-flight
+                # solve it can name
                 with self._lock:
                     row["job_id"] = jid
+                job = cfd_run.get(jid)
+                if job is None:   # registry eviction between start and get
+                    with self._lock:
+                        row["state"] = "failed"
+                        row["error"] = ("solver job vanished from the "
+                                        "registry before it could be polled")
+                    continue
                 while True:
                     if self._cancel.is_set():
                         job.cancel()
@@ -143,20 +203,29 @@ class QueueJob:
                     row["state"] = s["state"]
                     if s["state"] == "done" and s.get("result"):
                         r = s["result"]
+                        cl, cd = r["cl_rans"], r["cd_rans"]
+                        dn = r["downforce_n_at_rans_cl"]
+                        # same q*S_ref as the downforce, so D = L*cd/cl
+                        drag = (round(abs(dn) * abs(cd) / abs(cl), 2)
+                                if None not in (cl, cd, dn)
+                                and abs(cl) > 1e-9 else None)
                         row.update(
-                            cl_rans=r["cl_rans"], cd_rans=r["cd_rans"],
-                            rans_downforce_n=r["downforce_n_at_rans_cl"],
+                            cl_rans=cl, cd_rans=cd,
+                            rans_downforce_n=dn, drag_rans_n=drag,
                             delta_cl_pct=r["delta_cl_pct"],
                             converged=r["converged"],
                             stop_reason=r["stop_reason"],
-                            mesh_caution=r["mesh_caution"])
-                        row["verdict"] = classify(r)
+                            # cfd_run flags only coarse; the calibration
+                            # round demoted medium to screening at racing
+                            # height too, so queue rows carry the caution
+                            # for every non-fine mesh
+                            mesh_caution=bool(r["mesh_caution"])
+                            or self.mesh_size != "fine",
+                            case_dir=r.get("case_dir"))
+                        row["verdict"] = classify(r, self.mesh_size)
                     elif s["state"] == "failed":
                         row["error"] = s.get("error")
-            ranked = sorted(
-                (r for r in self.rows if r["converged"]
-                 and r["rans_downforce_n"] is not None),
-                key=lambda r: -r["rans_downforce_n"])
+            ranked = self._ranked_rows()
             with self._lock:
                 for k, r in enumerate(ranked, 1):
                     r["rank"] = k
@@ -167,10 +236,53 @@ class QueueJob:
             with self._lock:
                 self.state = "failed"
                 self.error = str(e)
+                jid = (self.rows[self.active]["job_id"]
+                       if self.active is not None else None)
+                for r2 in self.rows:
+                    if r2["state"] == "running":
+                        r2["state"] = "failed"
+                        r2["error"] = r2.get("error") or str(e)
+                    elif r2["state"] == "queued":
+                        r2["state"] = "skipped"
+            # the in-flight solve must not keep burning Docker/WSL hours
+            # inside a dead queue — and its one-job guard would refuse
+            # every new start until someone found and cancelled it by hand
+            if jid:
+                try:
+                    j = cfd_run.get(jid)
+                    if j is not None:
+                        j.cancel()
+                except Exception:
+                    pass
         finally:
             with self._lock:
                 self.t_end = time.time()
                 self.active = None
+
+    def _ranked_rows(self) -> list[dict]:
+        """Converged rows in rank order, consistent with the objective the
+        shortlist was optimized under. Target-mode candidates sit on one
+        downforce level by construction — the optimizer differentiates
+        them by drag at that level — so ranking by raw downforce would
+        order them by overshoot: instead rows within RANK_TARGET_TOL of
+        the target rank by measured drag, and rows that missed the level
+        rank after them by distance to it. Max-downforce (and unknown-
+        provenance) shortlists rank by measured downforce."""
+        rows = [r for r in self.rows
+                if r["converged"] and r["rans_downforce_n"] is not None]
+        t = self.target_downforce_n
+        if self.objective == "target" and t:
+            scale = max(abs(t), 1.0)
+
+            def key(r):
+                miss = abs(r["rans_downforce_n"] - t) / scale
+                drag = r.get("drag_rans_n")
+                if miss <= RANK_TARGET_TOL and drag is not None:
+                    return (0, drag, miss)
+                return (1, miss, drag if drag is not None else 1e9)
+
+            return sorted(rows, key=key)
+        return sorted(rows, key=lambda r: -r["rans_downforce_n"])
 
     # ---- API surface ----
 
@@ -184,6 +296,8 @@ class QueueJob:
                 "id": self.id, "state": self.state, "error": self.error,
                 "mesh_size": self.mesh_size, "active": self.active,
                 "active_job_id": active_jid,
+                "objective": self.objective,
+                "target_downforce_n": self.target_downforce_n,
                 "elapsed_s": round(elapsed, 1),
                 "rows": copy.deepcopy(self.rows),
             }
@@ -206,9 +320,11 @@ _lock = threading.Lock()
 
 
 def start(items: list[dict], mesh_size: str = "medium",
-          max_iters: int = 10000) -> str:
+          max_iters: int = 10000, objective: str | None = None,
+          target_downforce_n: float | None = None) -> str:
     global _current
-    job = QueueJob(items, mesh_size, max_iters)   # validates eagerly
+    job = QueueJob(items, mesh_size, max_iters, objective,
+                   target_downforce_n)   # validates eagerly
     with _lock:
         if _current is not None and _current.state in ("pending", "running"):
             raise RuntimeError("a verification queue is already running — "
@@ -227,3 +343,17 @@ def start(items: list[dict], mesh_size: str = "medium",
 def get_current() -> QueueJob | None:
     with _lock:
         return _current
+
+
+def _queue_case_dirs():
+    q = get_current()
+    if q is None:
+        return ()
+    with q._lock:
+        return [r["case_dir"] for r in q.rows if r.get("case_dir")]
+
+
+# registered once at import: cfd_run's run-dir housekeeping keeps only the
+# newest few finished cases, and a shortlist longer than that would lose
+# its early rows' retained case directories while the later rows solve
+cfd_run.register_protected_dirs(_queue_case_dirs)

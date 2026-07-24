@@ -83,6 +83,10 @@ def main():
     check("max mode: winner does not fall below the clean baseline",
           ws and ws["downforce_n"] >= ev0["downforce_n"] - 2.0,
           f"(baseline {ev0['downforce_n']:.1f} -> {ws.get('downforce_n')})")
+    check("max mode: candidates carry the loading-band badge",
+          cands and all(isinstance((c.get("summary") or {})
+                                   .get("past_load_band"), bool)
+                        for c in cands))
     check("max mode: archive prefilter left clean entries to pick from",
           any(a["penalty"] < optimizer.PEN_OK
               and (a.get("frac_max") or 0) <= 0.91 for a in job.archive))

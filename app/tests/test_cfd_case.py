@@ -136,10 +136,60 @@ def main():
 
         # a validated config can still be too tall for the fixed CFD box —
         # refuse with a clear error instead of meshing a broken domain
+        # (the box is Y_TOP_C chords tall; the section must clear 75% of it)
         import dataclasses as _dc
-        too_tall = _dc.replace(CFG, chord_mm=50.0, ride_height_mm=400.0)
+        too_tall = _dc.replace(CFG, chord_mm=30.0, ride_height_mm=400.0)
         check("section outside the CFD domain is rejected before meshing",
               _raises(lambda: cfd.build_case(too_tall, tmp / "y", "coarse")))
+
+        cd_text = (case / "system/controlDict").read_text()
+        check("controlDict writes wall diagnostics beside the fields",
+              "yPlus1" in cd_text and "wallShearStress1" in cd_text
+              and "type            yPlus;" in cd_text
+              and "type            wallShearStress;" in cd_text)
+        check("run.sh reports tail drift and flags a trending run",
+              "NOT CONVERGED" in text and "Cl drift over the trailing" in text)
+        check("run.sh reset clears stale result artifacts",
+              "flow_umag.png" in text and "results.txt" in text.split(
+                  "resetting the case")[1].split("gmshToFoam")[0])
+
+        # ---- foam_post field parsing: every legal ASCII list encoding ----
+        from app.core import foam_post
+        import numpy as np
+        multi = ("internalField   nonuniform List<scalar> \n3\n(\n1.0\n2.0"
+                 "\n3.0\n)\n;\n")
+        check("parser: multi-line scalar list",
+              list(foam_post.parse_internal_field(multi)) == [1.0, 2.0, 3.0])
+        single = "internalField nonuniform List<scalar> 3(1.0 2.0 3.0);"
+        check("parser: single-line scalar list",
+              list(foam_post.parse_internal_field(single)) == [1.0, 2.0, 3.0])
+        compact = "internalField nonuniform List<scalar> 4{2.5};"
+        check("parser: compact repeat form",
+              list(foam_post.parse_internal_field(compact)) == [2.5] * 4)
+        vec = ("internalField nonuniform List<vector> 2((1 2 3) (4 5 6));")
+        check("parser: single-line vector list",
+              foam_post.parse_internal_field(vec).tolist()
+              == [[1, 2, 3], [4, 5, 6]])
+        # wall_report on a synthetic stopped case: reversed tau_x > 0
+        wcase = tmp / "wallcase"
+        (wcase / "100").mkdir(parents=True)
+        (wcase / "100" / "wallShearStress").write_text(
+            "internalField nonuniform List<vector> 1((0 0 0));\n"
+            "boundaryField\n{\n    wing_e1\n    {\n"
+            "        type calculated;\n"
+            "        value nonuniform List<vector> 4((-1 0 0) (-1 0 0) "
+            "(1 0 0) (-2 0 0));\n    }\n}\n")
+        pp = wcase / "postProcessing" / "yPlus1" / "0"
+        pp.mkdir(parents=True)
+        (pp / "yPlus.dat").write_text(
+            "# Time patch min max average\n"
+            "100\twing_e1\t0.5\t4.0\t1.2\n")
+        wr = foam_post.wall_report(wcase)
+        check("wall_report measures reversed fraction and y+",
+              wr and wr["separation"]["wing_e1"]["reversed_frac"] == 0.25
+              and wr["yplus"]["wing_e1"]["avg"] == 1.2, f"({wr})")
+        check("wall_report is None for a case without diagnostics",
+              foam_post.wall_report(tmp / "case") is None)
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

@@ -35,6 +35,7 @@ import atexit
 import copy
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -44,7 +45,7 @@ import traceback
 import uuid
 from pathlib import Path
 
-from . import analysis, cfd
+from . import analysis, cfd, foam_post
 from .geometry import StackConfig
 
 DOCKER_IMAGE = "opencfd/openfoam-run:2406"
@@ -52,7 +53,11 @@ TAIL_MEAN_ROWS = 500          # matches run.sh's "mean of last 500 iterations"
 POLL_S = 1.0
 MAX_WALL_S = 4 * 3600         # hard stop — a fine mesh at full iterations
                               # fits comfortably; anything longer is hung
-KEEP_RUN_DIRS = 4             # finished run directories retained on disk
+# finished run directories retained on disk — sized so a queue's worth of
+# recent verifications plus a case a saved project still points at survive
+# routine housekeeping (registered protectors guard live references; the
+# count guards recent history)
+KEEP_RUN_DIRS = 6
 
 # Force-based convergence: residualControl alone under-serves this case —
 # heavily loaded fine meshes can iterate for thousands of steps with the
@@ -66,19 +71,25 @@ KEEP_RUN_DIRS = 4             # finished run directories retained on disk
 # cleanly. Runs that hit the iteration cap while still drifting are
 # reported as NOT converged, and no k_g calibration is offered from them.
 #
-# Three defenses against premature verdicts, each closing a measured hole:
+# Four defenses against premature verdicts, each closing a measured hole:
 # the first FORCE_STOP_SKIP rows are excluded from every drift decision (a
 # decay-then-recover startup — the usual potentialFoam-initialized shape on
-# a separated high-lift case — has a mean-crossing where the half-window
-# means cancel while the run still trends); the minimum iteration gate is
-# SKIP + 2*WINDOW so both half-windows are fully post-transient before the
-# detector may fire; and the criterion must hold on several CONSECUTIVE
-# polls, so a single noise minimum cannot trigger the stop.
+# a separated high-lift case — has a mean-crossing where the window means
+# cancel while the run still trends); the drift compares THREE consecutive
+# windows (two alone read flat at every zero-crossing of the window-mean
+# difference — one window past an overshoot peak, or a node of a slow
+# oscillation riding a climb); the minimum iteration gate keeps all three
+# windows fully post-transient before the detector may fire; and the
+# criterion must hold across FORCE_STOP_POLLS evaluations spaced at least
+# FORCE_STOP_REARM_ROWS NEW iterations apart — a fine mesh advances only
+# a few iterations per poll second, so consecutive 1 s polls would
+# re-judge essentially the same data.
 FORCE_STOP_SKIP = 500         # rows never included in a drift decision
-FORCE_STOP_WINDOW = 800       # half-window size (rows) for the drift means
-FORCE_STOP_MIN_ITERS = FORCE_STOP_SKIP + 2 * FORCE_STOP_WINDOW   # = 2100
-FORCE_STOP_POLLS = 3          # consecutive flat polls before stopping
-FORCE_STOP_CL_TOL = 0.003     # relative Cl drift between half-windows
+FORCE_STOP_WINDOW = 800       # window size (rows) for the drift means
+FORCE_STOP_MIN_ITERS = FORCE_STOP_SKIP + 3 * FORCE_STOP_WINDOW   # = 2900
+FORCE_STOP_POLLS = 3          # flat evaluations required before stopping
+FORCE_STOP_REARM_ROWS = 100   # new rows required between evaluations
+FORCE_STOP_CL_TOL = 0.003     # relative Cl drift between windows
 FORCE_STOP_CD_TOL = 0.010     # Cd converges last; keep a looser bar
 CONVERGED_CL_TOL = 0.006      # post-hoc verdict for cap-limited runs
 
@@ -222,31 +233,48 @@ def parse_coefficient_dat(text: str) -> dict:
 
 
 def drift(vals: list[float], window: int = FORCE_STOP_WINDOW) -> float | None:
-    """Relative disagreement between the means of the last two half-windows
-    — ~0 once the history is flat (a bounded limit cycle averages out), and
-    of the order of the per-window climb rate while still trending. None
+    """Largest relative disagreement between the means of the last THREE
+    windows — ~0 once the history is flat (a bounded limit cycle averages
+    out), and of the order of the per-window climb rate while trending.
+    Two windows alone read ~0 at every zero-crossing of the window-mean
+    difference (one window past an overshoot peak, at any node of a slow
+    oscillation riding a climb) — a quadratic transient zeroes one gap but
+    not both, so the third window closes that false-plateau hole. None
     until enough rows exist to judge."""
-    w = min(window, len(vals) // 2)
+    w = min(window, len(vals) // 3)
     if w < 100:
         return None
-    m1 = sum(vals[-2 * w:-w]) / w
-    m2 = sum(vals[-w:]) / w
-    return abs(m2 - m1) / max(abs(m2), 0.05)
+    m1 = sum(vals[-3 * w:-2 * w]) / w
+    m2 = sum(vals[-2 * w:-w]) / w
+    m3 = sum(vals[-w:]) / w
+    ref = max(abs(m3), 0.05)
+    return max(abs(m3 - m2), abs(m2 - m1)) / ref
 
 
 def _tail_stats(vals: list[float], n: int = TAIL_MEAN_ROWS
                 ) -> tuple[float, float, int]:
-    """(mean, population std, rows used) over the tail of the history —
-    steady RANS on a loaded high-lift section often ends in a bounded limit
-    cycle, and the tail mean/std are the number to trust and its amplitude.
+    """(mean, DETRENDED population std, rows used) over the tail of the
+    history — steady RANS on a loaded high-lift section often ends in a
+    bounded limit cycle, and the tail mean/std are the number to trust and
+    its amplitude. The std is measured around the tail's least-squares
+    line, not around the mean: on a drifting tail the raw std IS the ramp
+    (range/sqrt(12)) and would dress a moving number up as a precise one —
+    the drift is reported separately, never as scatter.
     The window never covers more than the second half of the run, so a
     short run's startup transient cannot bias the mean (a flat 500-row
     window would average mostly transient on a 300-iteration run)."""
     window = min(n, max(1, len(vals) // 2)) if len(vals) < 2 * n else n
     tail = vals[-window:]
     m = sum(tail) / len(tail)
-    var = sum((v - m) ** 2 for v in tail) / len(tail)
-    return m, math.sqrt(var), len(tail)
+    k = len(tail)
+    if k < 3:
+        return m, 0.0, k
+    xm = (k - 1) / 2.0
+    sxx = sum((i - xm) ** 2 for i in range(k))
+    slope = sum((i - xm) * (v - m) for i, v in enumerate(tail)) / sxx
+    var = sum((v - (m + slope * (i - xm))) ** 2
+              for i, v in enumerate(tail)) / k
+    return m, math.sqrt(var), k
 
 
 def suggested_k_g(cl_rans: float, c_free: float, c_ground: float,
@@ -298,12 +326,16 @@ class RansJob:
         self._container = f"wss-rans-{self.id}"
         self._cancel = threading.Event()
         self._lock = threading.Lock()
-        self._cl_drift: float | None = None   # latest half-window drifts
+        self._cl_drift: float | None = None   # latest window drifts
         self._cd_drift: float | None = None
-        self._flat_polls = 0                  # consecutive flat polls
+        self._flat_polls = 0                  # consecutive flat evaluations
+        self._n_rows = 0                      # coefficient rows seen so far
+        self._armed_rows = 0                  # rows at the last evaluation
         self._force_stop = False              # runner requested writeNow
         self._user_stop = threading.Event()   # user asked to stop-and-keep
         self._stopped_by_user = False         # the user request took effect
+        self._rows_at_user_stop: int | None = None
+        self._stop_flip_failures = 0          # writeNow flips that failed
         self._solving = False                 # solver container is running
 
     # ---- progress plumbing ----
@@ -354,6 +386,7 @@ class RansJob:
             self.iteration = int(data["iters"][-1])
             self.latest = hist[-1]
             self.history = hist
+            self._n_rows = n
             if not self._force_stop:
                 # keep the "writing final fields" label during the drain
                 self.phase = "solving"
@@ -377,12 +410,14 @@ class RansJob:
         cd_path = self.case_dir / "system" / "controlDict"
         try:
             text = cd_path.read_text(encoding="utf-8")
-            if "stopAt          endTime;" not in text:
+            # whitespace-tolerant: an exact-string match would silently
+            # break the Stop button the day cfd.py's template is respaced
+            new, n = re.subn(r"stopAt\s+endTime;",
+                             "stopAt          writeNow;", text, count=1)
+            if not n:
                 return False
             tmp = cd_path.with_suffix(".tmp")
-            tmp.write_text(text.replace("stopAt          endTime;",
-                                        "stopAt          writeNow;", 1),
-                           encoding="utf-8", newline="\n")
+            tmp.write_text(new, encoding="utf-8", newline="\n")
             os.replace(tmp, cd_path)
             return True
         except OSError:
@@ -395,10 +430,10 @@ class RansJob:
         cd_path = self.case_dir / "system" / "controlDict"
         try:
             text = cd_path.read_text(encoding="utf-8")
-            if "stopAt          writeNow;" in text:
-                cd_path.write_text(text.replace("stopAt          writeNow;",
-                                                "stopAt          endTime;", 1),
-                                   encoding="utf-8", newline="\n")
+            new, n = re.subn(r"stopAt\s+writeNow;",
+                             "stopAt          endTime;", text, count=1)
+            if n:
+                cd_path.write_text(new, encoding="utf-8", newline="\n")
         except OSError:
             pass
 
@@ -430,6 +465,12 @@ class RansJob:
             # belt and braces: never leave a container running past the job
             if self.state in ("failed", "cancelled"):
                 self._kill_container(30)
+            # a writeNow flip must not outlive the job on ANY exit path —
+            # the failure message points the user at the retained case, and
+            # a still-flipped controlDict makes a manual rerun stop after
+            # one iteration with no error
+            if self._force_stop:
+                self._restore_controldict()
 
     def _run_inner(self) -> None:
         with self._lock:
@@ -531,23 +572,41 @@ class RansJob:
                     self._poll_progress()
                     if rc is not None:
                         break
-                    # a single flat poll can be a noise minimum — require
-                    # the criterion to persist before stopping the solver.
-                    # (The docker client is still alive during run.sh's
-                    # post-solve steps, so a stop requested in that window
-                    # is a no-op on an already-exited solver — harmless,
-                    # and the finalize verdict re-checks the outcome.)
                     # user stop-and-keep: same writeNow mechanism as the
                     # auto stop, but the finalize verdict stays honest
-                    # ("stopped by user", never "converged", no k_g)
-                    if (self._user_stop.is_set() and not self._force_stop
-                            and self._request_graceful_stop()):
-                        self._force_stop = True
-                        self._stopped_by_user = True
-                        with self._lock:
-                            self.phase = ("stopping at your request — "
-                                          "writing final fields")
-                    if not self._force_stop:
+                    # ("stopped by user", never "converged", no k_g). The
+                    # row count at the flip is recorded so finalize can
+                    # tell a stop that actually took effect from one that
+                    # landed after the solver had already quit on its own.
+                    if self._user_stop.is_set() and not self._force_stop:
+                        if self._request_graceful_stop():
+                            self._force_stop = True
+                            self._stopped_by_user = True
+                            self._rows_at_user_stop = self._n_rows
+                            with self._lock:
+                                self.phase = ("stopping at your request — "
+                                              "writing final fields")
+                        else:
+                            # the flip is a file edit that can keep failing
+                            # (template drift, AV holding controlDict) —
+                            # after a few failures say so instead of letting
+                            # the solver run for hours past a Stop click
+                            self._stop_flip_failures += 1
+                            if self._stop_flip_failures >= 5:
+                                with self._lock:
+                                    self.phase = (
+                                        "stop request could not be applied "
+                                        "(controlDict not writable?) — the "
+                                        "solver is still running; use "
+                                        "Cancel to kill it")
+                    # a single flat evaluation can be a noise minimum, and
+                    # 1 s polls re-judge nearly identical data on a slow
+                    # mesh — require the criterion to persist across
+                    # evaluations separated by genuinely new history
+                    if (not self._force_stop
+                            and self._n_rows - self._armed_rows
+                            >= FORCE_STOP_REARM_ROWS):
+                        self._armed_rows = self._n_rows
                         self._flat_polls = (self._flat_polls + 1
                                             if self._force_converged() else 0)
                         if (self._flat_polls >= FORCE_STOP_POLLS
@@ -613,31 +672,39 @@ class RansJob:
         n_run = int(data["iters"][-1])
 
         # convergence verdict: what stopped the run, and is the force
-        # history actually flat? A cap-limited run with a drifting tail is
-        # a transient snapshot, not a result — say so, loudly. The drift
+        # history actually flat? EVERY branch is gated on the final
+        # history — the stop mechanism explains the exit, it never
+        # certifies the result (a false plateau can fire the force stop;
+        # an early rc==0 exit is not evidence of anything). The drift
         # excludes the startup transient, same as the stop decision.
         cl_drift = drift(data["cl"][FORCE_STOP_SKIP:])
+        history_flat = cl_drift is not None and cl_drift < CONVERGED_CL_TOL
         # "the user stop took effect" requires the solver to have quit
-        # below the cap — a request the solver never noticed must not
-        # relabel a cap-limited run (its verdict judges the history), and
-        # the result flag must mirror the verdict actually applied
-        user_applied = self._stopped_by_user and n_run < self.n_iters
+        # below the cap AND to have advanced past the flip — a stop that
+        # landed after the solver already exited on its own must not
+        # relabel that exit's verdict
+        user_applied = (self._stopped_by_user and n_run < self.n_iters
+                        and (self._rows_at_user_stop is None
+                             or len(data["cl"]) > self._rows_at_user_stop))
         if user_applied:
             # a user stop is a preview, not a result: never "converged",
             # never a k_g suggestion — a hand-stopped tail must not feed
             # calibration, however flat it happens to look
             converged = False
             stop_reason = "stopped by user (fields written)"
-        elif self._force_stop and n_run < self.n_iters:
-            # the request demonstrably took effect (the solver quit early)
-            converged, stop_reason = True, "force history converged"
+        elif self._force_stop and not self._stopped_by_user \
+                and n_run < self.n_iters:
+            converged = history_flat
+            stop_reason = ("force history converged" if converged else
+                           "force stop fired on a false plateau — history "
+                           "still trending")
         elif n_run < self.n_iters:
-            converged, stop_reason = True, "residuals converged"
+            converged = history_flat
+            stop_reason = ("residuals converged" if converged else
+                           "solver stopped early with a still-trending "
+                           "force history")
         else:
-            # ran to the cap — including the case where a writeNow request
-            # was silently never noticed by the solver: judge the history,
-            # not the request
-            converged = cl_drift is not None and cl_drift < CONVERGED_CL_TOL
+            converged = history_flat
             stop_reason = "iteration cap reached"
 
         # panel-model numbers for the same config, full pipeline
@@ -665,6 +732,43 @@ class RansJob:
             # column is missing instead of leaving it blank
             panel_error = f"{type(e).__name__}: {e}"
 
+        # signed trend across the last two windows: the drifting-run note
+        # tells the user WHICH WAY the number is still moving (a rising
+        # history makes the tail mean a lower bound)
+        w = min(FORCE_STOP_WINDOW, max(1, len(data["cl"]) // 3))
+        trend_note = None
+        if not converged and len(data["cl"]) >= 2 * w:
+            m_prev = sum(data["cl"][-2 * w:-w]) / w
+            m_last = sum(data["cl"][-w:]) / w
+            signed = (m_last - m_prev) / max(abs(m_last), 0.05)
+            if abs(signed) >= 0.001:
+                direction = "rising" if signed > 0 else "falling"
+                bound = "lower" if signed > 0 else "upper"
+                trend_note = (
+                    f"Cl is still {direction} ~{abs(signed) * 100:.1f}% per "
+                    f"{w}-iteration window — treat {cl_mean:.2f} as a "
+                    f"{bound} bound, not a result")
+
+        # measured wall state (y+ + separation) from the diagnostics the
+        # case writes beside every field set; absent on cases generated
+        # before those function objects existed
+        wall = None
+        wall_verdict = None
+        try:
+            wall = foam_post.wall_report(self.case_dir)
+        except Exception:
+            wall = None
+        if wall and wall.get("separation"):
+            parts = []
+            for patch in sorted(wall["separation"]):
+                frac = wall["separation"][patch]["reversed_frac"]
+                state = ("attached" if frac <= 0.10
+                         else "partial separation" if frac <= 0.20
+                         else "separated")
+                parts.append(f"{patch.replace('wing_', '')} {state} "
+                             f"({frac * 100:.0f}% reversed)")
+            wall_verdict = ", ".join(parts)
+
         q = self.cfg.q_pa
         area = self.cfg.chord_m * (self.cfg.span_mm / 1000.0)
         with self._lock:
@@ -687,6 +791,26 @@ class RansJob:
                 "panel_error": panel_error,
                 "delta_cl_pct": round((cl_mean / panel["c_est"] - 1) * 100, 1)
                     if panel and abs(panel["c_est"]) > 1e-9 else None,
+                # a delta computed from a drifting tail moves with the
+                # history — the UI must not present it as the design's
+                # measured error
+                "delta_cl_provisional": not converged,
+                "cl_trend_note": trend_note,
+                "wall_report": wall,
+                "wall_verdict": wall_verdict,
+                "estimate_scope_note": (
+                    "the estimate's k_g realization curve is calibrated on "
+                    "the two-element baseline at moderate loading; on "
+                    "multi-element, heavily loaded stacks fine-mesh RANS "
+                    "has measured 35-65% more downforce than the estimate "
+                    "(this section: k_g realizes only "
+                    f"{panel['k_g_used']:.2f} of the inviscid gain). The "
+                    "gap is estimate conservatism, not a RANS fault — on a "
+                    "converged run, apply the suggested k_g to recalibrate "
+                    "the session."
+                ) if (panel and len(self.cfg.elements) >= 3
+                      and abs(panel["c_est"]) > 1e-9
+                      and cl_mean / panel["c_est"] - 1 > 0.25) else None,
                 "suggested_k_g": suggestion,
                 # the 2026-07 calibration campaign (docs/calibration) measured
                 # the coarse mesh reading validated operating points 22-35%
@@ -766,7 +890,10 @@ def _pid_alive(pid: int) -> bool:
         k32 = ctypes.windll.kernel32
         handle = k32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED_INFO
         if not handle:
-            return False
+            # ERROR_ACCESS_DENIED: the pid EXISTS but belongs to another
+            # user or elevation — calling that "dead" would let the orphan
+            # sweep kill a live neighbour's solve
+            return k32.GetLastError() == 5
         try:
             code = ctypes.c_ulong()
             ok = k32.GetExitCodeProcess(handle, ctypes.byref(code))
@@ -829,20 +956,47 @@ def _reap_at_exit() -> None:
 atexit.register(_reap_at_exit)
 
 
+_protect_lock = threading.Lock()
+_protected_providers: list = []   # callables returning iterables of dirs
+
+
+def register_protected_dirs(provider) -> None:
+    """Register a callable returning case directories that must never be
+    pruned — the RANS queue's shortlist rows and the session's retained
+    verification case reference dirs long after their jobs left the
+    registry, and pruning one leaves a dangling case_dir in saved state."""
+    with _protect_lock:
+        _protected_providers.append(provider)
+
+
+def _protected_dirs() -> set[Path]:
+    with _protect_lock:
+        providers = list(_protected_providers)
+    out: set[Path] = set()
+    for provider in providers:
+        try:
+            out |= {Path(d).resolve() for d in provider() if d}
+        except Exception:
+            pass   # a broken provider must not block job starts
+    return out
+
+
 def _prune_run_dirs(active: set[Path],
                     live_other_names: set[str] = frozenset()) -> None:
     """Keep the newest KEEP_RUN_DIRS finished run directories; a solve can
     write hundreds of MB of fields, and verification runs are working
     artifacts, not user exports. Directories backing another instance's
-    live container are never pruned out from under it."""
+    live container, or claimed by a registered protector (queue rows,
+    session-referenced cases), are never pruned out from under it."""
     root = _runs_dir()
     protected = {name[len("wss-rans-"):] for name in live_other_names}
     if not root.is_dir():
         return
+    keep = active | _protected_dirs()
     dirs = sorted((d for d in root.iterdir() if d.is_dir()),
                   key=lambda d: d.stat().st_mtime, reverse=True)
     for d in dirs[KEEP_RUN_DIRS:]:
-        if d.resolve() not in active and d.name not in protected:
+        if d.resolve() not in keep and d.name not in protected:
             shutil.rmtree(d, ignore_errors=True)
 
 

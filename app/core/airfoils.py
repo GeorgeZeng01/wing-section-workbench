@@ -340,9 +340,16 @@ def spec_cache_token(spec: str) -> int:
     when the file changes on disk — key their caches on the mtime so edits
     are picked up; every other spec source is immutable per string."""
     s = str(spec).strip()
-    for prefix in ("mfg:", "shape:"):
-        if s.lower().startswith(prefix):
-            s = s.split(":", {"mfg:": 3, "shape:": 5}[prefix])[-1].strip()
+    # unwrap until no prefix matches: layers chain in either order (the
+    # optimizer's opt_shape re-wrap yields "shape:...:mfg:...:base"), and a
+    # single ordered pass would leave the inner layer glued to the filename
+    stripped = True
+    while stripped:
+        stripped = False
+        for prefix in ("mfg:", "shape:"):
+            if s.lower().startswith(prefix):
+                s = s.split(":", {"mfg:": 3, "shape:": 5}[prefix])[-1].strip()
+                stripped = True
     # never stat a UNC path — os.stat on \\host\share opens an outbound SMB
     # session (NetNTLM leak). resolve() rejects UNC specs anyway.
     if _is_unc_path(s):

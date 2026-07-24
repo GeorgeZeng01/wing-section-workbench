@@ -116,6 +116,18 @@ DEADZONE_F = 0.008         # descend: |downforce-D*|/D* treated as "on level"
                            # trading the last 0.1% of tracking for drag)
 DESCEND_DRAG_W = 0.30      # descend drag-weight floor (user's if higher)
 
+# clean-pool band gate slack. The pool gate tests RAW band membership, not
+# the smooth search penalty: 40*x^2 < PEN_OK would admit a design ~11% past
+# the loading band (~116% of isolated CL_max) — inside the regime the
+# calibration record measured 23-42% RANS over-claims — into D*, the early
+# stop, the descend seeds and the candidate output. The slacks below cover
+# only numeric noise between panelings, so a design sitting exactly on a
+# band edge is not flickered out of the pool by re-paneling.
+LOAD_GATE_SLACK = 0.01      # loading fraction past the band top
+GROUND_GATE_SLACK = 0.01    # relative, on the ground allowance
+GAP_GATE_SLACK = 0.0005     # chord fraction past the gap band (0.05 %c)
+OVERLAP_GATE_SLACK = 0.001  # chord fraction past the overlap band (0.1 %c)
+
 # max-downforce mode. The measured trust boundary is the 0.90 free-air
 # loading line: winners past it over-claim 23-42% against fine-mesh RANS
 # (replicated — DECISIONS.md "RANS cross-referencing campaign"), so a
@@ -191,6 +203,21 @@ def build_airfoil_shortlists(config: dict, cfg: StackConfig,
                          "no airfoils have been uploaded — load .dat files "
                          "first or switch the candidate source.")
     mfg = cfg.manufacturing
+    # the drag slot must rank at each element's OWN operating CL: front-wing
+    # elements in ground effect run at CL 2.0+, where the drag ordering can
+    # invert against a fixed CL 1.5 reference (high-camber sections draggy
+    # at 1.5 are often cleanest near CL_max). Clamped so a degenerate
+    # evaluation cannot push the reference outside the polars' usable range,
+    # rounded to keep the screener's per-operating-point cache effective.
+    cl_work: dict[int, float] = {}
+    if pool != "custom_only":
+        try:
+            r0 = analysis.analyze(cfg, include_geometry=False)
+            for i, el in enumerate(r0["elements"]):
+                cl_work[i] = min(max(round(float(el["Cl_operating"]), 1),
+                                     0.5), 2.5)
+        except Exception:
+            pass
     lists: dict[int, list[str]] = {}
     for i, spec in enumerate(cfg.elements):
         t_min = THICKNESS_MIN_MAIN if i == 0 else THICKNESS_MIN_FLAP
@@ -217,7 +244,8 @@ def build_airfoil_shortlists(config: dict, cfg: StackConfig,
             picks = list(customs)
         else:
             try:
-                rows = screener.screen(cfg.element_re(i), cfg.ncrit, cl_ref=1.5,
+                rows = screener.screen(cfg.element_re(i), cfg.ncrit,
+                                       cl_ref=cl_work.get(i, 1.5),
                                        thickness_pct_min=t_min,
                                        thickness_pct_max=22.0)
             except Exception:
@@ -439,6 +467,26 @@ def _band_penalty(value: float, band: tuple[float, float], scale: float) -> floa
     return 0.0
 
 
+def _confidence_parts(ev: dict,
+                      floor: float = CONF_FLOOR) -> list[tuple[float, float]]:
+    """Per-element (confidence-term, flag-term) trust-penalty contributions.
+
+    Kept decomposed because the baseline offset must subtract per SOURCE:
+    a scalar offset let credit earned by one element's flagged data pay for
+    fresh distrust on a different element (or a different signal), so a
+    candidate could ride NEW low-confidence data unpenalized."""
+    parts: list[tuple[float, float]] = []
+    floor = max(float(floor), 1e-6)
+    for conf, frac, edge, capped in zip(
+            ev.get("confidences", ()), ev.get("fracs", ()),
+            ev.get("at_grid_edge", ()), ev.get("cd_capped", ())):
+        c = (CONF_WEIGHT * ((floor - conf) / floor) ** 2
+             if conf < floor else 0.0)
+        f = FLAG_BUMP if (edge or capped) and frac > FLAG_LOAD_FRAC else 0.0
+        parts.append((c, f))
+    return parts
+
+
 def _confidence_penalty(ev: dict, floor: float = CONF_FLOOR) -> float:
     """Trust penalty for one evaluation: low NeuralFoil confidence anywhere,
     plus a fixed bump per loaded element whose viscous limit is a grid-edge
@@ -447,21 +495,16 @@ def _confidence_penalty(ev: dict, floor: float = CONF_FLOOR) -> float:
     The knee follows the user's confidence floor (min_confidence option):
     an output filter without matching search pressure would spend budget
     converging on designs the filter then discards."""
-    pen = 0.0
-    floor = max(float(floor), 1e-6)
-    for conf, frac, edge, capped in zip(
-            ev.get("confidences", ()), ev.get("fracs", ()),
-            ev.get("at_grid_edge", ()), ev.get("cd_capped", ())):
-        if conf < floor:
-            pen += CONF_WEIGHT * ((floor - conf) / floor) ** 2
-        if (edge or capped) and frac > FLAG_LOAD_FRAC:
-            pen += FLAG_BUMP
-    return pen
+    return sum(c + f for c, f in _confidence_parts(ev, floor))
 
 
 class Job:
     def __init__(self, config: dict, options: dict):
         self.id = uuid.uuid4().hex[:12]
+        # creation time, not start time: current() must rank a just-created
+        # pending job (t_start still None until its thread runs) as newest,
+        # or a reloaded UI re-attaches to an older running job instead
+        self.t_created = time.time()
         self.config = copy.deepcopy(config)
         # pristine copy for the baseline-allowance evaluation: shape specs
         # stay wrapped here even when opt_shape unwraps them below, so the
@@ -594,6 +637,10 @@ class Job:
         self.result = None         # full analysis of the best design
         self.dstar = None          # achievable downforce level, set between
                                    # the attain and descend phases
+        self._dstar_search = None  # the same level as the ATTAIN paneling
+                                   # measured it — descend seeds are coarse
+                                   # entries and must be matched against a
+                                   # level of the same fidelity
         self.target_note = None    # None | "unreachable_low" (target below
                                    # the clean floor) | "unreachable_high"
         self._obj_phase = "attain"  # attain | descend (objective() branch)
@@ -621,7 +668,9 @@ class Job:
         n_flaps = max(0, len(self.config.get("elements", [])) - 1)
         self.load_band: list[float] | None = None
         self.ground_band: list[float] | None = None
-        self.conf_pen0 = 0.0   # baseline's own trust penalty (see objective)
+        self.conf_pen0: list[tuple[float, float]] = []
+                               # baseline's own trust-penalty parts, per
+                               # element and signal (see objective)
         self.gap_bands: list[tuple[float, float]] = [GAP_BAND] * n_flaps
         self.overlap_bands: list[tuple[float, float]] = [OVERLAP_BAND] * n_flaps
         self._cancel = threading.Event()
@@ -720,9 +769,15 @@ class Job:
         # that already sits on low-confidence data (a re-optimized shaped
         # design) is penalized only for leaning HARDER on it, never for
         # matching itself — a standing offset would break _target_reached()
-        # and the candidates' penalty gate for the whole run
-        j_pen += max(0.0, _confidence_penalty(ev, self.min_conf)
-                     - self.conf_pen0)
+        # and the candidates' penalty gate for the whole run. The offset is
+        # subtracted per element and per signal: credit a flagged baseline
+        # earned on one element must not pay for fresh distrust elsewhere.
+        parts = _confidence_parts(ev, self.min_conf)
+        base0 = self.conf_pen0
+        j_pen += sum(
+            max(0.0, c - (base0[i][0] if i < len(base0) else 0.0))
+            + max(0.0, f - (base0[i][1] if i < len(base0) else 0.0))
+            for i, (c, f) in enumerate(parts))
         if self.min_ld is not None:
             # efficiency floor as a soft hinge, mirroring the bands; the
             # output filter in _finalize_candidates provides the guarantee
@@ -755,13 +810,40 @@ class Job:
                  + w_drag * ev["drag_n"] / max(abs(target), 1.0) * 10.0
                  + j_pen)
 
+        # the clean-pool gate is RAW band membership: the smooth quadratic
+        # penalties are search pressure, and testing them against PEN_OK
+        # admitted designs ~11% past the loading band (14% past the ground
+        # allowance) as "clean". Out-of-band entries carry the PEN_OK bump
+        # so every pen_gate < PEN_OK site keeps its meaning; the search
+        # objective J itself is untouched.
+        in_band = True
+        if self.objective_mode != "max_downforce":
+            # max mode's own trust line (LOAD_WARN gates) owns free-air
+            # loading there; the target-mode band is baseline-relative
+            tops = self.load_band or [1.05] * len(ev["fracs"])
+            in_band = all(f <= top + LOAD_GATE_SLACK
+                          for f, top in zip(ev["fracs"], tops))
+        g_tops = (self.ground_band
+                  or [analysis.GROUND_CL_ALLOWANCE] * len(ev["fracs_ground"]))
+        in_band = in_band and all(
+            f <= top * (1.0 + GROUND_GATE_SLACK)
+            for f, top in zip(ev["fracs_ground"], g_tops))
+        in_band = in_band and all(
+            band[0] - GAP_GATE_SLACK <= g <= band[1] + GAP_GATE_SLACK
+            for g, band in zip(ev["gaps"], self.gap_bands) if g is not None)
+        in_band = in_band and all(
+            band[0] - OVERLAP_GATE_SLACK <= o <= band[1] + OVERLAP_GATE_SLACK
+            for o, band in zip(ev["overlaps"], self.overlap_bands)
+            if o is not None)
+        pen_gate = j_pen - load_shape_pen + (0.0 if in_band else PEN_OK)
+
         with self._lock:
             self.archive.append({"x": [round(float(v), 5) for v in x],
                                  "J": float(j), "penalty": float(j_pen),
                                  # penalty minus the max-mode loading
-                                 # shaping: what the clean-pool gates test
-                                 # (identical to penalty in target mode)
-                                 "pen_gate": float(j_pen - load_shape_pen),
+                                 # shaping, plus the out-of-band bump:
+                                 # what the clean-pool gates test
+                                 "pen_gate": float(pen_gate),
                                  "downforce_n": round(ev["downforce_n"], 1),
                                  "drag_n": round(ev["drag_n"], 2),
                                  "frac_max": round(max(ev["fracs"]), 3)
@@ -771,6 +853,7 @@ class Job:
             if self.best is None or j < self.best["J"]:
                 self.best = {"x": [round(float(v), 5) for v in x],
                              "J": float(j), "penalty": round(float(j_pen), 3),
+                             "pen_gate": round(float(pen_gate), 3),
                              "downforce_n": round(ev["downforce_n"], 1),
                              "drag_n": round(ev["drag_n"], 2)}
                 if self.shortlists:
@@ -826,10 +909,13 @@ class Job:
         pool can shed to (loading variables pinned, nothing legitimate left
         to give) resolves D* to that clean floor; the mirror case resolves
         to the clean ceiling. Sabotaged designs cannot define the level:
-        the pool is gated on penalty < PEN_OK, and slot-flow abuse carries
-        band/trust penalties. D* is measured at the attain phase's paneling
-        — the descend deadzone absorbs the coarse-vs-full bias, and the
-        candidates re-analyze at full fidelity anyway."""
+        the pool is gated on pen_gate < PEN_OK, and slot-flow abuse carries
+        band/trust penalties. An unreachable level found at the attain
+        phase's coarse paneling is RE-MEASURED at full paneling before the
+        descend spring holds it: the coarse bias can exceed both the 0.8%
+        deadzone and the 3% target tolerance on big stacks, and a
+        mis-measured ceiling gives away genuinely reachable downforce
+        (a mis-measured floor holds one the full model can get under)."""
         if self.objective_mode != "target":
             return   # max mode has no level to hold
         target = float(self.options.get("target_downforce_n", 200.0))
@@ -838,6 +924,7 @@ class Job:
                     if a.get("pen_gate", a["penalty"]) < PEN_OK]
         self.dstar = target
         self.target_note = None
+        self._dstar_search = None
         if not pool:
             return
         tol = max(CAND_TARGET_TOL * abs(target), 1.0)
@@ -845,11 +932,41 @@ class Job:
         if any(abs(d - target) <= tol for d in dns):
             return
         if min(dns) > target + tol:
-            self.dstar = float(min(dns))
+            self._dstar_search = float(min(dns))
+            self.dstar = self._remeasure_extreme(pool, low=True)
             self.target_note = "unreachable_low"
         elif max(dns) < target - tol:
-            self.dstar = float(max(dns))
+            self._dstar_search = float(max(dns))
+            self.dstar = self._remeasure_extreme(pool, low=False)
             self.target_note = "unreachable_high"
+
+    def _remeasure_extreme(self, pool: list[dict], low: bool) -> float:
+        """The clean pool's floor/ceiling downforce at FULL paneling.
+
+        The few most extreme clean entries are re-evaluated at full
+        resolution (the coarse extreme need not stay extreme after
+        re-paneling); entries already evaluated at full paneling stand as
+        measured. Falls back to the search-paneling extreme when every
+        re-evaluation fails — the deadzone then absorbs what it can."""
+        ordered = sorted(pool, key=lambda a: a["downforce_n"],
+                         reverse=not low)
+        vals: list[float] = []
+        for a in ordered[:3]:
+            if a.get("panels") == self._full_panels:
+                vals.append(float(a["downforce_n"]))
+                continue
+            try:
+                cfg_d = apply_vector(self.config, self.variables,
+                                     np.array(a["x"]), self.shortlists)
+                ev = analysis.quick_objective_eval(StackConfig.from_dict(
+                    {**cfg_d, "n_panels_per_side": self._full_panels}))
+            except Exception:
+                continue
+            if ev.get("feasible"):
+                vals.append(float(ev["downforce_n"]))
+        if not vals:
+            return float(ordered[0]["downforce_n"])
+        return float(min(vals) if low else max(vals))
 
     def _descend_starts(self, n: int, x_fallback) -> list:
         """Descend seeds: the lowest-drag clean archive entries already on
@@ -866,10 +983,14 @@ class Job:
                          + MAXDF_FRAC_SLACK_SEARCH),
                         key=lambda a: -a["downforce_n"])
         else:
-            tol = max(CAND_TARGET_TOL * abs(self.dstar or 1.0), 1.0)
+            # seeds are attain-phase (coarse-paneling) entries: match them
+            # against the level as the SAME paneling measured it, not the
+            # full-paneling D* the descend spring holds
+            level = (self._dstar_search if self._dstar_search is not None
+                     else (self.dstar or 0.0))
+            tol = max(CAND_TARGET_TOL * abs(level or 1.0), 1.0)
             on = sorted((a for a in pool
-                         if abs(a["downforce_n"] - (self.dstar or 0.0))
-                         <= tol),
+                         if abs(a["downforce_n"] - level) <= tol),
                         key=lambda a: a["drag_n"])
         if not on:
             if self.best is not None:
@@ -986,6 +1107,13 @@ class Job:
                         for e in els),
                     "frac_max": round(max(e["loading_fraction"]
                                           for e in els), 3),
+                    # target mode has no loading output filter (the bands
+                    # are baseline-relative there) — this badge is the hard
+                    # marker for a candidate past its own loading band
+                    "past_load_band": bool(any(
+                        e["loading_fraction"] > top + LOAD_GATE_SLACK
+                        for e, top in zip(
+                            els, self.load_band or [1.05] * len(els)))),
                     "slot_signature": bool(r.get("slot_signature")),
                 }
             except Exception:
@@ -1222,7 +1350,7 @@ class Job:
             self.load_band = [max(1.05, f + 0.03) for f in ev0["fracs"]]
         self.ground_band = [max(analysis.GROUND_CL_ALLOWANCE, f + 0.05)
                             for f in ev0["fracs_ground"]]
-        self.conf_pen0 = _confidence_penalty(ev0, self.min_conf)
+        self.conf_pen0 = _confidence_parts(ev0, self.min_conf)
         if (ev0.get("confidences")
                 and min(ev0["confidences"]) < self.min_conf):
             self.conf_note = "baseline_below_floor"
@@ -1278,10 +1406,11 @@ class Job:
         if b is None:
             return False
         target = float(self.options.get("target_downforce_n", 200.0))
-        # downforce on target and no live constraint penalties (the drag term
-        # is a real force trade-off, not a penalty, so it is not gated on)
+        # downforce on target, no live constraint penalties AND inside the
+        # raw bands (the pen_gate carries the out-of-band bump; the drag
+        # term is a real force trade-off, not a penalty, so not gated on)
         return (abs(b["downforce_n"] - target) <= max(0.008 * abs(target), 0.5)
-                and b.get("penalty", 99.0) < PEN_OK)
+                and b.get("pen_gate", b.get("penalty", 99.0)) < PEN_OK)
 
     def run(self):
         from scipy.optimize import differential_evolution, minimize
@@ -1560,10 +1689,25 @@ def current() -> dict:
         jobs = list(_jobs.values())
     active = [j for j in jobs if j.state in ("pending", "running",
                                              "finalizing")]
+    # ranked by creation, not start: a just-created job is still "pending"
+    # with t_start None until its thread runs, and keying on t_start made
+    # it lose to any older running job during exactly the window a UI
+    # polls after POSTing it
     if active:
-        j = max(active, key=lambda j: j.t_start or 0)
+        j = max(active, key=lambda j: j.t_created)
         return {"job_id": j.id, "state": j.state}
     if jobs:
-        last = max(jobs, key=lambda j: j.t_start or 0)
+        last = max(jobs, key=lambda j: j.t_created)
         return {"job_id": last.id, "state": last.state}
     return {"job_id": None, "state": None}
+
+
+def last_candidate_job() -> Job | None:
+    """Most recent job that produced a candidate shortlist — the run an
+    in-process consumer (the RANS verification queue) should attribute a
+    'verify shortlist' request to when the API did not say."""
+    with _jobs_lock:
+        jobs = [j for j in _jobs.values() if j.candidates]
+    if not jobs:
+        return None
+    return max(jobs, key=lambda j: j.t_created)

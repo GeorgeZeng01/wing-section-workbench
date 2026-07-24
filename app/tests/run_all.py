@@ -23,7 +23,8 @@ OFFLINE = ["test_manufacturing.py", "test_panel_validation.py",
            "test_optimizer_candidates.py", "test_shaping.py",
            "test_rules_envelope.py", "test_optimizer_target_modes.py",
            "test_slot_signature.py", "test_optimizer_objectives.py",
-           "test_pareto_front.py", "test_rans_queue.py"]
+           "test_pareto_front.py", "test_rans_queue.py",
+           "test_geometry_hardening.py", "test_server_hardening.py"]
 
 
 def free_port() -> int:
@@ -51,9 +52,16 @@ def wait_healthy(base: str, timeout: float = 30.0) -> bool:
 
 def main() -> int:
     failed = []
+    # defense in depth: every offline suite gets a scratch data dir even if
+    # it forgets to isolate itself — a test bug must never write into (or
+    # prune!) the user's real app_data again
+    import tempfile
+    offline_data = tempfile.mkdtemp(prefix="wss_test_offline_data_")
+    offline_env = {**os.environ, "WSS_DATA_DIR": offline_data}
     for name in OFFLINE:
         print(f"\n=== {name} ===", flush=True)
-        if subprocess.run([PY, str(HERE / name)], cwd=ROOT).returncode:
+        if subprocess.run([PY, str(HERE / name)], cwd=ROOT,
+                          env=offline_env).returncode:
             failed.append(name)
 
     print("\n=== test_api_adversarial.py (scratch server) ===", flush=True)

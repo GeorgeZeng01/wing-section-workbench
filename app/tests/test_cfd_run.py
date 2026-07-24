@@ -301,6 +301,82 @@ fine_r = finalize_with([2.5] * 1500, 3000, mesh="fine")
 check("fine-mesh result carries no mesh_caution",
       fine_r and fine_r["mesh_caution"] is False)
 
+# an early rc==0 exit with a DRIFTING history must not mint a verdict (or
+# a k_g): the stop mechanism explains the exit, only the history certifies
+early_drift_r = finalize_with([2.0 + 0.001 * i for i in range(1500)], 3000)
+check("early exit with a trending history is NOT converged",
+      early_drift_r and early_drift_r["converged"] is False
+      and "still-trending" in early_drift_r["stop_reason"]
+      and early_drift_r["suggested_k_g"] is None,
+      f"({early_drift_r and early_drift_r['stop_reason']})")
+
+# a force stop that fired on a false plateau: below the cap, still trending
+fp_r = finalize_with([2.0 + 0.001 * i for i in range(2500)], 3000,
+                     force_stop=True)
+check("force stop on a false plateau is NOT converged",
+      fp_r and fp_r["converged"] is False
+      and "false plateau" in fp_r["stop_reason"]
+      and fp_r["suggested_k_g"] is None)
+
+# drifting results are provisional and say WHICH WAY they are moving
+check("drifting result is provisional with a rising-trend note",
+      ramp_r and ramp_r["delta_cl_provisional"] is True
+      and ramp_r["cl_trend_note"] is not None
+      and "rising" in ramp_r["cl_trend_note"]
+      and "lower bound" in ramp_r["cl_trend_note"])
+check("converged result is not provisional and carries no trend note",
+      flat_r and flat_r["delta_cl_provisional"] is False
+      and flat_r["cl_trend_note"] is None)
+check("legacy case without wall diagnostics reports no wall_report",
+      ramp_r and ramp_r["wall_report"] is None
+      and ramp_r["wall_verdict"] is None)
+
+# the tail std is measured around the tail's own trend line: a pure ramp
+# must read ~zero scatter (its raw std IS the drift, not precision)
+_m, _s, _n = cfd_run._tail_stats([1.0 + 0.001 * i for i in range(600)])
+check("tail std is detrended (ramp reads ~0 scatter)", _s < 1e-9,
+      f"(std {_s})")
+
+# three-window drift: a flattening overshoot zeroes the two-window gap
+# near its peak but not both gaps — the detector must see through it
+_peak = [8.8 - 0.3 * ((3000 - i) / 3000) ** 2 for i in range(2900)]
+_d3 = cfd_run.drift(_peak)
+check("drift sees through a flattening overshoot",
+      _d3 is not None and _d3 > cfd_run.FORCE_STOP_CL_TOL, f"({_d3})")
+
+# a user stop that landed AFTER the solver already exited on its own must
+# not relabel that exit — attribution requires rows past the flip
+noeff = cfd_run.RansJob(CFG_D, "coarse", 3000)
+_cd = noeff.case_dir / "postProcessing" / "forceCoeffs1" / "0"
+_cd.mkdir(parents=True, exist_ok=True)
+_rows = ["# Time Cd Cd(f) Cd(r) Cl Cl(f) Cl(r)"]
+_rows += [f"{i + 1} 0.2 0.1 0.1 2.50000 1 1" for i in range(1500)]
+(_cd / "coefficient.dat").write_text("\n".join(_rows) + "\n")
+noeff.t_start = time.time()
+noeff._force_stop = True
+noeff._stopped_by_user = True
+noeff._rows_at_user_stop = 1500     # flip landed after the last row
+noeff._finalize()
+check("user stop after solver exit does not claim the verdict",
+      noeff.result and noeff.result["user_stopped"] is False
+      and noeff.result["stop_reason"] == "residuals converged",
+      f"({noeff.result and noeff.result['stop_reason']})")
+
+# housekeeping must never prune a directory a registered protector claims
+_runs = cfd_run._runs_dir()
+_runs.mkdir(parents=True, exist_ok=True)
+_dirs = []
+for i in range(cfd_run.KEEP_RUN_DIRS + 2):
+    d = _runs / f"prunetest{i}"
+    d.mkdir(exist_ok=True)
+    os.utime(d, (time.time() - 1000 + i, time.time() - 1000 + i))
+    _dirs.append(d)
+cfd_run.register_protected_dirs(lambda: [_dirs[0]])
+cfd_run._prune_run_dirs(set())
+check("protected case dir survives pruning while an unprotected peer dies",
+      _dirs[0].is_dir() and not _dirs[1].is_dir(),
+      f"(kept {[d.name for d in _dirs if d.is_dir()]})")
+
 job_g = cfd_run.RansJob(CFG_D, "coarse", 3000)
 sysd = job_g.case_dir / "system"
 sysd.mkdir(parents=True, exist_ok=True)
@@ -318,7 +394,7 @@ check("finalize restores the retained case to a runnable state",
       "stopAt          endTime;" in txt and "writeNow" not in txt)
 
 job_f = cfd_run.RansJob(CFG_D, "coarse", 5000)
-job_f.iteration = 2500
+job_f.iteration = cfd_run.FORCE_STOP_MIN_ITERS + 100
 job_f._cl_drift, job_f._cd_drift = 0.001, 0.005
 check("force-converged detector fires on flat histories",
       job_f._force_converged())

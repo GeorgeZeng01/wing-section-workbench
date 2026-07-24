@@ -40,25 +40,23 @@ class PostError(RuntimeError):
 
 # ---------- OpenFOAM ASCII field parsing ----------
 
-def parse_internal_field(text: str) -> np.ndarray:
-    """The internalField of an ASCII vol field as an array.
+def _parse_foam_list(text: str, kind: str, n: int, start: int) -> np.ndarray:
+    """Numbers of a List<scalar|vector> body starting right after '('.
 
-    nonuniform List<scalar>  ->  (N,)
-    nonuniform List<vector>  ->  (N, 3)
-    Uniform fields are rejected — for the solved fields this module reads,
-    a uniform internalField means the case never actually ran."""
-    m = re.search(r"internalField\s+nonuniform\s+List<(scalar|vector)>\s*"
-                  r"(\d+)\s*\(", text)
-    if m is None:
-        if re.search(r"internalField\s+uniform", text):
-            raise PostError("field is uniform — the case has no solved flow")
-        raise PostError("no parsable internalField in the file")
-    kind, n = m.group(1), int(m.group(2))
-    start = m.end()
-    end = text.find("\n)", start)
-    if end < 0:
+    The closing paren is found at nesting depth 0 — OpenFOAM writes both
+    one-entry-per-line and single-line lists, and vector entries carry
+    their own parens."""
+    depth, i = 1, start
+    while depth and i < len(text):
+        ch = text[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        i += 1
+    if depth:
         raise PostError("unterminated internalField list")
-    block = text[start:end]
+    block = text[start:i - 1]
     if kind == "vector":
         toks = block.replace("(", " ").replace(")", " ").split()
         vals = np.array(toks, dtype=float)
@@ -70,6 +68,112 @@ def parse_internal_field(text: str) -> np.ndarray:
     if vals.size != n:
         raise PostError(f"scalar field: expected {n} numbers, got {vals.size}")
     return vals
+
+
+def parse_internal_field(text: str) -> np.ndarray:
+    """The internalField of an ASCII vol field as an array.
+
+    nonuniform List<scalar>  ->  (N,)
+    nonuniform List<vector>  ->  (N, 3)
+    Handles the one-per-line, single-line and compact N{value} encodings
+    (OpenFOAM emits the last whenever every value is identical).
+    Uniform fields are rejected — for the solved fields this module reads,
+    a uniform internalField means the case never actually ran."""
+    m = re.search(r"internalField\s+nonuniform\s+List<(scalar|vector)>\s*"
+                  r"(\d+)\s*([({])", text)
+    if m is None:
+        if re.search(r"internalField\s+uniform", text):
+            raise PostError("field is uniform — the case has no solved flow")
+        raise PostError("no parsable internalField in the file")
+    kind, n = m.group(1), int(m.group(2))
+    if m.group(3) == "{":
+        end = text.find("}", m.end())
+        if end < 0:
+            raise PostError("unterminated internalField list")
+        block = text[m.end():end]
+        if kind == "vector":
+            one = np.array(block.replace("(", " ").replace(")", " ").split(),
+                           dtype=float)
+            return np.tile(one, (n, 1))
+        return np.full(n, float(block))
+    return _parse_foam_list(text, kind, n, m.end())
+
+
+def _patch_boundary_values(text: str, patch: str) -> np.ndarray | None:
+    """boundaryField values of one patch as an (N, 3) array, or None.
+
+    Handles the nonuniform list and the uniform single-vector forms."""
+    i = text.find("boundaryField")
+    if i < 0:
+        return None
+    bf = text[i:]
+    m = re.search(rf"\b{re.escape(patch)}\s*\{{", bf)
+    if m is None:
+        return None
+    seg = bf[m.end():]
+    vm = re.search(r"value\s+nonuniform\s+List<vector>\s*(\d+)\s*\(", seg)
+    if vm is not None:
+        return _parse_foam_list(seg, "vector", int(vm.group(1)), vm.end())
+    um = re.search(r"value\s+uniform\s*\(([^)]+)\)", seg)
+    if um is not None:
+        return np.array([float(x) for x in um.group(1).split()],
+                        dtype=float).reshape(1, 3)
+    return None
+
+
+def wall_report(case_dir: Path) -> dict | None:
+    """Measured wall state from the latest written diagnostics, or None
+    when the case predates them (runs generated before the yPlus1 /
+    wallShearStress1 function objects existed).
+
+    Per wing patch: reversed-flow fraction from the wallShearStress field
+    (OpenFOAM's wall shear vector points along the near-wall flow with the
+    sign of the patch-normal contraction — attached left-to-right flow
+    reads tau_x < 0, so tau_x > 0 marks reversed flow), and y+ min/max/avg
+    from the yPlus1 file output."""
+    case_dir = Path(case_dir)
+    # newest time dir carrying the shear field (write times + stop writes)
+    tdirs = []
+    for d in case_dir.iterdir() if case_dir.is_dir() else []:
+        try:
+            t = float(d.name)
+        except ValueError:
+            continue
+        if (d / "wallShearStress").is_file():
+            tdirs.append((t, d))
+    yplus: dict[str, dict] = {}
+    for dat in sorted(case_dir.glob("postProcessing/yPlus1/*/yPlus.dat")):
+        try:
+            for ln in dat.read_text(errors="replace").splitlines():
+                if ln.startswith("#") or not ln.strip():
+                    continue
+                parts = ln.split()
+                if len(parts) >= 5:
+                    yplus[parts[1]] = {"min": round(float(parts[2]), 2),
+                                       "max": round(float(parts[3]), 1),
+                                       "avg": round(float(parts[4]), 2)}
+        except (OSError, ValueError):
+            continue
+    separation: dict[str, dict] = {}
+    if tdirs:
+        _, tdir = max(tdirs)
+        try:
+            text = (tdir / "wallShearStress").read_text(errors="replace")
+            for m in re.finditer(r"\b(wing_e\d+)\s*\{", text):
+                patch = m.group(1)
+                tau = _patch_boundary_values(text, patch)
+                if tau is None or not len(tau):
+                    continue
+                separation[patch] = {
+                    "reversed_frac": round(float((tau[:, 0] > 0).mean()), 3),
+                    "n_faces": int(len(tau)),
+                }
+        except OSError:
+            pass
+    if not yplus and not separation:
+        return None
+    return {"yplus": {k: v for k, v in yplus.items()} or None,
+            "separation": separation or None}
 
 
 def latest_time_dir(case_dir: Path) -> Path:
@@ -111,7 +215,7 @@ def flow_png(case_dir: Path, cfg: StackConfig, field: str = "umag") -> bytes:
 def _flow_png_locked(case_dir: Path, cfg: StackConfig, field: str) -> bytes:
     from matplotlib.figure import Figure
     from matplotlib.path import Path as MplPath
-    from scipy.interpolate import griddata
+    from scipy.interpolate import LinearNDInterpolator
 
     tdir = latest_time_dir(case_dir)
     cxy = parse_internal_field((tdir / "C").read_text(errors="replace"))[:, :2]
@@ -121,6 +225,18 @@ def _flow_png_locked(case_dir: Path, cfg: StackConfig, field: str) -> bytes:
         scalar = p / (0.5 * cfg.speed_ms ** 2)
     else:
         scalar = np.hypot(u[:, 0], u[:, 1])
+
+    # a spiky or hand-stopped solve can carry non-finite cells; a few are
+    # droppable, a field full of them is a diverged case, not a picture
+    finite = (np.isfinite(scalar) & np.isfinite(u).all(axis=1)
+              & np.isfinite(cxy).all(axis=1))
+    n_bad = int((~finite).sum())
+    if n_bad:
+        if n_bad > 0.005 * finite.size:
+            raise PostError(
+                f"{n_bad} of {finite.size} cells are non-finite — the solve "
+                f"diverged; there is no flow field to draw")
+        cxy, u, scalar = cxy[finite], u[finite], scalar[finite]
 
     polys = _installed_polys_m(cfg)
     all_pts = np.vstack(polys)
@@ -132,9 +248,15 @@ def _flow_png_locked(case_dir: Path, cfg: StackConfig, field: str) -> bytes:
     nx = GRID_NX
     ny = max(int(nx * y1 / (x1 - x0)), 160)
     gx, gy = np.meshgrid(np.linspace(x0, x1, nx), np.linspace(0.0, y1, ny))
-    gs = griddata(cxy, scalar, (gx, gy), method="linear")
-    gu = griddata(cxy, u[:, 0], (gx, gy), method="linear")
-    gv = griddata(cxy, u[:, 1], (gx, gy), method="linear")
+    # one triangulation + one simplex search for all three fields — three
+    # separate griddata calls each rebuilt the Delaunay of ~100k centres
+    # and tripled the render time under the lock
+    interp = LinearNDInterpolator(
+        cxy, np.column_stack([scalar, u[:, 0], u[:, 1]]))
+    stacked = interp(np.column_stack([gx.ravel(), gy.ravel()]))
+    gs = stacked[:, 0].reshape(gx.shape)
+    gu = stacked[:, 1].reshape(gx.shape)
+    gv = stacked[:, 2].reshape(gx.shape)
 
     # blank the element interiors — griddata happily interpolates across them
     flat = np.column_stack([gx.ravel(), gy.ravel()])

@@ -980,15 +980,24 @@ function renderResults(res) {
                             `${fmtN(c.C_downforce_inviscid_free, 2)}`;
   $("r-gain").textContent = c.ground_gain_inviscid == null ? "–"
     : `+${(c.ground_gain_inviscid * 100).toFixed(0)}% inviscid`;
-  $("r-drag").textContent = `${fmtN(f.drag_total_n, 1)} N`;
+  // a "≥" profile figure means some element operates past its pre-stall
+  // polar, so the lookup is a floor — the number is honest, not precise
+  const dragLB = !!f.drag_profile_is_lower_bound;
+  $("r-drag").textContent = `${dragLB ? "≥ " : ""}${fmtN(f.drag_total_n, 1)} N`;
   $("r-drag-split").textContent =
-    `${fmtN(f.drag_induced_n, 1)} induced · ${fmtN(f.drag_profile_n, 1)} profile`;
-  $("drag-stat").title = f.induced_model
+    `${fmtN(f.drag_induced_n, 1)} induced · ` +
+    `${dragLB ? "≥" : ""}${fmtN(f.drag_profile_n, 1)} profile`;
+  $("drag-stat").title = (f.induced_model
     ? `CDi ${f.induced_model.CDi} at wing CL ${f.induced_model.CL_wing} · ` +
       `AR ${f.induced_model.AR} · ground factor ` +
       `${f.induced_model.ground_factor_phi}`
-    : "";
-  $("r-ld").textContent = fmtN(f.efficiency_ld, 1);
+    : "") + (dragLB
+    ? `\nProfile drag is a lower bound: ` +
+      `${(f.drag_capped_roles || []).join(", ")} operate past the ` +
+      `pre-stall polar the drag lookup reads from — verify drag with RANS ` +
+      `before trading on it.`
+    : "");
+  $("r-ld").textContent = (dragLB ? "≤ " : "") + fmtN(f.efficiency_ld, 1);
   $("r-xcp").textContent =
     `${(c.x_cp_c * state.config.chord_mm).toFixed(0)} mm`;
   $("kg-eff").textContent = c.k_ground_realization == null ? "–"
@@ -2918,9 +2927,11 @@ function renderRansResult(s, { provenance = "fresh" } = {}) {
   // every value below can arrive from a project file: numerics through
   // numf (no .toFixed on junk), free strings through esc (innerHTML sink)
   const rows = [
-    ["Sectional Cl — RANS", `${numf(r.cl_rans, 3)} ± ${numf(r.cl_rans_std, 3)}`],
+    ["Sectional Cl — RANS", `${numf(r.cl_rans, 3)} ± ${numf(r.cl_rans_std, 3)}`
+      + (r.delta_cl_provisional ? " (provisional)" : "")],
     ["Sectional Cl — panel C_est", p ? numf(p.c_est, 3) : "–"],
-    ["Cl delta (RANS vs estimate)", pct(r.delta_cl_pct)],
+    ["Cl delta (RANS vs estimate)", pct(r.delta_cl_pct)
+      + (r.delta_cl_provisional && r.delta_cl_pct != null ? " *" : "")],
     ["Profile Cd — RANS", numf(r.cd_rans, 4)],
     ["Profile Cd — panel stack", p ? numf(p.cd_profile, 4) : "–"],
     ["Downforce at RANS Cl", `${esc(r.downforce_n_at_rans_cl)} N`],
@@ -2928,8 +2939,35 @@ function renderRansResult(s, { provenance = "fresh" } = {}) {
     ["Iterations", `${esc(r.n_iters_run)} (${esc(r.stop_reason)}; ` +
       `tail mean of ${esc(r.tail_rows)})`],
   ];
+  // measured wall state: the sanity check a bare Cl cannot give — an
+  // attached solution's high Cl is the model's answer, a separated one's
+  // steady verdict is a band, and either way the user should see which
+  if (r.wall_verdict) {
+    rows.push(["Attachment (wall shear)", esc(r.wall_verdict)]);
+  }
+  if (r.wall_report && typeof r.wall_report.yplus === "object"
+      && r.wall_report.yplus) {
+    const yp = Object.entries(r.wall_report.yplus)
+      .filter(([k, v]) => k.startsWith("wing_") && v
+        && typeof v === "object")
+      .map(([k, v]) => `${esc(k.replace("wing_", ""))} ${numf(v.avg, 1)}` +
+        ` (max ${numf(v.max, 0)})`);
+    if (yp.length) rows.push(["Measured y+ (avg)", yp.join(" · ")]);
+  }
   host.innerHTML = rows.map(([k, v]) =>
     `<div class="kv"><span>${k}</span><b>${v}</b></div>`).join("");
+  if (r.cl_trend_note) {
+    const w = document.createElement("div");
+    w.className = "warning-item";
+    w.textContent = r.cl_trend_note;
+    host.appendChild(w);
+  }
+  if (r.estimate_scope_note) {
+    const w = document.createElement("div");
+    w.className = "warning-item";
+    w.textContent = `Estimate scope: ${r.estimate_scope_note}`;
+    host.appendChild(w);
+  }
   if (r.user_stopped) {
     const w = document.createElement("div");
     w.className = "warning-item";

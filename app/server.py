@@ -50,19 +50,79 @@ async def _track_activity(request, call_next):
 MAX_BODY_BYTES = 16_000_000
 
 
-@app.middleware("http")
-async def _limit_body_size(request, call_next):
-    cl = request.headers.get("content-length")
-    if cl is not None:
-        try:
-            too_big = int(cl) > MAX_BODY_BYTES
-        except ValueError:
-            too_big = False
-        if too_big:
+class _BodyTooLarge(HTTPException):
+    def __init__(self):
+        super().__init__(413, detail="request body too large")
+
+
+class _BodySizeLimitMiddleware:
+    """ASGI-level body cap. The Content-Length header alone cannot bound
+    the parse — a Transfer-Encoding: chunked request carries none — so the
+    received stream itself is counted and cut off past the cap."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        declared = 0
+        for k, v in scope.get("headers") or ():
+            if k.lower() == b"content-length":
+                try:
+                    declared = int(v)
+                except ValueError:
+                    pass
+                break
+        if declared > MAX_BODY_BYTES:
             from fastapi.responses import JSONResponse
-            return JSONResponse({"detail": "request body too large"},
+            resp = JSONResponse({"detail": "request body too large"},
                                 status_code=413)
-    return await call_next(request)
+            await resp(scope, receive, send)
+            return
+
+        received = 0
+        tripped = False
+        response_started = False
+
+        async def _recv():
+            nonlocal received, tripped
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > MAX_BODY_BYTES:
+                    tripped = True
+                    raise _BodyTooLarge()
+            return message
+
+        async def _send(message):
+            nonlocal response_started
+            if tripped:
+                # whatever the app renders after the cutoff is a substitute
+                # for the exception (the raise cannot cross BaseHTTPMiddleware
+                # task plumbing intact, so FastAPI turns it into a generic
+                # 400) — drop it; the definitive 413 is sent below
+                return
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
+        try:
+            await self.app(scope, _recv, _send)
+        except BaseException:
+            # only the cutoff's own unwinding is swallowed — anything else
+            # keeps propagating
+            if not tripped:
+                raise
+        if tripped and not response_started:
+            from fastapi.responses import JSONResponse
+            resp = JSONResponse({"detail": "request body too large"},
+                                status_code=413)
+            await resp(scope, receive, send)
+
+
+app.add_middleware(_BodySizeLimitMiddleware)
 
 
 def _hostname(value: str) -> str:
@@ -368,24 +428,33 @@ def rans_current():
     return cfd_run.current()
 
 
+# single-run and queue starts guard each other through two different module
+# locks (rans_queue._lock vs cfd_run's job lock), so both guard+start
+# sequences must serialize here — otherwise two concurrent starts can each
+# pass its own check and the loser aborts the whole shortlist verification
+_rans_start_lock = threading.Lock()
+
+
 @app.post("/api/rans/start")
 def rans_start(body: RansStartBody):
     _cfg(body.config)   # validate before spawning the job
     from .core import cfd_run, rans_queue
-    # the guard must be two-directional: a single run started in the gap
-    # between two queue items would make the queue's next start fail and
-    # abort the whole shortlist verification
-    q = rans_queue.get_current()
-    if q is not None and q.state in ("pending", "running"):
-        raise HTTPException(409, detail="a shortlist verification queue is "
-                                        "running — cancel it or wait for "
-                                        "it to finish")
-    try:
-        job_id = cfd_run.start(body.config, body.mesh_size, body.max_iters)
-    except RuntimeError as e:
-        raise HTTPException(409, detail=str(e))
-    except (ValueError, TypeError, KeyError) as e:
-        raise HTTPException(422, detail=_err_detail(e))
+    with _rans_start_lock:
+        # the guard must be two-directional: a single run started in the gap
+        # between two queue items would make the queue's next start fail and
+        # abort the whole shortlist verification
+        q = rans_queue.get_current()
+        if q is not None and q.state in ("pending", "running"):
+            raise HTTPException(409, detail="a shortlist verification queue "
+                                            "is running — cancel it or wait "
+                                            "for it to finish")
+        try:
+            job_id = cfd_run.start(body.config, body.mesh_size,
+                                   body.max_iters)
+        except RuntimeError as e:
+            raise HTTPException(409, detail=str(e))
+        except (ValueError, TypeError, KeyError) as e:
+            raise HTTPException(422, detail=_err_detail(e))
     return {"job_id": job_id}
 
 
@@ -421,7 +490,9 @@ def rans_queue_start(body: RansQueueBody):
     solver guard."""
     from .core import rans_queue
     try:
-        qid = rans_queue.start(body.items, body.mesh_size, body.max_iters)
+        with _rans_start_lock:
+            qid = rans_queue.start(body.items, body.mesh_size,
+                                   body.max_iters)
     except (ValueError, KeyError, TypeError) as e:
         raise HTTPException(422, detail=_err_detail(e))
     except RuntimeError as e:
@@ -594,9 +665,15 @@ def export_cfd_save(body: CfdExportBody):
     stamp = _time.strftime("%Y%m%d-%H%M%S")
     case = EXPORTS_DIR / f"cfd_case_{stamp}"
     k = 2
-    while case.exists():
-        case = EXPORTS_DIR / f"cfd_case_{stamp}-{k}"
-        k += 1
+    # mkdir is the claim: an exists() probe would let two same-second saves
+    # pick one directory and interleave their writes into it
+    while True:
+        try:
+            case.mkdir()
+            break
+        except FileExistsError:
+            case = EXPORTS_DIR / f"cfd_case_{stamp}-{k}"
+            k += 1
     try:
         summary = cfd.build_case(cfg, case, body.mesh_size)
     except (ValueError, KeyError, cfd.MeshError) as e:
@@ -606,6 +683,12 @@ def export_cfd_save(body: CfdExportBody):
         if isinstance(e, cfd.MeshError):
             detail = f"mesh generation failed: {detail}"
         raise HTTPException(422, detail=detail)
+    except BaseException:
+        # OSError, RuntimeError, ... still surface (as a 500) — but a case
+        # folder missing half its files must not be left looking exportable
+        import shutil
+        shutil.rmtree(case, ignore_errors=True)
+        raise
     return {"filename": case.name, "path": str(case),
             "dir": str(EXPORTS_DIR), "summary": summary}
 
@@ -724,17 +807,50 @@ SESSION_MAX_BYTES = 4_000_000
 
 class SessionBody(BaseModel):
     state: dict
+    # optimistic-concurrency token: a client that echoes the rev it loaded
+    # gets a 409 (carrying the newer state) instead of silently overwriting
+    # a save it never saw; clients that omit it keep last-write-wins
+    rev: int | None = None
+
+
+_session_lock = threading.Lock()
+
+
+def _session_read() -> tuple[int, dict | None]:
+    """Stored (rev, state); (0, None) when no session exists yet.
+
+    A transient PermissionError (a reader colliding with os.replace, or an
+    indexer/AV hold on Windows) is retried and then surfaced — reporting it
+    as "no session" would hand a freshly opened window a blank state that
+    its autosave then writes over the real one."""
+    import json as _json
+    import time as _time
+    raw = None
+    for attempt in range(4):
+        try:
+            raw = SESSION_FILE.read_text(encoding="utf-8")
+            break
+        except FileNotFoundError:
+            return 0, None
+        except PermissionError:
+            if attempt == 3:
+                raise HTTPException(503, detail="session file is briefly "
+                                                "locked — try again")
+            _time.sleep(0.05 * (attempt + 1))
+    try:
+        data = _json.loads(raw)
+    except ValueError:
+        return 0, None
+    if (isinstance(data, dict) and set(data) == {"rev", "state"}
+            and isinstance(data["rev"], int)):
+        return data["rev"], data["state"]
+    return 0, data   # pre-rev file: the bare state
 
 
 @app.get("/api/session")
 def session_get():
-    if not SESSION_FILE.exists():
-        return {"state": None}
-    try:
-        import json as _json
-        return {"state": _json.loads(SESSION_FILE.read_text(encoding="utf-8"))}
-    except Exception:
-        return {"state": None}
+    rev, state = _session_read()
+    return {"state": state, "rev": rev}
 
 
 @app.post("/api/session")
@@ -742,28 +858,38 @@ def session_put(body: SessionBody):
     import json as _json
     import os as _os
     import time as _time
-    data = _json.dumps(body.state)
-    if len(data) > SESSION_MAX_BYTES:
-        raise HTTPException(422, detail="session state too large to persist")
-    SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-    # unique tmp per writer: concurrent saves (debounced autosave racing the
-    # pagehide beacon) must not collide on a shared tmp name, and os.replace
-    # on Windows can transiently fail while another writer holds the target
-    tmp = SESSION_FILE.with_name(
-        f".session.{_os.getpid()}.{threading.get_ident()}.tmp")
-    try:
-        tmp.write_text(data, encoding="utf-8")
-        for attempt in range(4):
-            try:
-                _os.replace(tmp, SESSION_FILE)
-                break
-            except PermissionError:
-                if attempt == 3:
-                    raise
-                _time.sleep(0.05 * (attempt + 1))
-    finally:
-        tmp.unlink(missing_ok=True)
-    return {"ok": True, "bytes": len(data)}
+    with _session_lock:
+        cur_rev, cur_state = _session_read()
+        if body.rev is not None and body.rev != cur_rev:
+            raise HTTPException(409, detail={
+                "message": "the session was saved by another window since "
+                           "this one loaded it",
+                "rev": cur_rev, "state": cur_state})
+        rev = cur_rev + 1
+        data = _json.dumps({"rev": rev, "state": body.state})
+        if len(data) > SESSION_MAX_BYTES:
+            raise HTTPException(422,
+                                detail="session state too large to persist")
+        SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # unique tmp per writer: concurrent saves (debounced autosave racing
+        # the pagehide beacon) must not collide on a shared tmp name, and
+        # os.replace on Windows can transiently fail while an outside reader
+        # holds the target
+        tmp = SESSION_FILE.with_name(
+            f".session.{_os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            tmp.write_text(data, encoding="utf-8")
+            for attempt in range(4):
+                try:
+                    _os.replace(tmp, SESSION_FILE)
+                    break
+                except PermissionError:
+                    if attempt == 3:
+                        raise
+                    _time.sleep(0.05 * (attempt + 1))
+        finally:
+            tmp.unlink(missing_ok=True)
+    return {"ok": True, "bytes": len(data), "rev": rev}
 
 
 # ---------- rule presets ----------

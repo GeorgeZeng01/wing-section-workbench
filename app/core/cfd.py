@@ -15,9 +15,11 @@ stack: gmsh can only end a boundary layer on a collinear continuation by
 staircasing each layer one surface cell further along the wall, which
 produces sliver quads (aspect ratio in the thousands, skewness > 10,
 non-orthogonality ~ 90 deg) that blow up simpleFoam regardless of scheme
-limiting. The moving-ground boundary layer is weak (road and freestream
-translate together) and the y+-adaptive wall functions below handle the
-wall-function-range y+ of the graded isotropic cells under the wing.
+limiting. Under a loaded wing the gap flow runs well past belt speed, so
+the moving ground DOES carry real shear there (measured y+ up to ~250 at
+fine on the aggressive 3-element case) — that is wall-function range, and
+the y+-adaptive treatment below is exactly what handles it on the graded
+isotropic cells under the wing.
 The first-layer height targets y+ ~ 1 via the flat-plate correlation
 Cf = 0.058 Re^-0.2, u_tau = U sqrt(Cf/2), h1 = 2 y+ nu / u_tau (the first
 cell CENTER sits at h1/2). The layer stack is capped at a fraction of the
@@ -40,6 +42,7 @@ serializes on a module lock and runs initialize/finalize per call.
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import sys
 import threading
@@ -52,11 +55,21 @@ from .geometry import StackConfig
 
 Y_PLUS_TARGET = 1.0
 DZ_C = 0.1                  # extrusion depth, chords (2D slab thickness)
-X_UP_C, X_DOWN_C, Y_TOP_C = 6.0, 12.0, 8.0    # domain extents, chords
-BL_CLEAR_FRAC = 0.4         # layer stack <= this share of tightest clearance
+# 16 chords of headroom: an A/B on the aggressive 3-element case (Cl ~ 7.5)
+# measured the 8-chord slip ceiling inflating Cl ~5% and Cd far more —
+# tunnel confinement, not physics. Doubling the height costs only ~6% more
+# cells (the far field is coarse), so the taller box is close to free.
+X_UP_C, X_DOWN_C, Y_TOP_C = 6.0, 12.0, 16.0   # domain extents, chords
+BL_CLEAR_FRAC = 0.4         # layer stack <= this share of ITS OWN clearance
+SLOT_GAP_CELLS = 8          # minimum cells across each slot jet
+MESH_SURFACE_MIN_N = 140    # wall polyline nodes/side for meshing (see
+                            # build_case: decoupled from the panel count)
 TURB_INTENSITY = 0.01       # inlet turbulence intensity (on-track air)
 TURB_VISC_RATIO = 10.0      # inlet nut/nu, sets omega
-N_ITERS = 3000
+# high-lift stacks converge on force history around 8-11k iterations; the
+# old 3000 default truncated exported runs mid-transient (the in-app runs
+# stop on force drift instead, so the cap rarely binds there)
+N_ITERS = 8000
 
 # wall/far sizes in chords; targets ~15k/40k/90k 2D cells on the default
 # two-element stack (calibrated)
@@ -114,7 +127,8 @@ def _closed_poly_m(coords_c: np.ndarray, chord_m: float) -> tuple[np.ndarray, bo
 
 
 def _build_mesh(cfg: StackConfig, polys: list[tuple[np.ndarray, bool]],
-                msh_path: Path, preset: dict, min_clear_c: float,
+                msh_path: Path, preset: dict, bl_caps_c: list[float],
+                slot_boxes: list[tuple[float, float, float, float, float]],
                 saved_path: str | None = None) -> dict:
     import gmsh
     c = cfg.chord_m
@@ -147,7 +161,7 @@ def _build_mesh(cfg: StackConfig, polys: list[tuple[np.ndarray, bool]],
             wing_lines.append(lines)
             loops.append(occ.addCurveLoop(lines))
             # fans keep the BL valid around the convex TE corner(s)
-            fan_pts += [pts[0], pts[-1]] if blunt else [pts[0]]
+            fan_pts.append([pts[0], pts[-1]] if blunt else [pts[0]])
         surf = occ.addPlaneSurface([occ.addCurveLoop(edges)] + loops)
         ext = occ.extrude([(2, surf)], 0.0, 0.0, DZ_C * c,
                           numElements=[1], heights=[1.0], recombine=True)
@@ -182,7 +196,26 @@ def _build_mesh(cfg: StackConfig, polys: list[tuple[np.ndarray, bool]],
         f.setNumber(thr, "SizeMax", preset["far"] * c)
         f.setNumber(thr, "DistMin", 0.02 * c)
         f.setNumber(thr, "DistMax", 3.0 * c)
-        f.setAsBackgroundMesh(thr)
+        # slot jets need cells to exist in: the wall-graded background alone
+        # left ~2 cells across a 1.3%c gap on the coarse preset, which cannot
+        # carry the jet that keeps a deflected flap attached — a measured
+        # driver of the coarse mesh reading low on slotted stacks
+        size_fields = [thr]
+        for bx0, bx1, by0, by1, size_m in slot_boxes:
+            box = f.add("Box")
+            f.setNumber(box, "XMin", bx0)
+            f.setNumber(box, "XMax", bx1)
+            f.setNumber(box, "YMin", by0)
+            f.setNumber(box, "YMax", by1)
+            f.setNumber(box, "ZMin", -c)
+            f.setNumber(box, "ZMax", c)
+            f.setNumber(box, "VIn", size_m)
+            f.setNumber(box, "VOut", preset["far"] * c)
+            f.setNumber(box, "Thickness", 4.0 * size_m)
+            size_fields.append(box)
+        bg = f.add("Min")
+        f.setNumbers(bg, "FieldsList", size_fields)
+        f.setAsBackgroundMesh(bg)
         gmsh.option.setNumber("Mesh.MeshSizeExtendFromBoundary", 0)
         gmsh.option.setNumber("Mesh.MeshSizeFromPoints", 0)
         gmsh.option.setNumber("Mesh.MeshSizeFromCurvature", 0)
@@ -190,24 +223,47 @@ def _build_mesh(cfg: StackConfig, polys: list[tuple[np.ndarray, bool]],
         # wing curves ONLY: they are closed loops, so the layer stack has no
         # open end. A ground stack would have to terminate mid-line, which
         # gmsh staircases into near-degenerate slivers (see module docstring)
-        bl = f.add("BoundaryLayer")
-        f.setNumbers(bl, "CurvesList", flat)
-        f.setNumber(bl, "Size", h1)
-        f.setNumber(bl, "Ratio", preset["bl_ratio"])
-        f.setNumber(bl, "Thickness",
-                    min(preset["bl_thick"], BL_CLEAR_FRAC * min_clear_c) * c)
-        f.setNumber(bl, "Quads", 1)
-        f.setNumbers(bl, "FanPointsList", fan_pts)
-        f.setAsBoundaryLayer(bl)
+        def add_bl(lines, fans, thickness_c):
+            bl = f.add("BoundaryLayer")
+            f.setNumbers(bl, "CurvesList", lines)
+            f.setNumber(bl, "Size", h1)
+            f.setNumber(bl, "Ratio", preset["bl_ratio"])
+            f.setNumber(bl, "Thickness", thickness_c * c)
+            f.setNumber(bl, "Quads", 1)
+            f.setNumbers(bl, "FanPointsList", fans)
+            f.setAsBoundaryLayer(bl)
+            return bl
 
-        bl_used = True
+        # one stack per element, each capped by ITS OWN nearest clearance:
+        # a global min-clearance cap starved every element's stack to the
+        # tightest slot gap (0.4 x 1.3%c covers ~19% of the main element's
+        # physical BL). Opposing stacks across a slot still cannot collide —
+        # both sides of a gap carry that gap in their own clearance set.
+        per_elem = [min(preset["bl_thick"], BL_CLEAR_FRAC * cap)
+                    for cap in bl_caps_c]
+        bl_tags = [add_bl(lines, fans, t) for lines, fans, t
+                   in zip(wing_lines, fan_pts, per_elem)]
+        bl_mode = "per-element"
         try:
             gmsh.model.mesh.generate(3)
         except Exception:
+            # gmsh's BoundaryLayer is its most fragile feature: retry with
+            # the old single global stack, then with pure refinement — the
+            # y+-adaptive wall treatment keeps all three cases correct
             gmsh.model.mesh.clear()
-            f.remove(bl)
-            bl_used = False
-            gmsh.model.mesh.generate(3)
+            for t in bl_tags:
+                f.remove(t)
+            bl_mode = "global"
+            bl = add_bl(flat, [p for fans in fan_pts for p in fans],
+                        min(per_elem))
+            try:
+                gmsh.model.mesh.generate(3)
+            except Exception:
+                gmsh.model.mesh.clear()
+                f.remove(bl)
+                bl_mode = None
+                gmsh.model.mesh.generate(3)
+        bl_used = bl_mode is not None
 
         types2, tags2, _ = gmsh.model.mesh.getElements(2, surf)
         n_quads = sum(len(t) for ty, t in zip(types2, tags2) if ty == 3)
@@ -220,7 +276,8 @@ def _build_mesh(cfg: StackConfig, polys: list[tuple[np.ndarray, bool]],
         gmsh.option.setNumber("Mesh.MshFileVersion", 2.2)
         gmsh.write(str(msh_path))
         return {"n_cells": int(n_cells), "n_quads": int(n_quads),
-                "n_tris": int(n_tris), "bl_used": bl_used}
+                "n_tris": int(n_tris), "bl_used": bl_used,
+                "bl_mode": bl_mode}
     finally:
         gmsh.finalize()
 
@@ -274,6 +331,25 @@ functions
         magUInf         {cfg.speed_ms:g};
         lRef            {cfg.chord_m:g};        // main chord
         Aref            {cfg.chord_m * dz:g};   // main chord x slab depth
+    }}
+
+    // wall diagnostics beside every written field set: measured y+ (the
+    // wall-treatment claim is checkable, not assumed) and wall shear
+    // stress (reversed tau_x on a suction side = separation — the studio
+    // reads attachment state from it, which a bare Cl cannot show)
+    yPlus1
+    {{
+        type            yPlus;
+        libs            (fieldFunctionObjects);
+        writeControl    writeTime;
+        log             no;
+    }}
+    wallShearStress1
+    {{
+        type            wallShearStress;
+        libs            (fieldFunctionObjects);
+        writeControl    writeTime;
+        log             no;
     }}
 }}
 """
@@ -627,7 +703,10 @@ set -e
 # is a full, reproducible solve.
 if ls -d [0-9]*.[0-9]* [1-9]* postProcessing 2>/dev/null | grep -q .; then
     echo "== previous run detected - resetting the case to a clean start"
-    rm -rf postProcessing processor* constant/polyMesh
+    # flow_*.png / results.txt describe the PREVIOUS solve - stale beside
+    # a fresh one
+    rm -rf postProcessing processor* constant/polyMesh \
+        results.txt flow_umag.png flow_cp.png
     find . -maxdepth 1 -regextype posix-extended -type d \
         -regex '\./[0-9]+(\.[0-9]+)?' ! -name 0 -exec rm -rf {{}} +
 fi
@@ -668,10 +747,30 @@ fi
     grep '^#' "$COEF" | tail -1
     tail -1 "$COEF"
     # steady RANS on a high-lift section often settles into a bounded limit
-    # cycle instead of a point value: the tail mean is the number to trust
-    grep -v '^#' "$COEF" | tail -500 | awk \\
-        '{{cd+=$2; cl+=$5; n++}}
-         END {{if (n) printf "# mean of last %d iterations:  Cd = %.5g   Cl = %.5g\\n", n, cd/n, cl/n}}'
+    # cycle: the tail mean is the number to trust — but ONLY once the
+    # history is flat. A drifting tail mean is a transient snapshot, so the
+    # drift between the last two half-windows is printed with the mean and
+    # a still-trending run is flagged instead of presented as a result.
+    grep -v '^#' "$COEF" | tail -1000 | awk \\
+        '{{cl[NR]=$5; cd[NR]=$2; n=NR}}
+         END {{
+            if (!n) exit
+            h = int(n / 2); if (h < 1) exit
+            m1 = 0; for (i = 1; i <= h; i++) m1 += cl[i]; m1 /= h
+            m2 = 0; cdm = 0
+            for (i = h + 1; i <= n; i++) {{ m2 += cl[i]; cdm += cd[i] }}
+            m2 /= (n - h); cdm /= (n - h)
+            printf "# mean of last %d iterations:  Cd = %.5g   Cl = %.5g\\n", n - h, cdm, m2
+            ref = m2; if (ref < 0) ref = -ref; if (ref < 0.05) ref = 0.05
+            d = (m2 - m1) / ref
+            printf "# Cl drift over the trailing %d iterations: %+.2f%%\\n", n, d * 100
+            if (d < 0) d = -d
+            if (d > 0.003) {{
+                printf "# WARNING: NOT CONVERGED - the force history is still trending, so\\n"
+                printf "# the mean above is a transient snapshot (biased low on a rising\\n"
+                printf "# history). Raise endTime in system/controlDict and rerun.\\n"
+            }}
+         }}'
 }} > results.txt
 echo "== results.txt"
 cat results.txt
@@ -704,22 +803,28 @@ From Windows (the case must sit on a drive WSL can see):
 The script sources the newest OpenFOAM under /usr/lib/openfoam, converts
 the mesh (gmshToFoam), fixes patch types (frontAndBack -> empty, ground
 and wing patches -> wall), runs checkMesh, initializes with potentialFoam,
-then simpleFoam (steady, k-omega SST, up to {n_iters} iterations with
-residual stopping) and writes results.txt. Rerunning the script resets
-the case to a clean start first (previous time directories and
-postProcessing are removed), so every run is a full, reproducible solve.
+then simpleFoam (steady, k-omega SST, up to {n_iters} iterations) and
+writes results.txt. The residualControl thresholds are a backstop that
+does not fire on a loaded high-lift case — expect the run to use the full
+iteration budget, and read the drift verdict in results.txt. Rerunning
+the script resets the case to a clean start first (previous time
+directories, postProcessing and stale result artifacts are removed), so
+every run is a full, reproducible solve.
 
 RESULTS
 -------
 results.txt carries the final row of postProcessing/forceCoeffs1/.../
-coefficient.dat under its column header, plus the mean of the last 500
-iterations. liftDir is (0 -1 0), so Cl POSITIVE = DOWNFORCE.
-Coefficients are referenced to the main chord ({cfg.chord_m:g} m), the
-slab depth ({DZ_C * cfg.chord_m:g} m; Aref = chord x depth) and the
-freestream dynamic pressure. Sectional downforce per unit span:
-L' = Cl * 0.5 * rho * U^2 * c. Steady RANS on a heavily loaded section
-often ends in a bounded oscillation rather than a point value - check
-the convergence history in coefficient.dat and prefer the tail mean.
+coefficient.dat under its column header, the mean of the last 500
+iterations, and the Cl drift across the trailing 1000 — a NOT CONVERGED
+banner means the mean is a transient snapshot (biased low on a rising
+history): raise endTime and rerun. liftDir is (0 -1 0), so Cl POSITIVE
+= DOWNFORCE. Coefficients are referenced to the main chord
+({cfg.chord_m:g} m), the slab depth ({DZ_C * cfg.chord_m:g} m;
+Aref = chord x depth) and the freestream dynamic pressure. Sectional
+downforce per unit span: L' = Cl * 0.5 * rho * U^2 * c. Steady RANS on
+a heavily loaded section often ends in a bounded oscillation rather
+than a point value - check the convergence history in coefficient.dat
+and prefer the tail mean once the drift verdict is clean.
 Compare against the studio's estimate and recalibrate its k_g /
 viscous-efficiency knobs with the result.
 
@@ -730,7 +835,17 @@ CASE NOTES
   fixedValue, not noSlip).
 - Wall treatment is y+-adaptive (omegaWallFunction, kLowReWallFunction,
   nutUSpaldingWallFunction) - valid on the resolved boundary-layer mesh
-  and on the pure-refinement fallback alike.
+  and on the pure-refinement fallback alike. The yPlus1 function object
+  writes the measured y+ beside each field set — check it rather than
+  trusting the flat-plate target on the mesh summary.
+- Turbulence is FULLY-TURBULENT k-omega SST: no transition modeling. An
+  A/B on the aggressive 3-element case showed the gamma-ReThetat
+  transition model reading ~26% HIGHER Cl (long laminar runs thin the
+  boundary layers), so the fully-turbulent setup is the conservative
+  choice at these Reynolds numbers, not an optimistic one.
+- wallShearStress1 writes the wall shear field beside each field set:
+  reversed tau_x along a suction side marks separation — the sanity
+  check a bare Cl number cannot give you.
 - Wing patches: {', '.join(wings)}. Per-element forces: duplicate the
   forceCoeffs block in system/controlDict with a single patch.
 - 2D: the mesh is one cell thick in z; frontAndBack is 'empty'.
@@ -744,8 +859,11 @@ def build_case(cfg: StackConfig, out_dir: Path, mesh_size: str = "medium",
                n_iters: int = N_ITERS) -> dict:
     """Write a complete, ready-to-run OpenFOAM case into out_dir.
 
-    n_iters caps the simpleFoam iteration count (residual stopping usually
-    finishes earlier) — the in-app Docker verification runs pass it through.
+    n_iters caps the simpleFoam iteration count. The residualControl
+    thresholds in fvSolution never fire on a loaded high-lift case (initial
+    residuals plateau above them), so an exported run goes the full
+    n_iters; results.txt reports the tail drift so a still-trending run is
+    flagged. The in-app Docker runs stop on force drift instead.
     Returns a summary: cell count, y+ estimate, patch and file lists."""
     if mesh_size not in MESH_PRESETS:
         raise ValueError(f"mesh_size must be one of {sorted(MESH_PRESETS)}")
@@ -756,6 +874,14 @@ def build_case(cfg: StackConfig, out_dir: Path, mesh_size: str = "medium",
     design = geometry.build_stack(cfg)
     if any(e["intersects"] for e in design):
         raise ValueError("elements intersect — open the slots before meshing")
+    # the wall polyline is meshed as straight facets, so its node count is
+    # the surface resolution for EVERY preset — decoupled from the panel
+    # count here (the solver's 70/side leaves ~8 mm facets on the main
+    # element; the flow solution deserves better even when the panel
+    # method doesn't need it). Same underlying section, denser sampling.
+    if cfg.n_panels_per_side < MESH_SURFACE_MIN_N:
+        design = geometry.build_stack(dataclasses.replace(
+            cfg, n_panels_per_side=MESH_SURFACE_MIN_N))
     installed = geometry.install_stack(design, cfg.ride_height_c)
     polys = [_closed_poly_m(e["coords"], cfg.chord_m) for e in installed]
     # the domain is a fixed box (Y_TOP_C chords tall): a validated config can
@@ -771,8 +897,30 @@ def build_case(cfg: StackConfig, out_dir: Path, mesh_size: str = "medium",
             f"the installed section (top at {y_top_c:.2f} chords above the "
             f"ground) does not fit the CFD domain ({Y_TOP_C:g} chords tall) "
             f"with clearance — reduce the ride height relative to the chord")
-    min_clear_c = min([cfg.ride_height_c]
-                      + [e["slot_gap"] for e in installed if "slot_gap" in e])
+    # each element's boundary-layer stack is capped by the clearances IT
+    # actually faces: its own ground clearance and the slot gaps on either
+    # side of it (both sides of a gap carry that gap, so opposing stacks
+    # cannot collide across it)
+    gaps = [e.get("slot_gap") for e in installed]
+    bl_caps_c = []
+    for i, e in enumerate(installed):
+        own = [float(e["coords"][:, 1].min())]
+        if gaps[i] is not None:
+            own.append(gaps[i])
+        if i + 1 < len(installed) and gaps[i + 1] is not None:
+            own.append(gaps[i + 1])
+        bl_caps_c.append(max(min(own), 1e-4))
+    # refinement box over each slot throat (centred on the flap LE) so the
+    # jet is carried by >= SLOT_GAP_CELLS cells on every preset
+    slot_boxes = []
+    for i, e in enumerate(installed):
+        if gaps[i] is None:
+            continue
+        g_m = gaps[i] * cfg.chord_m
+        le = e["coords"][int(np.argmin(e["coords"][:, 0]))] * cfg.chord_m
+        r = 3.0 * g_m
+        slot_boxes.append((le[0] - r, le[0] + r, max(le[1] - r, 0.0),
+                           le[1] + r, g_m / SLOT_GAP_CELLS))
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -780,7 +928,7 @@ def build_case(cfg: StackConfig, out_dir: Path, mesh_size: str = "medium",
         saved_path = _real_env_path()
         try:
             stats = _build_mesh(cfg, polys, out_dir / "mesh.msh", preset,
-                                min_clear_c, saved_path)
+                                bl_caps_c, slot_boxes, saved_path)
         except MeshError:
             raise
         except Exception as e:
@@ -789,7 +937,10 @@ def build_case(cfg: StackConfig, out_dir: Path, mesh_size: str = "medium",
             _restore_env_path(saved_path)
 
     h1, u_tau = first_layer(cfg)
-    # fallback meshes put the first cell center at half the isotropic wall size
+    # fallback meshes put the first cell center at half the isotropic wall
+    # size. The estimate is a flat-plate TARGET at the chord Re — suction
+    # peaks run several times higher; the solved yPlus field (yPlus1
+    # function object) is the measured value.
     y_plus = Y_PLUS_TARGET if stats["bl_used"] \
         else 0.5 * preset["wall"] * cfg.chord_m * u_tau / cfg.nu
     wings = [f"wing_e{i+1}" for i in range(len(installed))]
@@ -799,6 +950,7 @@ def build_case(cfg: StackConfig, out_dir: Path, mesh_size: str = "medium",
         "n_cells": stats["n_cells"],
         "n_bl_quads": stats["n_quads"],
         "boundary_layer": stats["bl_used"],
+        "bl_mode": stats["bl_mode"],
         "first_layer_mm": round(h1 * 1e3, 4),
         "y_plus_est": round(y_plus, 2),
         "re_main_chord": int(round(cfg.speed_ms * cfg.chord_m / cfg.nu)),

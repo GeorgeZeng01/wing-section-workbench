@@ -80,6 +80,11 @@ def main():
     check("front sources are clean archive entries",
           all(a is not None and a["penalty"] < optimizer.PEN_OK
               for a in src))
+    # the pool gate is raw band membership, not just the smooth penalty:
+    # out-of-band entries carry the pen_gate bump and must not seed the front
+    check("front sources pass the raw-band clean gate",
+          all(a is not None and a.get("pen_gate", 99.0) < optimizer.PEN_OK
+              for a in src))
 
     cloud = s["cloud"] or []
     check("snapshot carries the trade-off cloud",

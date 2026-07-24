@@ -78,6 +78,10 @@ check("candidates expose the viscous-trust flags",
           and isinstance(c["summary"]["near_stall"], bool) for c in cands),
       f"(conf_min {[c['summary'] and c['summary']['confidence_min'] for c in cands]})")
 
+check("candidates carry the hard loading-band badge",
+      all(isinstance((c["summary"] or {}).get("past_load_band"), bool)
+          for c in cands))
+
 # configs must round-trip through the analysis pipeline (what Apply does)
 from app.core import analysis, geometry  # noqa: E402
 ok_apply = True
@@ -204,11 +208,87 @@ try:
         "at_grid_edge": [True, False]}
     job_p.objective(x0)
     pen_flagged = job_p.archive[-1]["penalty"]
+
+    # the clean-pool gate must test RAW band membership: a design 10% past
+    # the 1.05 loading band carries only 40*0.10^2 = 0.4 in smooth penalty
+    # (below PEN_OK) but may not read as clean
+    optimizer.analysis.quick_objective_eval = lambda cfg, **kw: {
+        **_base_ev, "fracs": [1.15, 0.4], "load_excess": 0.01}
+    job_p.objective(x0)
+    band_entry = job_p.archive[-1]
+
+    # baseline trust credit must be per element/signal: a baseline flagged
+    # on the MAIN element cannot pay for a fresh flag on the FLAP
+    job_p.conf_pen0 = optimizer._confidence_parts(
+        {"confidences": [0.9, 0.9], "fracs": [0.95, 0.4],
+         "at_grid_edge": [True, False], "cd_capped": [False, False]},
+        job_p.min_conf)
+    optimizer.analysis.quick_objective_eval = lambda cfg, **kw: {
+        **_base_ev, "fracs": [0.4, 0.95], "at_grid_edge": [False, True]}
+    job_p.objective(x0)
+    pen_cross = job_p.archive[-1]["penalty"]
+    optimizer.analysis.quick_objective_eval = lambda cfg, **kw: {
+        **_base_ev, "fracs": [0.95, 0.4], "at_grid_edge": [True, False]}
+    job_p.objective(x0)
+    pen_same = job_p.archive[-1]["penalty"]
+    job_p.conf_pen0 = []
 finally:
     optimizer.analysis.quick_objective_eval = _orig_eval
 check("objective charges the trust penalty (and only the flagged design)",
       pen_clean == 0.0 and abs(pen_flagged - _expect) < 1e-9,
       f"(clean {pen_clean}, flagged {pen_flagged:.3f})")
+check("out-of-band design fails the clean gate despite a sub-PEN_OK penalty",
+      band_entry["penalty"] < optimizer.PEN_OK
+      and band_entry["pen_gate"] >= optimizer.PEN_OK,
+      f"(penalty {band_entry['penalty']:.3f}, "
+      f"pen_gate {band_entry['pen_gate']:.3f})")
+check("baseline trust credit does not transfer across elements",
+      abs(pen_cross - optimizer.FLAG_BUMP) < 1e-9 and pen_same == 0.0,
+      f"(cross {pen_cross:.3f}, same {pen_same:.3f})")
+
+# ---- current() re-attach order -------------------------------------------
+# a just-created job is "pending" with t_start None until its thread runs;
+# it must still outrank an older RUNNING job or the UI re-attaches wrong
+import time as _time  # noqa: E402
+_saved_jobs = dict(optimizer._jobs)
+try:
+    j_old = optimizer.Job(dict(CFG), {"target_downforce_n": TARGET})
+    j_new = optimizer.Job(dict(CFG), {"target_downforce_n": TARGET})
+    j_old.state = "running"
+    j_old.t_start = _time.time() - 30
+    optimizer._jobs.clear()
+    optimizer._jobs.update({j_old.id: j_old, j_new.id: j_new})
+    cur = optimizer.current()
+finally:
+    optimizer._jobs.clear()
+    optimizer._jobs.update(_saved_jobs)
+check("current() prefers the newest job even while it is still pending",
+      cur["job_id"] == j_new.id and cur["state"] == "pending", f"({cur})")
+
+# ---- shortlist drag slot runs at the element's working CL ----------------
+from app.core import screener  # noqa: E402
+_seen_cl = []
+_real_screen = screener.screen
+
+
+def _rec_screen(re_, ncrit=9.0, cl_ref=1.5, **kw):
+    _seen_cl.append(cl_ref)
+    return _real_screen(re_, ncrit, cl_ref=cl_ref, **kw)
+
+
+screener.screen = _rec_screen
+try:
+    optimizer.build_airfoil_shortlists(CFG,
+                                       geometry.StackConfig.from_dict(CFG))
+finally:
+    screener.screen = _real_screen
+_r0 = analysis.analyze(geometry.StackConfig.from_dict(CFG),
+                       include_geometry=False)
+_cl_work = [min(max(round(e["Cl_operating"], 1), 0.5), 2.5)
+            for e in _r0["elements"]]
+check("shortlist drag ranking runs at each element's working CL",
+      _seen_cl == _cl_work and any(abs(c - 1.5) > 0.05 for c in _seen_cl),
+      f"(cl_ref {_seen_cl}, working {_cl_work})")
 
 # determinism: identical inputs must give the identical result
 job2 = optimizer.Job(CFG, {"target_downforce_n": TARGET,

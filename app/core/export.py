@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import zipfile
 from datetime import date
 
@@ -113,7 +114,12 @@ def dxf_bytes(cfg: StackConfig, frame: str = "installed",
 
 
 def dat_text(coords: np.ndarray, name: str) -> str:
-    lines = [name]
+    # the name is the payload's first line: an uploaded display name with an
+    # embedded newline would inject lines that Selig parsers read as real
+    # contour points
+    clean = re.sub(r"[\x00-\x1f\x7f]", " ", str(name))
+    clean = re.sub(r"\s+", " ", clean).strip()[:80].rstrip() or "airfoil"
+    lines = [clean]
     lines += [f" {x:.6f} {y:.6f}" for x, y in np.asarray(coords, float)]
     return "\n".join(lines) + "\n"
 

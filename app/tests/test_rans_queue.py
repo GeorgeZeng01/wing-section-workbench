@@ -1,18 +1,34 @@
-"""RANS re-rank queue: sequential shortlist verification with measured
-re-ranking, verdict classes tied to the recorded calibration bands, an
-eager rule gate, and a single-queue guard. All solver interaction is
-faked through the cfd_run._popen seam — no docker involved.
+"""RANS re-rank queue: sequential shortlist verification with
+objective-consistent re-ranking, verdict classes tied to the recorded
+calibration bands (fine mesh only — coarse/medium demote to screening),
+an eager rule gate, a single-queue guard, crash reconciliation, and
+prune protection for every row's retained case. All solver interaction
+is faked through the cfd_run._popen seam — no docker involved.
 
 Run directly:  python app/tests/test_rans_queue.py
 """
+import os
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+# isolation BEFORE any app.core import: cfd_run resolves its runs dir from
+# WSS_DATA_DIR at call time, and without this the suite writes fabricated
+# run dirs into the real app_data/rans and PRUNES the user's retained cases
+os.environ["WSS_DATA_DIR"] = tempfile.mkdtemp(prefix="wss-rans-queue-test-")
 from app.core import cfd_run, rans_queue  # noqa: E402
+from app.core.geometry import StackConfig  # noqa: E402
+
+_RUNS = cfd_run._runs_dir().resolve()
+_REAL = (ROOT / "app_data").resolve()
+if _RUNS == _REAL or _REAL in _RUNS.parents:
+    print(f"FAIL  isolation: runs dir {_RUNS} resolves inside the repo's "
+          f"real app_data — refusing to run")
+    sys.exit(1)
 
 results = []
 
@@ -33,6 +49,12 @@ CFG_D = {
 CFG_D2 = {**CFG_D, "stack_aoa_deg": 1.0}
 
 
+def downforce_at_cl(cl):
+    cfg = StackConfig.from_dict(CFG_D)
+    area = cfg.chord_m * (cfg.span_mm / 1000.0)
+    return cfg.q_pa * area * cl * cfg.efficiency_3d
+
+
 def fake_build_case(cfg, case_dir, mesh_size, n_iters=10000):
     case_dir.mkdir(parents=True, exist_ok=True)
     return {"n_cells": 1000, "mesh_size": mesh_size, "n_iters": n_iters}
@@ -46,9 +68,10 @@ def fake_availability(refresh=False):
 class FlatProc:
     """Fake solver: writes a flat force history (converges by residuals,
     below the cap) and exits cleanly after a few polls."""
-    def __init__(self, case_dir, cl, polls=3):
+    def __init__(self, case_dir, cl, cd=0.2, polls=3):
         self.case = case_dir
         self.cl = cl
+        self.cd = cd
         self.polls_to_exit = polls
         self.returncode = None
         self._polls = 0
@@ -58,8 +81,10 @@ class FlatProc:
         cdir = self.case / "postProcessing" / "forceCoeffs1" / "0"
         cdir.mkdir(parents=True, exist_ok=True)
         lines = ["# Time Cd Cd(f) Cd(r) Cl Cl(f) Cl(r)"]
-        lines += [f"{i + 1} 0.2 0.1 0.1 {self.cl:.4f} 1 1"
-                  for i in range(150)]
+        # long enough that the drift verdict sees a flat history past the
+        # FORCE_STOP_SKIP transient exclusion
+        lines += [f"{i + 1} {self.cd:.4f} 0.1 0.1 {self.cl:.4f} 1 1"
+                  for i in range(1500)]
         (cdir / "coefficient.dat").write_text("\n".join(lines) + "\n")
         if self._polls >= self.polls_to_exit:
             self.returncode = 0
@@ -75,8 +100,8 @@ class FlatProc:
 
 class _Patched:
     """The cfd_run._popen convention, applied to queue runs."""
-    def __init__(self, cl_by_call=(2.5, 3.0), polls=3):
-        self.cl_by_call = list(cl_by_call)
+    def __init__(self, runs=((2.5, 0.2), (3.0, 0.2)), polls=3):
+        self.runs = list(runs)
         self.polls = polls
         self.calls = 0
 
@@ -92,13 +117,12 @@ class _Patched:
             "R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
         def popen(cmd, **kw):
-            cl = self.cl_by_call[min(self.calls,
-                                     len(self.cl_by_call) - 1)]
+            cl, cd = self.runs[min(self.calls, len(self.runs) - 1)]
             self.calls += 1
             # the -v mount argument carries the case dir
             case = Path(next(a for a in cmd if ":/case" in str(a))
                         .split(":/case")[0])
-            return FlatProc(case, cl, self.polls)
+            return FlatProc(case, cl, cd, self.polls)
         cfd_run._popen = popen
         return self
 
@@ -118,20 +142,40 @@ def wait_queue(timeout=30.0):
     return q.snapshot()
 
 
+def wait_solver_idle(timeout=10.0):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if cfd_run.current()["state"] not in ("pending", "running"):
+            return
+        time.sleep(0.02)
+
+
 def main():
+    check("suite runs against an isolated data dir (not app_data)",
+          _REAL not in _RUNS.parents and _RUNS != _REAL, f"({_RUNS})")
+
     # ---- verdict classification against the recorded bands ----
-    check("classify: healthy band",
-          rans_queue.classify({"converged": True, "delta_cl_pct": -14.2})
-          == "healthy band")
-    check("classify: over-claims",
-          rans_queue.classify({"converged": True, "delta_cl_pct": -30.0})
-          == "over-claims")
-    check("classify: conservative",
-          rans_queue.classify({"converged": True, "delta_cl_pct": 35.0})
-          == "conservative")
+    check("classify: healthy band (fine)",
+          rans_queue.classify({"converged": True, "delta_cl_pct": -14.2},
+                              "fine") == "healthy band")
+    check("classify: over-claims (fine)",
+          rans_queue.classify({"converged": True, "delta_cl_pct": -30.0},
+                              "fine") == "over-claims")
+    check("classify: conservative (fine)",
+          rans_queue.classify({"converged": True, "delta_cl_pct": 35.0},
+                              "fine") == "conservative")
     check("classify: no verdict without convergence",
-          rans_queue.classify({"converged": False, "delta_cl_pct": -14.0})
-          .startswith("no verdict"))
+          rans_queue.classify({"converged": False, "delta_cl_pct": -14.0},
+                              "fine").startswith("no verdict"))
+    # the calibrated bands are fine-mesh classes: coarse read a validated
+    # point 29% low (and 33% high at 90 mm), medium scattered -2..-20% —
+    # a clean -14% design would be branded "over-claims" on either
+    check("classify: coarse demotes to screening wording",
+          rans_queue.classify({"converged": True, "delta_cl_pct": -43.0},
+                              "coarse").startswith("screening only"))
+    check("classify: medium demotes to screening wording",
+          rans_queue.classify({"converged": True, "delta_cl_pct": -14.2},
+                              "medium").startswith("screening only"))
 
     # ---- eager validation ----
     try:
@@ -152,9 +196,15 @@ def main():
         check("empty queue is refused", False)
     except ValueError:
         check("empty queue is refused", True)
+    try:
+        rans_queue.QueueJob([{"config": CFG_D}], objective="fastest")
+        check("unknown ranking objective is refused", False)
+    except ValueError:
+        check("unknown ranking objective is refused", True)
 
-    # ---- end to end: two items, ranked by measured downforce ----
-    with _Patched(cl_by_call=(2.5, 3.0)):
+    # ---- end to end: two items, no source run in-process, so the queue
+    # falls back to measured-downforce ranking ----
+    with _Patched(runs=((2.5, 0.2), (3.0, 0.2))):
         rans_queue.start([{"label": "cand A", "config": CFG_D},
                           {"label": "cand B", "config": CFG_D2}],
                          "medium", 300)
@@ -173,14 +223,145 @@ def main():
     check("rows carry measured numbers and verdicts",
           all(r["cl_rans"] is not None and r["rans_downforce_n"] is not None
               and r["verdict"] is not None and r["converged"] for r in rows))
+    check("rows carry the measured drag force",
+          all(r["drag_rans_n"] is not None and r["drag_rans_n"] > 0
+              for r in rows))
     check("panel claim column is populated",
           all(r["panel_downforce_n"] is not None for r in rows))
-    check("re-rank follows MEASURED downforce (cand B solved higher Cl)",
+    check("fallback re-rank follows MEASURED downforce (B solved higher)",
           rows[1]["rank"] == 1 and rows[0]["rank"] == 2,
           f"(ranks {[r['rank'] for r in rows]}, "
           f"cl {[r['cl_rans'] for r in rows]})")
-    check("medium mesh rows carry no coarse caution",
-          all(r["mesh_caution"] is False for r in rows))
+    check("medium mesh rows carry the screening caution",
+          all(r["mesh_caution"] is True for r in rows))
+    check("medium mesh verdicts are screening-grade, not calibrated",
+          all(r["verdict"].startswith("screening only") for r in rows))
+    check("snapshot names the ranking objective",
+          snap["objective"] in ("target", "max_downforce"))
+
+    # ---- target-mode shortlist: rank by measured drag AT the level, not
+    # by overshoot. C overshoots the target 20% on the lowest Cd and must
+    # NOT outrank the on-level rows; among those, B wins on drag. ----
+    target = downforce_at_cl(2.5)
+    with _Patched(runs=((2.50, 0.20), (2.52, 0.15), (3.00, 0.10))):
+        rans_queue.start([{"label": "A", "config": CFG_D},
+                          {"label": "B", "config": CFG_D2},
+                          {"label": "C", "config": CFG_D}],
+                         "fine", 300, objective="target",
+                         target_downforce_n=target)
+        snap_t = wait_queue()
+    rt = snap_t["rows"]
+    check("target queue completes",
+          snap_t["state"] == "done"
+          and all(r["state"] == "done" for r in rt),
+          f"(state {snap_t['state']})")
+    check("target re-rank: lowest drag ON the level wins",
+          rt[1]["rank"] == 1 and rt[0]["rank"] == 2,
+          f"(ranks {[r['rank'] for r in rt]}, "
+          f"drag {[r['drag_rans_n'] for r in rt]})")
+    check("target re-rank: the overshooter ranks last despite lowest Cd",
+          rt[2]["rank"] == 3,
+          f"(C dn {rt[2]['rans_downforce_n']} vs target {target:.1f})")
+    check("fine mesh rows carry calibrated verdicts and no caution",
+          all(r["mesh_caution"] is False
+              and not r["verdict"].startswith("screening") for r in rt))
+
+    # ---- crash mid-queue: the in-flight solve is cancelled and the
+    # remaining rows are reconciled instead of staying 'queued' inside a
+    # 'failed' queue ----
+    wait_solver_idle()
+    real_get = cfd_run.get
+    state = {"calls": 0, "cancelled": []}
+
+    def boom_get(jid):
+        job = real_get(jid)
+        if job is None:
+            return None
+        state["calls"] += 1
+        if state["calls"] >= 2:
+            class Boom:
+                def snapshot(self):
+                    raise RuntimeError("registry evicted mid-poll")
+
+                def cancel(self):
+                    state["cancelled"].append(jid)
+                    job.cancel()
+            return Boom()
+        return job
+
+    cfd_run.get = boom_get
+    try:
+        with _Patched(runs=((2.5, 0.2),) * 3):
+            rans_queue.start([{"label": "r1", "config": CFG_D},
+                              {"label": "r2", "config": CFG_D2},
+                              {"label": "r3", "config": CFG_D}],
+                             "medium", 300)
+            snap_c = wait_queue()
+    finally:
+        cfd_run.get = real_get
+    rc = snap_c["rows"]
+    check("crashed queue fails with the cause named",
+          snap_c["state"] == "failed"
+          and "registry evicted" in (snap_c["error"] or ""),
+          f"({(snap_c['error'] or '')[:60]})")
+    check("crash reconciliation: running row failed, later rows skipped",
+          [r["state"] for r in rc] == ["done", "failed", "skipped"],
+          f"({[r['state'] for r in rc]})")
+    check("crash path cancelled the in-flight solver job",
+          len(state["cancelled"]) >= 1, f"({state['cancelled']})")
+    wait_solver_idle()
+
+    # ---- registry eviction between start and first poll: the row fails
+    # alone (no AttributeError crash), earlier work and ranking survive.
+    # The vanished row is LAST so the check does not race the solver's
+    # one-job guard on a following start. ----
+    state2 = {"calls": 0}
+
+    def none_get(jid):
+        state2["calls"] += 1
+        return None if state2["calls"] == 2 else real_get(jid)
+
+    cfd_run.get = none_get
+    try:
+        with _Patched(runs=((2.5, 0.2), (2.6, 0.2))):
+            rans_queue.start([{"label": "n1", "config": CFG_D},
+                              {"label": "n2", "config": CFG_D2}],
+                             "medium", 300)
+            snap_n = wait_queue()
+    finally:
+        cfd_run.get = real_get
+    rn = snap_n["rows"]
+    check("vanished job fails its row only; queue finishes",
+          snap_n["state"] == "done"
+          and [r["state"] for r in rn] == ["done", "failed"]
+          and "vanished" in (rn[1]["error"] or ""),
+          f"(state {snap_n['state']}, rows {[r['state'] for r in rn]})")
+    check("surviving row is still ranked",
+          rn[0]["rank"] == 1 and rn[1]["rank"] is None)
+    wait_solver_idle()
+
+    # ---- prune protection: a shortlist longer than KEEP_RUN_DIRS must
+    # keep every row's retained case on disk to the end ----
+    n_rows = cfd_run.KEEP_RUN_DIRS + 2
+    with _Patched(runs=tuple((2.0 + 0.1 * i, 0.2) for i in range(n_rows))):
+        rans_queue.start([{"label": f"p{i}", "config": CFG_D}
+                          for i in range(n_rows)], "coarse", 300)
+        snap_p = wait_queue(timeout=60.0)
+    rp = snap_p["rows"]
+    check("long queue completes",
+          snap_p["state"] == "done"
+          and all(r["state"] == "done" for r in rp),
+          f"(state {snap_p['state']}: {[r['state'] for r in rp]})")
+    check("every row keeps its case_dir reference",
+          all(r["case_dir"] for r in rp))
+    kept = [r for r in rp if r["case_dir"] and Path(r["case_dir"]).is_dir()]
+    check("no row's retained case was pruned mid-queue "
+          f"({n_rows} rows > KEEP_RUN_DIRS={cfd_run.KEEP_RUN_DIRS})",
+          len(kept) == n_rows,
+          f"({len(kept)}/{n_rows} on disk)")
+    check("queue rows are registered as prune-protected dirs",
+          {Path(r["case_dir"]).resolve() for r in rp}
+          <= cfd_run._protected_dirs())
 
     print(f"\n{sum(results)}/{len(results)} rans-queue checks passed")
     return 0 if all(results) else 1

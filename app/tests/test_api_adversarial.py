@@ -3,9 +3,10 @@ sane payloads must keep working, and the stack-angle sign convention must
 hold.
 
 Run through run_all.py, which boots a throwaway scratch server. The suite
-MUTATES server state (it uploads airfoils and warms caches), so do not point
-it at a live working session; if you must run it standalone, start a
-dedicated server and set WSS_TEST_BASE to it:
+MUTATES server state (it uploads airfoils, warms caches and rewrites the
+machine-level rule-preset library), so WSS_TEST_BASE is REQUIRED — there is
+no default target, or a bare standalone run would mutate the live app on
+port 8642. To run standalone, start a dedicated server and point at it:
     .venv\\Scripts\\python.exe -m uvicorn app.server:app --port 8652
     set WSS_TEST_BASE=http://127.0.0.1:8652
 """
@@ -19,7 +20,15 @@ import uuid
 from pathlib import Path
 
 sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-BASE = os.environ.get("WSS_TEST_BASE", "http://127.0.0.1:8642")
+BASE = os.environ.get("WSS_TEST_BASE")
+if not BASE:
+    print("WSS_TEST_BASE is not set — refusing to pick a default target: "
+          "this suite mutates server state (uploads, caches, the "
+          "machine-level rule-preset library).\n"
+          "Run it through app/tests/run_all.py (isolated scratch server), "
+          "or start a dedicated server and set WSS_TEST_BASE to it — see "
+          "the module docstring.")
+    sys.exit(2)
 
 
 # proxy-free opener: an env/system HTTP proxy must not swallow the loopback
@@ -114,6 +123,12 @@ s, _ = call("POST", "/api/geometry",
             {"config": {**GOOD, "n_panels_per_side": 100000}}, timeout=10)
 check("n_panels 100000 -> 422 fast", s == 422 and time.time() - t0 < 5,
       f"(got {s} in {time.time()-t0:.1f}s)")
+
+# JSON 1e999 parses to float inf; int(inf) must be a validation error,
+# not an unhandled OverflowError -> 500
+s, _ = call("POST", "/api/geometry",
+            {"config": {**GOOD, "n_panels_per_side": 1e999}}, timeout=10)
+check("n_panels 1e999 (inf) -> 422", s == 422, f"(got {s})")
 
 # absurd alpha span -> 422 fast
 t0 = time.time()
@@ -504,26 +519,34 @@ check("optimize from a rule-violating start -> 422 naming the rule",
 s_p0, r_p0 = call("GET", "/api/rule-presets")
 check("rule presets GET on a fresh server -> empty list",
       s_p0 == 200 and r_p0["presets"] == [], f"(got {s_p0}: {r_p0})")
-s_p1, _ = call("PUT", "/api/rule-presets", {"presets": [
-    {"name": "FSAE test", "envelope": {"max_length_mm": 700,
-                                       "max_height_mm": 250}}]})
-s_p2, r_p2 = call("GET", "/api/rule-presets")
-check("rule presets save + reload round-trip",
-      s_p1 == 200 and s_p2 == 200 and len(r_p2["presets"]) == 1
-      and r_p2["presets"][0]["name"] == "FSAE test"
-      and r_p2["presets"][0]["envelope"]["max_length_mm"] == 700.0,
-      f"(got {s_p1}/{s_p2}: {r_p2})")
-s_p3, _ = call("PUT", "/api/rule-presets", {"presets": [
-    {"name": "bad", "envelope": {"max_height_mm": -1}}]})
-check("rule preset with a bogus envelope -> 422", s_p3 == 422, f"(got {s_p3})")
-s_p4, _ = call("PUT", "/api/rule-presets", {"presets": [
-    {"name": "dup", "envelope": {}}, {"name": "DUP", "envelope": {}}]})
-check("rule presets with duplicate names -> 422", s_p4 == 422, f"(got {s_p4})")
-s_p5, _ = call("PUT", "/api/rule-presets", {"presets": [{"name": "", "envelope": {}}]})
-check("rule preset without a name -> 422", s_p5 == 422, f"(got {s_p5})")
-if _s_keep == 200 and isinstance(_r_keep, dict):
-    call("PUT", "/api/rule-presets",
-         {"presets": _r_keep.get("presets", [])})   # restore the library
+# the library must be put back even if a check between the first PUT and
+# the restore raises (connection drop, assertion crash) — finally, not
+# fall-through
+try:
+    s_p1, _ = call("PUT", "/api/rule-presets", {"presets": [
+        {"name": "FSAE test", "envelope": {"max_length_mm": 700,
+                                           "max_height_mm": 250}}]})
+    s_p2, r_p2 = call("GET", "/api/rule-presets")
+    check("rule presets save + reload round-trip",
+          s_p1 == 200 and s_p2 == 200 and len(r_p2["presets"]) == 1
+          and r_p2["presets"][0]["name"] == "FSAE test"
+          and r_p2["presets"][0]["envelope"]["max_length_mm"] == 700.0,
+          f"(got {s_p1}/{s_p2}: {r_p2})")
+    s_p3, _ = call("PUT", "/api/rule-presets", {"presets": [
+        {"name": "bad", "envelope": {"max_height_mm": -1}}]})
+    check("rule preset with a bogus envelope -> 422", s_p3 == 422,
+          f"(got {s_p3})")
+    s_p4, _ = call("PUT", "/api/rule-presets", {"presets": [
+        {"name": "dup", "envelope": {}}, {"name": "DUP", "envelope": {}}]})
+    check("rule presets with duplicate names -> 422", s_p4 == 422,
+          f"(got {s_p4})")
+    s_p5, _ = call("PUT", "/api/rule-presets",
+                   {"presets": [{"name": "", "envelope": {}}]})
+    check("rule preset without a name -> 422", s_p5 == 422, f"(got {s_p5})")
+finally:
+    if _s_keep == 200 and isinstance(_r_keep, dict):
+        call("PUT", "/api/rule-presets",
+             {"presets": _r_keep.get("presets", [])})   # restore the library
 
 print(f"\n{sum(results)}/{len(results)} adversarial checks passed")
 sys.exit(0 if all(results) else 1)

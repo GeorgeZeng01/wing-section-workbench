@@ -169,6 +169,27 @@ check("min-thickness warning fires (flap thinner than 25 mm)",
       any("thickest point" in w for w in rep_w["warnings"]),
       f"({len(rep_w['warnings'])} warnings)")
 
+# extra-drag disclosure keys off the BUILT geometry: 2 mm on a 70 mm flap is
+# 2.86%c — under the 3% ratio line — yet the thickness floor holds the whole
+# aft quarter of the S1223 at constant thickness; the same 2 mm barely
+# touches the 350 mm main
+cfg_slab = geometry.StackConfig.from_dict({
+    **BASE,
+    "elements": [
+        {"airfoil": "s1223"},
+        {"airfoil": "s1223", "chord_ratio": 0.20, "deflection_deg": 20,
+         "slot_gap_pct": 1.5, "slot_overlap_pct": 3.0}],
+    "manufacturing": {"te_gap_mm": 2.0, "te_mode": "thicken",
+                      "min_thickness_mm": 0}})
+rep_slab = geometry.geometry_report(cfg_slab)
+check("aft slab on a small flap is disclosed (2 mm TE, 70 mm chord)",
+      any("constant thickness" in w and w.startswith("flap")
+          for w in rep_slab["warnings"]),
+      f"({rep_slab['warnings']})")
+check("no slab warning for the lightly reshaped main",
+      not any("constant thickness" in w and w.startswith("main")
+              for w in rep_slab["warnings"]))
+
 # the report measures the as-built waist and vouches for it
 check("geometry report carries measured min aft thickness + waist_ok",
       all("min_aft_thickness_mm" in e["mfg"] and e["mfg"]["waist_ok"]

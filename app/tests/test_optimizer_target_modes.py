@@ -103,6 +103,53 @@ def main():
           win_arch and win_arch[-1]["penalty"] < optimizer.PEN_OK,
           f"(penalty {win_arch[-1]['penalty'] if win_arch else None})")
 
+    # ---- unreachable D* is re-measured at FULL paneling before descend:
+    # the coarse search bias can exceed the 0.8% deadzone, so the spring
+    # must hold a level the full model actually measured ----
+    job_d = optimizer.Job(dict(CFG), {"target_downforce_n": 500,
+                                      "mode": "global", "budget": 100})
+    job_d._full_panels = 70
+    job_d._opt_panels = 50
+    ndim = len(job_d.variables)
+    job_d.archive = [
+        {"x": [0.5] * ndim, "J": 1.0, "penalty": 0.0, "pen_gate": 0.0,
+         "downforce_n": 300.0, "drag_n": 10.0, "frac_max": 0.8,
+         "phase": "attain", "panels": 50},
+        {"x": [0.4] * ndim, "J": 1.2, "penalty": 0.0, "pen_gate": 0.0,
+         "downforce_n": 290.0, "drag_n": 10.5, "frac_max": 0.8,
+         "phase": "attain", "panels": 50},
+    ]
+    _real_qe = optimizer.analysis.quick_objective_eval
+    _panels_seen = []
+
+    def _full_eval(cfg, **kw):
+        _panels_seen.append(cfg.n_panels_per_side)
+        return {"feasible": True, "downforce_n": 315.0, "drag_n": 11.0}
+
+    optimizer.analysis.quick_objective_eval = _full_eval
+    try:
+        job_d._resolve_dstar()
+    finally:
+        optimizer.analysis.quick_objective_eval = _real_qe
+    check("unreachable-high D* is re-measured at full paneling",
+          job_d.target_note == "unreachable_high" and job_d.dstar == 315.0
+          and len(_panels_seen) == 2 and all(p == 70 for p in _panels_seen),
+          f"(dstar {job_d.dstar}, panels {_panels_seen})")
+    check("descend seeds still compare against the search-paneling level",
+          job_d._dstar_search == 300.0, f"({job_d._dstar_search})")
+    # entries already at full paneling stand as measured — no re-evaluation
+    for a in job_d.archive:
+        a["panels"] = 70
+    _panels_seen.clear()
+    optimizer.analysis.quick_objective_eval = _full_eval
+    try:
+        job_d._resolve_dstar()
+    finally:
+        optimizer.analysis.quick_objective_eval = _real_qe
+    check("full-paneling extremes are not re-measured",
+          job_d.dstar == 300.0 and not _panels_seen,
+          f"(dstar {job_d.dstar}, evals {_panels_seen})")
+
     # ---- local mode: two phases still run, snapshot contract holds ----
     job3 = run_job({"target_downforce_n": 250, "mode": "local",
                     "budget": 300})

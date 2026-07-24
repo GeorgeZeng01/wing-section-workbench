@@ -301,7 +301,10 @@ def _open_native_with_api(url: str, port: int) -> bool:
                 return True
             except TypeError:
                 continue
-        return True
+        # every start() signature was rejected — no window ever opened, so
+        # the caller must fall back to a browser
+        _log("pywebview start() rejected every known signature; falling back")
+        return False
     except Exception as exc:
         _log(f"native window unavailable ({exc}); falling back")
         return False
