@@ -541,6 +541,21 @@ def part_i(made):
         "updates live with every edit."))
 
     # 5 Analyze
+    s.append(h3("Competition rules as a live envelope"))
+    s.append(body(
+        f"The {B('Rules')} group turns a season's geometric rulebook into "
+        "an envelope the whole app enforces: maximum installed length, "
+        "maximum height above the road, minimum ground clearance — all "
+        "user-entered in mm (rules change every season, so nothing is "
+        "hardcoded), savable as named presets on this machine "
+        "(&quot;FSAE 2026&quot;) while the active values travel with the "
+        "project. The drawing shows the envelope as a dashed box and "
+        "turns a violated edge amber with the overshoot in mm; the "
+        "analysis lists the same violation; and the optimizer treats the "
+        "envelope as hard law — it refuses to start from a violating "
+        "design and marks out-of-envelope evaluations infeasible, so it "
+        "can never propose an illegal wing."))
+
     s.append(heading("Step 2 — Analyze"))
     s.append(body(
         f"{B('Analyze section')} solves the coupled inviscid flow around all "
@@ -586,6 +601,22 @@ def part_i(made):
         "model itself distrusts — low surrogate confidence or operating "
         "points at the edge of the stall data (Part II, <i>The "
         "optimizer</i>)."))
+    s.append(h3("Two goals"))
+    s.append(kv_table([
+        ("Hit a downforce target", "The default: track the requested "
+         "downforce, then spend a reserved share of the budget descending "
+         "drag along the achievable level. A target below what the stack "
+         "can cleanly shed to (or beyond its ceiling) is measured, "
+         "delivered at minimum drag, and reported honestly — the search "
+         "never fakes an unreachable number by choking its own slots."),
+        ("Maximize downforce (trusted)", "The most downforce the model can "
+         "be trusted about: every element is held inside the 90&nbsp;% "
+         "loading line where fine-mesh RANS measured over-claims of "
+         "23–42&nbsp;%, and the winner and every candidate are re-verified "
+         "at full resolution before they are returned. An optional minimum "
+         "L/D keeps the ratio usable, and the user-set confidence floor "
+         "drops candidates the viscous surrogate itself distrusts."),
+    ]))
     s.append(body(
         "If manufacturing preparation (section 8) is off when you press "
         f"{B('Start optimization')}, the application asks first: with prep "
@@ -638,24 +669,39 @@ def part_i(made):
         "(Part II, <i>The optimizer</i>)."))
     s.append(h3("Effort and reproducibility"))
     s.append(kv_table([
-        ("Fast / Standard", "Stop as soon as the target is reached cleanly — "
-         "a few seconds to half a minute. Quick, but because the search "
-         "halts in the first basin that meets the target, two runs from "
-         "slightly different starting points can land on different "
-         "(similarly-good) designs."),
+        ("Fast / Standard", "Stop the exploration once the target is "
+         "reached cleanly — the remaining budget goes to the drag-descend "
+         "refinement, so even a fast run ends on a low-drag on-target "
+         "design rather than the first one that hit the number."),
         ("Thorough", "Searches the whole space before refining, with a wider "
          "population and a multi-start final polish at full solver "
          "resolution. It takes minutes, and repeated runs converge to the "
          "same lowest-drag design — use it for a design you intend to keep."),
     ]))
     s.append(body(
-        "When a target is unrealistic in either direction, the result panel "
-        "says so in plain language — for example, that the stack met the "
-        "target only by parking its loading variables at their minimum, so "
-        "the target could be raised or an element removed. "
+        "When a target is unrealistic in either direction, the run "
+        "measures the stack's clean floor or ceiling and quotes it in "
+        "plain language — &quot;the lowest clean downforce this stack can "
+        "make is about 66&nbsp;N&quot; — and the winner delivers that "
+        "level at minimum drag instead of a sabotaged number. "
         f"{B('Apply to configuration')} writes the chosen design, including "
         "any airfoil or shape changes, back into the element cards and "
         "re-analyzes it."))
+
+    s.append(h3("The trade-off front and the RANS re-rank"))
+    s.append(body(
+        "Every clean design the search evaluated is kept as a "
+        f"{B('Pareto front')}: the downforce–drag trade-off drawn as a "
+        "clickable curve, re-analyzed at full resolution — blue where the "
+        "model is trusted, amber where a point carries a trust flag. "
+        "Click a point to apply that design. For the designs you would "
+        f"actually build, {B('RANS re-rank')} runs the winner, the "
+        "candidates and the front's knee through the same 2D RANS truth "
+        "case one at a time (medium mesh by default — it agreed with the "
+        "fine mesh in the calibration campaign), re-ranks them by "
+        "MEASURED downforce, and classes each panel-vs-RANS delta "
+        "against the recorded bands. The panel model navigates; RANS "
+        "measures."))
 
     # 7 Shape refinement
     s.append(heading("Step 4 — Airfoil shape refinement"))
@@ -801,6 +847,13 @@ def part_i(made):
         "thickness per element."))
 
     # 11 Maps + RANS handoff
+    s.append(body(
+        f"The DXF export can also add {B('bounding-box lines')}: four "
+        "lines on a dedicated HITBOX layer — horizontals touching the "
+        "stack's lowest and highest points, verticals at its extremes. "
+        "Instant overall dimensions in CAD, deleted in one action with "
+        "the layer."))
+
     s.append(heading("Operating maps and RANS verification"))
     s.append(body(
         "Two closing tools round out the workflow. The operating maps show "
@@ -944,6 +997,16 @@ def part_ii(made):
     s = [PageBreak(), part_header("PART II", "How it works")]
 
     # 11 Architecture
+    s.append(h3("Stopping a run without losing it"))
+    s.append(body(
+        f"{B('Stop & keep fields')} ends a running solve gracefully: the "
+        "solver writes its current fields first, so the velocity and "
+        "pressure views work on the partial run. The verdict is labeled "
+        "&quot;stopped by user&quot; and no k_g suggestion is offered — a "
+        "hand-stopped force history, however flat it happens to look, is "
+        "a preview, not a calibration point. Cancel remains the hard stop "
+        "that keeps nothing."))
+
     s.append(heading("Architecture"))
     s.append(body(
         "The application is one local process. A thin desktop shell (a "

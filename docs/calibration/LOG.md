@@ -283,3 +283,38 @@ racing band: −19 % at h/c 0.071, −0 % at 0.086, −1 % at 0.114, +67 % at
 conservative above ~50 mm. The `HC_CHOKE_OPTIMISM = 0.08` boundary sits
 exactly in the measured gap (broken at 0.071, validated at 0.086); no
 adjustment needed. Stage 1 verdict stands as recorded above.
+
+## 2026-07-23 — slot-relief surface metric: measured and rejected
+
+A canonical-pressure-recovery trust metric (Smith-1975 dumping-velocity
+relief on the coupled inviscid solution) was proposed to detect the
+observed optimizer failure — flow detaching ahead of the main TE while
+the flap sits above the slot flow. Five variants were measured against
+every configuration with a fine-mesh delta on this log
+(`scripts/recovery_metric_check.py`, rerunnable):
+
+  variant A (ground solution, peak→TE): 0.977–0.990 for EVERY design —
+    ground-image suction peaks (cp_min to −49) swamp the normalization;
+  variants B/C/D (free air, TE-offset, aft-only): clean and warned
+    classes overlap (gaps −0.06 … −0.14);
+  variant E (TE dumping-velocity ratio, free air): nearly separates the
+    classes (clean ≤ 1.172, warned ≥ 1.175) but is a loading proxy — and
+    on a gap sweep at fixed healthy loading it moves the WRONG way
+    (gap 3.0 → 0.8 %c lowers E from 1.24 to 1.12): the inviscid solver
+    reads a tighter slot as MORE relief. The real tight-gap failure is
+    boundary-layer merging, invisible to any inviscid quantity.
+
+Verdict: rejected for optimizer use; the loading fraction remains the
+validated trust separator. Corollary worth recording: the stage-2
+CLEAN winners (−14.2/−14.4 %) share the flagged winners' exact slot
+corner — gap 0.80 %c, overlap ≈ 0 — while the gap-1.5 %c baseline at
+comparable downforce measured ~0 %. The healthy-winner −14 % bias may
+therefore be partly the tight-slot cost. That hypothesis is the
+gap-axis leg below; until it lands, the corner carries a geometric
+advisory (`analysis.slot_signature_warnings`) quoting these numbers.
+
+PLANNED — gap-axis leg (D7): baseline geometry, healthy loading, gaps
+0.8 / 1.3 / 2.0 %c at 30 mm, medium mesh for the trend plus one fine
+anchor, via `scripts/rans_calibration.py --config`. Outcome: a measured
+gap floor (raise `GAP_WORKABLE_PCT[0]`) or a measured all-clear for the
+corner at moderate loading.

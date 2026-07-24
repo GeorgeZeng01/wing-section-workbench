@@ -126,7 +126,13 @@ DESCEND_DRAG_W = 0.30      # descend drag-weight floor (user's if higher)
 # HARD guarantee — winner and candidates are re-checked at full fidelity
 # and dropped if any element loads past the line.
 MAXDF_RAMP_START = 0.85    # ramp onset (loading fraction)
-MAXDF_RAMP_W = 2.0         # <= 2.0/element at the 0.90 line itself
+MAXDF_RAMP_W = 1.0         # <= 1.0/element at the 0.90 line itself.
+                           # Measured on the fixed benchmark: at 2.0 the
+                           # ramp starved the legitimate 0.85-0.90
+                           # shoulder (max-mode winner 256.9 N vs the
+                           # 259.1 N baseline sitting at loading 0.886);
+                           # 1.0 keeps gradient toward the wall without
+                           # taxing designs the record calls clean
 MAXDF_WALL_W = 40.0        # at f = 0.95 this costs 40 — no downforce pays it
 MAXDF_FRAC_SLACK_SEARCH = 0.01    # archive prefilter slack (search panels)
 MAXDF_FRAC_SLACK_FULL = 0.005     # full-fidelity output slack

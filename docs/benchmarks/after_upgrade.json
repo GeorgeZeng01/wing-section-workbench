@@ -1,0 +1,354 @@
+{
+ "git_rev": "1407db3",
+ "timestamp_utc": "2026-07-24T03:43:07+00:00",
+ "scenarios": {
+  "low_target_60n": {
+   "supported": true,
+   "state": "done",
+   "error": null,
+   "elapsed_s": 25.0,
+   "n_eval": 1097,
+   "n_infeasible": 0,
+   "n_candidates": 1,
+   "dstar_n": 60.0,
+   "pareto_n": 24,
+   "winner": {
+    "J": 0.179,
+    "penalty": null,
+    "claimed_downforce_n": 59.6,
+    "claimed_drag_n": 3.58,
+    "on_target": true,
+    "summary": {
+     "downforce_n": 59.6,
+     "drag_total_n": 3.6,
+     "efficiency_ld": 16.6,
+     "warnings": 1,
+     "confidence_min": 0.91,
+     "low_confidence": false,
+     "near_stall": false
+    },
+    "design": {
+     "stack_aoa_deg": -4.0,
+     "deflections_deg": [
+      0,
+      0.10711
+     ],
+     "slot_gaps_pct": [
+      0.8
+     ],
+     "slot_overlaps_pct": [
+      0.0
+     ],
+     "airfoils": [
+      "s1223",
+      "s1223"
+     ]
+    },
+    "measured": {
+     "feasible": true,
+     "downforce_n": 59.6,
+     "drag_n": 3.58,
+     "ld": 16.63,
+     "frac_max": 0.254,
+     "fracs": [
+      0.254,
+      0.192
+     ],
+     "gaps_pct": [
+      0.8
+     ],
+     "overlaps_pct": [
+      0.0
+     ],
+     "confidence_min": 0.91
+    }
+   },
+   "archive": {
+    "n_total": 1097,
+    "n_clean": 803,
+    "clean_downforce_min": 59.2,
+    "clean_downforce_max": 257.0
+   }
+  },
+  "preset_target_250n": {
+   "supported": true,
+   "state": "done",
+   "error": null,
+   "elapsed_s": 19.9,
+   "n_eval": 829,
+   "n_infeasible": 0,
+   "n_candidates": 6,
+   "dstar_n": 250.0,
+   "pareto_n": 24,
+   "winner": {
+    "J": 0.3761,
+    "penalty": null,
+    "claimed_downforce_n": 246.2,
+    "claimed_drag_n": 31.08,
+    "on_target": true,
+    "summary": {
+     "downforce_n": 246.2,
+     "drag_total_n": 31.1,
+     "efficiency_ld": 7.9,
+     "warnings": 1,
+     "confidence_min": 0.91,
+     "low_confidence": false,
+     "near_stall": false
+    },
+    "design": {
+     "stack_aoa_deg": -3.99982,
+     "deflections_deg": [
+      0,
+      21.25145
+     ],
+     "slot_gaps_pct": [
+      0.8
+     ],
+     "slot_overlaps_pct": [
+      0.0
+     ],
+     "airfoils": [
+      "s1223",
+      "s1223"
+     ]
+    },
+    "measured": {
+     "feasible": true,
+     "downforce_n": 246.2,
+     "drag_n": 31.08,
+     "ld": 7.92,
+     "frac_max": 0.841,
+     "fracs": [
+      0.841,
+      0.622
+     ],
+     "gaps_pct": [
+      0.8
+     ],
+     "overlaps_pct": [
+      0.0
+     ],
+     "confidence_min": 0.91
+    }
+   },
+   "archive": {
+    "n_total": 829,
+    "n_clean": 588,
+    "clean_downforce_min": 102.7,
+    "clean_downforce_max": 256.1
+   }
+  },
+  "thorough_250n": {
+   "supported": true,
+   "state": "done",
+   "error": null,
+   "elapsed_s": 81.1,
+   "n_eval": 3770,
+   "n_infeasible": 0,
+   "n_candidates": 6,
+   "dstar_n": 250.0,
+   "pareto_n": 24,
+   "winner": {
+    "J": 0.3761,
+    "penalty": null,
+    "claimed_downforce_n": 246.1,
+    "claimed_drag_n": 31.05,
+    "on_target": true,
+    "summary": {
+     "downforce_n": 246.1,
+     "drag_total_n": 31.1,
+     "efficiency_ld": 7.9,
+     "warnings": 1,
+     "confidence_min": 0.91,
+     "low_confidence": false,
+     "near_stall": false
+    },
+    "design": {
+     "stack_aoa_deg": -4.0,
+     "deflections_deg": [
+      0,
+      21.23993
+     ],
+     "slot_gaps_pct": [
+      0.8
+     ],
+     "slot_overlaps_pct": [
+      0.00261
+     ],
+     "airfoils": [
+      "s1223",
+      "s1223"
+     ]
+    },
+    "measured": {
+     "feasible": true,
+     "downforce_n": 246.1,
+     "drag_n": 31.05,
+     "ld": 7.92,
+     "frac_max": 0.84,
+     "fracs": [
+      0.84,
+      0.621
+     ],
+     "gaps_pct": [
+      0.8
+     ],
+     "overlaps_pct": [
+      0.0
+     ],
+     "confidence_min": 0.91
+    }
+   },
+   "archive": {
+    "n_total": 3770,
+    "n_clean": 2250,
+    "clean_downforce_min": 102.5,
+    "clean_downforce_max": 263.6
+   }
+  },
+  "hot_start_430n": {
+   "supported": true,
+   "state": "done",
+   "error": null,
+   "elapsed_s": 222.0,
+   "n_eval": 2017,
+   "n_infeasible": 0,
+   "n_candidates": 1,
+   "dstar_n": 403.7,
+   "target_note": "unreachable_high",
+   "pareto_n": 24,
+   "winner": {
+    "J": 0.8151,
+    "penalty": null,
+    "claimed_downforce_n": 382.5,
+    "claimed_drag_n": 86.26,
+    "on_target": false,
+    "summary": {
+     "downforce_n": 382.5,
+     "drag_total_n": 86.3,
+     "efficiency_ld": 4.4,
+     "warnings": 3,
+     "confidence_min": 0.91,
+     "low_confidence": false,
+     "near_stall": true
+    },
+    "design": {
+     "stack_aoa_deg": -4.0,
+     "deflections_deg": [
+      0,
+      33.03286
+     ],
+     "slot_gaps_pct": [
+      0.8
+     ],
+     "slot_overlaps_pct": [
+      0.00124
+     ],
+     "airfoils": [
+      "s1223",
+      "s1223"
+     ]
+    },
+    "measured": {
+     "feasible": true,
+     "downforce_n": 382.5,
+     "drag_n": 86.26,
+     "ld": 4.43,
+     "frac_max": 1.168,
+     "fracs": [
+      1.168,
+      0.787
+     ],
+     "gaps_pct": [
+      0.8
+     ],
+     "overlaps_pct": [
+      0.0
+     ],
+     "confidence_min": 0.91
+    }
+   },
+   "archive": {
+    "n_total": 2017,
+    "n_clean": 1237,
+    "clean_downforce_min": 114.6,
+    "clean_downforce_max": 403.7
+   }
+  },
+  "max_downforce": {
+   "supported": true,
+   "state": "done",
+   "error": null,
+   "elapsed_s": 44.9,
+   "n_eval": 2060,
+   "n_infeasible": 0,
+   "n_candidates": 5,
+   "pareto_n": 24,
+   "winner": {
+    "J": -5.591,
+    "penalty": null,
+    "claimed_downforce_n": 256.9,
+    "claimed_drag_n": 34.55,
+    "on_target": false,
+    "summary": {
+     "downforce_n": 256.9,
+     "drag_total_n": 34.6,
+     "efficiency_ld": 7.4,
+     "warnings": 1,
+     "confidence_min": 0.91,
+     "low_confidence": false,
+     "near_stall": false
+    },
+    "design": {
+     "stack_aoa_deg": -3.75082,
+     "deflections_deg": [
+      0,
+      21.72723
+     ],
+     "slot_gaps_pct": [
+      0.82251
+     ],
+     "slot_overlaps_pct": [
+      0.1626
+     ],
+     "airfoils": [
+      "s1223",
+      "s1223"
+     ]
+    },
+    "measured": {
+     "feasible": true,
+     "downforce_n": 256.9,
+     "drag_n": 34.55,
+     "ld": 7.44,
+     "frac_max": 0.875,
+     "fracs": [
+      0.875,
+      0.621
+     ],
+     "gaps_pct": [
+      0.82
+     ],
+     "overlaps_pct": [
+      0.16
+     ],
+     "confidence_min": 0.91
+    }
+   },
+   "archive": {
+    "n_total": 2060,
+    "n_clean": 146,
+    "clean_downforce_min": 85.5,
+    "clean_downforce_max": 256.9
+   }
+  },
+  "max_downforce_ld14": {
+   "supported": true,
+   "state": "failed",
+   "error": "no design holds L/D >= 14.0 (best found 12.7). Lower the efficiency floor or free more variables",
+   "elapsed_s": 40.0,
+   "n_eval": 1899,
+   "n_infeasible": 0
+  }
+ }
+}
