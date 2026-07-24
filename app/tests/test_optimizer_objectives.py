@@ -104,15 +104,30 @@ def main():
           f"(baseline frac {max(ev_hot['fracs']):.2f} -> "
           f"{(c2[0].get('summary') or {}).get('frac_max') if c2 else None})")
 
-    # ---- min_ld floor holds on the output ----
+    # ---- min_ld floor holds on the output, and it must BIND: 8.0 is
+    # above the unconstrained max-mode winner's L/D (~7.4), so passing
+    # requires the floor to have actually reshaped the search ----
+    ld_floor = 8.0
+    ld_free = (ws or {}).get("efficiency_ld")
+    check("min_ld test premise: the floor binds vs the free winner",
+          ld_free is not None and ld_free < ld_floor,
+          f"(free-run L/D {ld_free})")
     job3, s3 = run_job(CFG, {"objective": "max_downforce", "mode": "global",
-                             "budget": 500, "min_ld": 6.0})
+                             "budget": 1000, "min_ld": ld_floor})
     c3 = s3["candidates"] or []
-    check("min_ld: every returned candidate holds the floor",
-          s3["state"] == "done" and c3
-          and all((c.get("summary") or {}).get("efficiency_ld", 0)
-                  >= 0.98 * 6.0 for c in c3),
-          f"(lds {[ (c.get('summary') or {}).get('efficiency_ld') for c in c3 ]})")
+    # the contract: either every returned candidate holds the floor, or
+    # the run fails LOUDLY naming the floor and the best value found —
+    # silently returning violators is the only wrong outcome
+    held = (s3["state"] == "done" and c3
+            and all((c.get("summary") or {}).get("efficiency_ld", 0)
+                    >= 0.98 * ld_floor for c in c3))
+    named = (s3["state"] == "failed"
+             and f"L/D >= {ld_floor:.1f}" in (s3["error"] or ""))
+    check("min_ld: binding floor holds on output or fails by name",
+          held or named,
+          f"(state {s3['state']}, lds "
+          f"{[(c.get('summary') or {}).get('efficiency_ld') for c in c3]}, "
+          f"err {(s3['error'] or '')[:60]})")
 
     # ---- impossible confidence floor fails with a named cause ----
     job4, s4 = run_job(CFG, {"target_downforce_n": 250, "mode": "global",

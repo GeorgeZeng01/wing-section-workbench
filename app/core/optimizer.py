@@ -597,10 +597,12 @@ class Job:
         self.target_note = None    # None | "unreachable_low" (target below
                                    # the clean floor) | "unreachable_high"
         self._obj_phase = "attain"  # attain | descend (objective() branch)
-        self.dscale = 200.0        # max-downforce reward scale (baseline
-                                   # downforce, fixed at run start — mid-run
-                                   # renormalization would poison archive
-                                   # comparability)
+        # max-downforce reward scale: the baseline downforce once
+        # _baseline_allowance measures it, else the user's target as a
+        # meaningful stand-in (fixed at run start either way — mid-run
+        # renormalization would poison archive comparability)
+        self.dscale = max(abs(float(options.get("target_downforce_n",
+                                                200.0))), 50.0)
         self.load_cap_note = None  # "baseline_exceeds_cap" in max mode
         self.conf_note = None      # "baseline_below_floor"
         self._drop_stats = None    # output-filter drops, for the failure msg
@@ -669,20 +671,32 @@ class Job:
         # start that already runs hot is penalized only for getting HOTTER,
         # never for matching itself — an absolute cap here made every run
         # from an aggressive design land below its baseline downforce.
+        load_shape_pen = 0.0   # max-mode loading shaping — excluded from
+                               # the clean-pool gate (pen_gate below): the
+                               # ramp is search pressure, not a verdict on
+                               # the design (2026-07 review: gating on it
+                               # inverted the clean pool across the
+                               # 0.885-0.90 shoulder)
         if self.objective_mode == "max_downforce":
             # hardened, cliff-free: ramp before the measured trust line so
             # the wall is felt with gradient, steep smooth wall past it —
             # and the do-no-harm widening deliberately does NOT apply to
             # this band (matching an already-hot baseline is not a
             # do-no-harm act when the mode's contract is trusted output)
-            j_pen = 0.0
             for f in ev["fracs"]:
                 if f > analysis.LOAD_WARN:
-                    j_pen += MAXDF_WALL_W * ((f - analysis.LOAD_WARN)
-                                             / 0.05) ** 2
+                    # the wall CARRIES the ramp's terminal value: without
+                    # the offset the penalty DIPPED to ~0 just past the
+                    # line and the search was attracted into 0.90-0.908 —
+                    # the exact band the mode exists to exclude
+                    load_shape_pen += (
+                        MAXDF_RAMP_W
+                        + MAXDF_WALL_W * ((f - analysis.LOAD_WARN)
+                                          / 0.05) ** 2)
                 elif f > MAXDF_RAMP_START:
-                    j_pen += MAXDF_RAMP_W * ((f - MAXDF_RAMP_START)
-                                             / 0.05) ** 2
+                    load_shape_pen += MAXDF_RAMP_W * ((f - MAXDF_RAMP_START)
+                                                      / 0.05) ** 2
+            j_pen = load_shape_pen
         elif self.load_band:
             load_excess = sum(max(0.0, f - top) ** 2
                               for f, top in zip(ev["fracs"], self.load_band))
@@ -744,6 +758,10 @@ class Job:
         with self._lock:
             self.archive.append({"x": [round(float(v), 5) for v in x],
                                  "J": float(j), "penalty": float(j_pen),
+                                 # penalty minus the max-mode loading
+                                 # shaping: what the clean-pool gates test
+                                 # (identical to penalty in target mode)
+                                 "pen_gate": float(j_pen - load_shape_pen),
                                  "downforce_n": round(ev["downforce_n"], 1),
                                  "drag_n": round(ev["drag_n"], 2),
                                  "frac_max": round(max(ev["fracs"]), 3)
@@ -816,7 +834,8 @@ class Job:
             return   # max mode has no level to hold
         target = float(self.options.get("target_downforce_n", 200.0))
         with self._lock:
-            pool = [a for a in self.archive if a["penalty"] < PEN_OK]
+            pool = [a for a in self.archive
+                    if a.get("pen_gate", a["penalty"]) < PEN_OK]
         self.dstar = target
         self.target_note = None
         if not pool:
@@ -837,7 +856,8 @@ class Job:
         D*, diversified so multi-start explores different basins of the
         on-level manifold instead of polishing one point three times."""
         with self._lock:
-            pool = [a for a in self.archive if a["penalty"] < PEN_OK]
+            pool = [a for a in self.archive
+                    if a.get("pen_gate", a["penalty"]) < PEN_OK]
         if self.objective_mode == "max_downforce":
             # polish from the strongest CLEAN designs inside the trust line
             on = sorted((a for a in pool
@@ -892,7 +912,7 @@ class Job:
             # (search-fidelity prefilter — the full-fidelity re-check in
             # _finalize_candidates provides the hard guarantee)
             ok = [a for a in by_j
-                  if a["penalty"] < PEN_OK
+                  if a.get("pen_gate", a["penalty"]) < PEN_OK
                   and (a.get("frac_max") is None
                        or a["frac_max"] <= analysis.LOAD_WARN
                        + MAXDF_FRAC_SLACK_SEARCH)]
@@ -913,7 +933,7 @@ class Job:
             tol = max(CAND_TARGET_TOL * abs(dstar), 1.0)
             good = [a for a in by_j
                     if abs(a["downforce_n"] - dstar) <= tol
-                    and a["penalty"] < PEN_OK]
+                    and a.get("pen_gate", a["penalty"]) < PEN_OK]
             best_j = self._rescore(best)
             j_slack = best_j + max(0.15 * abs(best_j), 0.02)
             pool = ([a for a in good if self._rescore(a) <= j_slack]
@@ -990,14 +1010,33 @@ class Job:
         pressure is soft (ramps/hinges, no mid-search cliff — the rejected
         hard-confidence-floor precedent); the output is where the modes'
         contracts are enforced."""
+        check_rules = bool(self.config.get("rule_envelope"))
         guarded = (self.objective_mode == "max_downforce"
-                   or self.min_ld is not None or self.min_conf > 0.0)
+                   or self.min_ld is not None or self.min_conf > 0.0
+                   or check_rules)
         if not guarded:
             return out
-        drops = {"loading": 0, "confidence": 0, "ld": 0, "unverified": 0}
+        drops = {"loading": 0, "confidence": 0, "ld": 0, "rules": 0,
+                 "unverified": 0}
         best_frac, best_conf, best_ld = None, None, None
         kept = []
         for entry in out:
+            if check_rules:
+                # legality was gated at search paneling; a design riding a
+                # limit can cross it when the contour re-panelizes at full
+                # resolution — re-certify before it can be returned
+                try:
+                    from . import geometry as geo_mod
+                    cfg_e = StackConfig.from_dict(entry["config"])
+                    inst = geo_mod.install_stack(
+                        geo_mod.build_stack(cfg_e), cfg_e.ride_height_c)
+                    rl = geo_mod.envelope_check(inst, cfg_e)
+                    if rl is not None and not rl["ok"]:
+                        drops["rules"] += 1
+                        continue
+                except Exception:
+                    drops["unverified"] += 1
+                    continue
             s = entry.get("summary")
             if s is None:
                 # a guarantee cannot be verified on a design whose full
@@ -1021,11 +1060,14 @@ class Job:
                 drops["ld"] += 1
                 continue
             kept.append(entry)
-        for i, entry in enumerate(kept, 1):
-            entry["rank"] = i
         if any(drops.values()):
+            # a dropped winner must promote the best SURVIVOR by the final
+            # objective, not whatever diversity pick happened to be next
+            kept.sort(key=lambda e: e["J"])
             self._drop_stats = {**drops, "best_frac": best_frac,
                                 "best_conf": best_conf, "best_ld": best_ld}
+        for i, entry in enumerate(kept, 1):
+            entry["rank"] = i
         return kept
 
     def _pareto_front(self) -> list[dict]:
@@ -1034,7 +1076,8 @@ class Job:
         farthest-point density — knee-dense by construction."""
         with self._lock:
             archive = list(self.archive)
-        pool = [a for a in archive if a["penalty"] < PEN_OK] or archive
+        pool = [a for a in archive
+                if a.get("pen_gate", a["penalty"]) < PEN_OK] or archive
         if not pool:
             return []
         # full-panel entries win near-duplicate downforce levels
@@ -1132,6 +1175,12 @@ class Job:
                 f"no design holds L/D >= {self.min_ld:.1f} (best found "
                 f"{d['best_ld']:.1f}). Lower the efficiency floor or free "
                 f"more variables")
+        if d.get("rules"):
+            parts.append(
+                f"{d['rules']} candidate(s) crossed the rule envelope when "
+                f"re-measured at full paneling — the search sat exactly on "
+                f"a limit; give the envelope a millimetre of margin or "
+                f"tighten the design")
         if d.get("unverified") and not parts:
             parts.append("every candidate failed its full-fidelity "
                          "re-analysis — the guarantees could not be "
@@ -1328,7 +1377,12 @@ class Job:
             self._obj_phase = "descend"
             self._opt_panels = self._full_panels
             n_starts = 3 if thorough else 2
-            starts = self._descend_starts(n_starts, x0)
+            # fallback for degenerate pools: the attain phase's best (best
+            # was just cleared under the lock, so pass it explicitly —
+            # falling back to x0 would discard the whole attain budget)
+            starts = self._descend_starts(
+                n_starts,
+                coarse_best["x"] if coarse_best is not None else x0)
             fev_each = max(100, budget_b // len(starts))
             with self._lock:
                 # re-plan so the progress bar keeps moving after an early
@@ -1389,6 +1443,9 @@ class Job:
                         self.state = "cancelled" if cancelled else "done"
                 elif cancelled:
                     self.state = "cancelled"
+                    if self._drop_stats:
+                        # say why a cancelled run shows nothing at all
+                        self.error = self._guarantee_failure_message()
                 elif self.best is not None:
                     # the search found designs but the output guarantees
                     # dropped every one — a failure with a named cause
@@ -1430,7 +1487,8 @@ class Job:
             stride = max(1, len(self.archive) // 250)
             cloud = [[a["downforce_n"], a["drag_n"],
                       (2 if (a.get("frac_max") or 0.0) > analysis.LOAD_WARN
-                       else 1 if a["penalty"] >= PEN_OK else 0)]
+                       else 1 if a.get("pen_gate", a["penalty"]) >= PEN_OK
+                       else 0)]
                      for a in self.archive[::stride]][:250]
             return {
                 "id": self.id, "state": self.state, "error": self.error,

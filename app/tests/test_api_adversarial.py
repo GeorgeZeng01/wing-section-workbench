@@ -484,6 +484,10 @@ if not (Path(__file__).resolve().parents[2] / "xfoil" / "xfoil.exe").exists():
           f"(got {s_x})")
 
 # ---- rule envelope + rule presets ----
+# the preset library is MACHINE-level state (app_data/rule_presets.json):
+# on a scratch server it is isolated by WSS_DATA_DIR, but a standalone run
+# against a live server must put the user's library back afterwards
+_s_keep, _r_keep = call("GET", "/api/rule-presets")
 s_g, r_g = call("POST", "/api/geometry",
                 {"config": {**GOOD, "rule_envelope": {"max_height_mm": 60}}})
 check("geometry with a violated envelope -> 200 + rules verdict",
@@ -517,6 +521,9 @@ s_p4, _ = call("PUT", "/api/rule-presets", {"presets": [
 check("rule presets with duplicate names -> 422", s_p4 == 422, f"(got {s_p4})")
 s_p5, _ = call("PUT", "/api/rule-presets", {"presets": [{"name": "", "envelope": {}}]})
 check("rule preset without a name -> 422", s_p5 == 422, f"(got {s_p5})")
+if _s_keep == 200 and isinstance(_r_keep, dict):
+    call("PUT", "/api/rule-presets",
+         {"presets": _r_keep.get("presets", [])})   # restore the library
 
 print(f"\n{sum(results)}/{len(results)} adversarial checks passed")
 sys.exit(0 if all(results) else 1)

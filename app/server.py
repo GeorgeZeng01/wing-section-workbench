@@ -371,7 +371,15 @@ def rans_current():
 @app.post("/api/rans/start")
 def rans_start(body: RansStartBody):
     _cfg(body.config)   # validate before spawning the job
-    from .core import cfd_run
+    from .core import cfd_run, rans_queue
+    # the guard must be two-directional: a single run started in the gap
+    # between two queue items would make the queue's next start fail and
+    # abort the whole shortlist verification
+    q = rans_queue.get_current()
+    if q is not None and q.state in ("pending", "running"):
+        raise HTTPException(409, detail="a shortlist verification queue is "
+                                        "running — cancel it or wait for "
+                                        "it to finish")
     try:
         job_id = cfd_run.start(body.config, body.mesh_size, body.max_iters)
     except RuntimeError as e:
@@ -414,7 +422,7 @@ def rans_queue_start(body: RansQueueBody):
     from .core import rans_queue
     try:
         qid = rans_queue.start(body.items, body.mesh_size, body.max_iters)
-    except ValueError as e:
+    except (ValueError, KeyError, TypeError) as e:
         raise HTTPException(422, detail=_err_detail(e))
     except RuntimeError as e:
         raise HTTPException(409, detail=str(e))
@@ -539,7 +547,8 @@ def _export_bytes(fmt: str, body: ExportBody) -> tuple[bytes, str, str]:
                     result = analysis.analyze(cfg, include_geometry=False)
                 except Exception:
                     result = None
-            data = export.zip_bundle(cfg, result, body.entity)
+            data = export.zip_bundle(cfg, result, body.entity,
+                                     include_hitbox=body.include_hitbox)
     except (ValueError, KeyError, np.linalg.LinAlgError) as e:
         raise HTTPException(422, detail=_err_detail(e))
     return data, media, ext

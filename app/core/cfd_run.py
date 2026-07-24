@@ -617,7 +617,12 @@ class RansJob:
         # a transient snapshot, not a result — say so, loudly. The drift
         # excludes the startup transient, same as the stop decision.
         cl_drift = drift(data["cl"][FORCE_STOP_SKIP:])
-        if self._stopped_by_user and n_run < self.n_iters:
+        # "the user stop took effect" requires the solver to have quit
+        # below the cap — a request the solver never noticed must not
+        # relabel a cap-limited run (its verdict judges the history), and
+        # the result flag must mirror the verdict actually applied
+        user_applied = self._stopped_by_user and n_run < self.n_iters
+        if user_applied:
             # a user stop is a preview, not a result: never "converged",
             # never a k_g suggestion — a hand-stopped tail must not feed
             # calibration, however flat it happens to look
@@ -690,7 +695,7 @@ class RansJob:
                 # screening number, and a k_g pinned from one can bake that
                 # bias into every estimate in the session
                 "mesh_caution": self.mesh_size == "coarse",
-                "user_stopped": self._stopped_by_user,
+                "user_stopped": user_applied,
                 "case_dir": str(self.case_dir),
             }
             self.phase = None
@@ -740,6 +745,8 @@ class RansJob:
         with self._lock:
             if not (self._solving and self.state == "running"):
                 return False
+        if self._force_stop:
+            return False   # a writeNow is already pending or done
         self._user_stop.set()
         return True
 

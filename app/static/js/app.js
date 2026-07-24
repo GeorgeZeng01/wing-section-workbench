@@ -304,7 +304,10 @@ async function saveRulePreset() {
     toast("Enter at least one rule limit before saving.");
     return;
   }
-  const presets = [...state.rulePresets.filter((p) => p.name !== name),
+  // case-insensitive overwrite, matching the server's duplicate check —
+  // else saving "fsae" over "FSAE" 422s as a duplicate
+  const presets = [...state.rulePresets.filter(
+                     (p) => p.name.toLowerCase() !== name.toLowerCase()),
                    { name, envelope: env }]
     .sort((a, b) => a.name.localeCompare(b.name));
   try {
@@ -329,6 +332,12 @@ async function deleteRulePreset() {
   try {
     await api.rulePresetsSave(presets);
     state.rulePresets = presets;
+    // the active envelope's values stay (they are the design's rules) but
+    // they no longer come from a library preset
+    if (state.config.rule_envelope?.preset_name === name) {
+      delete state.config.rule_envelope.preset_name;
+      onConfigChanged();
+    }
     renderRulePresetOptions();
     toast(`Rule preset "${name}" deleted.`, "good");
   } catch (e) {
@@ -1198,7 +1207,14 @@ function renderPareto(s) {
 
 function rerankItems() {
   const s = state.optResult;
-  if (!s || !s.candidates || !s.candidates.length) return [];
+  if (!s || !s.candidates || !s.candidates.length) {
+    // no run in this page session — fall back to the restored table so a
+    // reloaded shortlist can still be re-verified (e.g. on a finer mesh)
+    return (state.ransRerank || [])
+      .filter((r) => r.config)
+      .slice(0, 8)
+      .map((r) => ({ label: r.label, config: r.config }));
+  }
   const items = s.candidates.map((c) => ({
     label: `candidate #${c.rank} — ` +
            `${fmtN(c.summary?.downforce_n ?? c.downforce_n, 0)} N`,
@@ -1250,22 +1266,38 @@ async function startRerank() {
 
 function pollRerank() {
   clearInterval(state.rerankPoll);
+  let misses = 0;
+  const detach = (msg) => {
+    clearInterval(state.rerankPoll);
+    busy($("btn-rerank"), false);
+    $("btn-rerank-cancel").disabled = true;
+    if (msg) toast(msg);
+  };
   state.rerankPoll = setInterval(async () => {
     try {
       const { queue } = await api.ransQueueCurrent();
-      if (!queue) return;
+      if (!queue) {
+        // a restarted server has no queue at all — do not spin forever
+        if (++misses >= 5) {
+          detach("Lost the verification queue (server restarted?) — " +
+                 "its runs did not survive.");
+        }
+        return;
+      }
+      misses = 0;
       renderRerank(queue);
       if (["done", "failed", "cancelled"].includes(queue.state)) {
-        clearInterval(state.rerankPoll);
-        busy($("btn-rerank"), false);
-        $("btn-rerank-cancel").disabled = true;
-        if (queue.state === "failed") {
-          toast(`Verification queue failed: ${queue.error}`);
-        }
+        detach(queue.state === "failed"
+          ? `Verification queue failed: ${queue.error}` : null);
         state.ransRerank = queue.rows;
         persistSession();
       }
-    } catch { /* transient poll miss — the next tick retries */ }
+    } catch {
+      if (++misses >= 5) {
+        detach("Lost contact with the verification queue — reopen the " +
+               "tab to re-attach if the server is back.");
+      }
+    }
   }, 2000);
 }
 
@@ -1310,10 +1342,23 @@ function renderRerank(q) {
     }
     const td = tr.insertCell();
     if (r.config) {
+      // a restored row can reference an uploaded airfoil the server no
+      // longer holds (uploads live in server memory) — applying it would
+      // just error, so say why instead
+      const lost = (r.config.elements || []).some((e) => {
+        const m = String(e.airfoil || "").match(/custom:[a-z0-9_-]+/);
+        return m && !state.customDat[m[0]];
+      });
       const b = document.createElement("button");
       b.className = "btn tiny";
       b.textContent = "Apply";
-      b.addEventListener("click", () => applyDesign(r.config));
+      if (lost) {
+        b.disabled = true;
+        b.title = "References an uploaded airfoil that is not present in " +
+                  "this session — re-upload it to apply this design.";
+      } else {
+        b.addEventListener("click", () => applyDesign(r.config));
+      }
       td.appendChild(b);
     }
     const vd = tr.cells[5];
@@ -2029,7 +2074,18 @@ function renderRansResult(s) {
   ];
   host.innerHTML = rows.map(([k, v]) =>
     `<div class="kv"><span>${k}</span><b>${v}</b></div>`).join("");
-  if (!r.converged) {
+  if (r.user_stopped) {
+    const w = document.createElement("div");
+    w.className = "warning-item";
+    w.textContent = `Stopped at your request — the fields were written, ` +
+      `so the flow views below show the partial solution. The force ` +
+      `numbers are a preview, not a result` +
+      (r.cl_drift != null ? ` (Cl drift ${(r.cl_drift * 100).toFixed(1)}% ` +
+        `per window)` : ``) +
+      `; rerun without stopping for a verdict. No k_g calibration is ` +
+      `offered from a hand-stopped run.`;
+    host.appendChild(w);
+  } else if (!r.converged) {
     const w = document.createElement("div");
     w.className = "warning-item crit";
     w.textContent = `NOT CONVERGED — the lift history was still trending ` +

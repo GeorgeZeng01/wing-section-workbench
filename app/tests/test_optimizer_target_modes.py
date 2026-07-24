@@ -57,13 +57,18 @@ def main():
     check("candidate #1 carries the lowest final-objective J",
           cands and all(w["J"] <= c["J"] + 1e-9 for c in cands))
     tol = max(optimizer.CAND_TARGET_TOL * 250, 1.0)
+    # ATTAIN-phase entries only: the regression this guards is "the early
+    # stop kept the first tracker hit" — comparing against descend-phase
+    # entries would let the check pass vacuously
     on_target = [a for a in job.archive
-                 if abs(a["downforce_n"] - 250) <= tol
+                 if a["phase"] == "attain"
+                 and abs(a["downforce_n"] - 250) <= tol
                  and a["penalty"] < optimizer.PEN_OK]
-    check("descend improves drag over the first on-target design",
+    check("descend improves drag over the first on-target ATTAIN design",
           on_target and w.get("drag_n") is not None
           and w["drag_n"] <= on_target[0]["drag_n"] + 0.05,
-          f"(first hit {on_target[0]['drag_n'] if on_target else None} N "
+          f"(first attain hit "
+          f"{on_target[0]['drag_n'] if on_target else None} N "
           f"-> winner {w.get('drag_n')} N)")
     check("archive tags phases and loading",
           {a["phase"] for a in job.archive} == {"attain", "descend"}

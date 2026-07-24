@@ -113,6 +113,15 @@ class RuleEnvelopeSpec:
     def from_dict(cls, d: dict) -> "RuleEnvelopeSpec":
         if not isinstance(d, dict):
             raise ValueError("rule_envelope must be an object")
+        # strict keys: a typo'd limit ("max_lenght_mm") must fail loudly,
+        # not silently produce an unconstrained axis and a false "rules ok"
+        allowed = {"max_length_mm", "max_height_mm",
+                   "min_ground_clearance_mm", "x_offset_mm", "preset_name"}
+        unknown = sorted(set(d) - allowed)
+        if unknown:
+            raise ValueError(f"rule_envelope: unknown field(s) "
+                             f"{', '.join(unknown)} — allowed: "
+                             f"{', '.join(sorted(allowed))}")
         def _opt(key):
             v = d.get(key)
             return None if v is None else float(v)

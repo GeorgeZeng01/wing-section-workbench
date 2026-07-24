@@ -56,19 +56,24 @@ def main() -> int:
         for label, key, d in rows:
             print(f"| {k} | {label} | {cell(b, key, d)} "
                   f"| {cell(a, key, d)} |")
-        def notes_of(sc):
+        def notes_of(sc, key):
             if not sc:
                 return "–"
             if not sc.get("supported"):
-                return "option not supported (silently ignored)"
+                return "refused (option not supported on this version)"
             notes = [n for n in (sc.get("target_note"),
                                  sc.get("load_cap_note"),
-                                 sc.get("objective_mode")) if n]
+                                 sc.get("objective")) if n]
+            # a version that predates the objective option ACCEPTED it
+            # silently and ran the default target tracker — say so
+            if key.startswith("max_downforce") and not sc.get("objective"):
+                notes.append("objective option silently ignored "
+                             "(ran target-mode default)")
             if sc.get("state") != "done":
                 notes.append(f"state={sc['state']}")
             return ", ".join(notes) if notes else "–"
 
-        nb, na = notes_of(b), notes_of(a)
+        nb, na = notes_of(b, k), notes_of(a, k)
         if (nb, na) != ("–", "–"):
             print(f"| {k} | notes | {nb} | {na} |")
     return 0

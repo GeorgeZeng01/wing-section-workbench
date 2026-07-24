@@ -125,6 +125,9 @@ class QueueJob:
                         row["error"] = str(e)
                         self.error = (f"queue stopped at {row['label']}: "
                                       f"{e}")
+                        for r2 in self.rows[i + 1:]:
+                            if r2["state"] == "queued":
+                                r2["state"] = "skipped"
                     break
                 job = cfd_run.get(jid)
                 with self._lock:
@@ -157,8 +160,9 @@ class QueueJob:
             with self._lock:
                 for k, r in enumerate(ranked, 1):
                     r["rank"] = k
+                # an aborted queue is a failure with a cause, not "done"
                 self.state = ("cancelled" if self._cancel.is_set()
-                              else "done")
+                              else "failed" if self.error else "done")
         except Exception as e:  # never leave a zombie "running" queue
             with self._lock:
                 self.state = "failed"

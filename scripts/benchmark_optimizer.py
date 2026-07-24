@@ -127,7 +127,7 @@ def run_scenario(sc: dict) -> dict:
     out["n_candidates"] = len(cands)
     # version-added fields pass through when present
     for k in ("dstar_n", "target_note", "load_cap_note", "conf_note",
-              "objective_mode"):
+              "objective"):
         if snap.get(k) is not None:
             out[k] = snap[k]
     if snap.get("pareto"):

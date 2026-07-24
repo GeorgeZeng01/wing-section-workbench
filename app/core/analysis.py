@@ -535,6 +535,13 @@ def _sweep_point(cfg: StackConfig, design: list[dict], installed: list[dict],
         n_warnings += 1                           # combined Re-floor caveat
     if cfg.ride_height_c < HC_CHOKE_OPTIMISM:
         n_warnings += 1                           # sub-choke optimism caveat
+    # parity with analyze(): rule violations move with ride height (the
+    # envelope is checked at each swept height), and the slot-signature
+    # advisory counts here too
+    rules = geometry.envelope_check(installed, cfg)
+    if rules is not None and not rules["ok"]:
+        n_warnings += len(rules["violations"])
+    n_warnings += len(slot_signature_warnings(design))
 
     drag_profile_n = q * area * cd_stack
     drag_induced, _ = induced_drag_n(downforce_n, cfg, installed)

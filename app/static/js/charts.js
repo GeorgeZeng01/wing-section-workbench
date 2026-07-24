@@ -174,8 +174,10 @@ export function lineChart(container, spec) {
     }
   }
 
-  // hover crosshair + tooltip
-  const hover = el("g", { style: "display:none" }, svg);
+  // hover crosshair + tooltip — decoration only: it must never swallow
+  // clicks meant for the (clickable) data points beneath it
+  const hover = el("g", { style: "display:none",
+                          "pointer-events": "none" }, svg);
   const cross = el("line", { y1: m.t, y2: m.t + ih, class: "crosshair" }, hover);
   const tipG = document.createElement("div");
   tipG.className = "chart-tip";

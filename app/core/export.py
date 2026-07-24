@@ -264,14 +264,16 @@ manifest records the achieved trailing-edge thickness per element.
 
 
 def zip_bundle(cfg: StackConfig, analysis_result: dict | None = None,
-               entity: str = "spline") -> bytes:
+               entity: str = "spline", include_hitbox: bool = False) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("README.txt", _ZIP_README)
         z.writestr("dxf/section_installed.dxf",
-                   dxf_bytes(cfg, "installed", entity))
+                   dxf_bytes(cfg, "installed", entity,
+                             include_hitbox=include_hitbox))
         z.writestr("dxf/section_design.dxf",
-                   dxf_bytes(cfg, "design", entity, include_ground=False))
+                   dxf_bytes(cfg, "design", entity, include_ground=False,
+                             include_hitbox=include_hitbox))
         installed = _frame_elements(cfg, "installed")
         for i, e in enumerate(installed):
             tag = f"{i+1}_{e['role']}"
