@@ -318,3 +318,31 @@ PLANNED — gap-axis leg (D7): baseline geometry, healthy loading, gaps
 anchor, via `scripts/rans_calibration.py --config`. Outcome: a measured
 gap floor (raise `GAP_WORKABLE_PCT[0]`) or a measured all-clear for the
 corner at moderate loading.
+
+## 2026-07-23 — stage-3 verdict runs (fine mesh) + first D7 anchor
+
+Three fine-mesh runs on the upgraded optimizer's outputs, all
+force-history converged (`runs.csv` labels stage3-*, d7anchor-*):
+
+    max-downforce winner (pre-review-fix, loading 0.876, claim 4.263):
+      RANS Cl 3.446 — Δ −19.2 %
+    pareto knee (191 N claim, L/D 10.6, claim 3.146):
+      RANS Cl 3.019 — Δ −4.0 %
+    D7 fine anchor — gap 0.80 %c at HEALTHY loading (defl 12, aoa 0,
+      claim 3.812): RANS Cl 3.762 — Δ −1.3 %
+
+Readings. (1) The trusted-max guardrail held: −19.2 % sits between the
+−14 % clean anchor and the −23 % warned onset — optimism grows toward
+the 0.90 line but the mode never entered the −37…−42 % regime; the
+post-review-fix winner (loading 0.900) is queued as stage3b. (2) A
+front-knee pick from a properly searched run is essentially honest
+(−4 %) — contrast the −59 % measured (coarse) on a junk 170 N front
+point scavenged from an unrelated low-target run: fronts are only as
+real as the search that populated them. (3) FIRST D7 EVIDENCE: the
+tight-gap corner at moderate loading measures −1.3 % at fine mesh —
+statistically indistinguishable from the gap-1.5 %c baseline (−0/−1 %).
+The corner alone is NOT the over-claim driver at healthy loading; the
+−14 % clean-winner bias tracks their higher loading, not their slot.
+The medium-trend legs (0.8/1.3/2.0) and the stage3b verdicts are
+running; the slot-corner advisory's wording gets recalibrated against
+the full set when they land.

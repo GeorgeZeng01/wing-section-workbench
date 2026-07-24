@@ -25,3 +25,5 @@ timestamp_utc,label,ride_height_mm,h_over_c,mesh,stack_aoa_deg,defl2_deg,speed_m
 2026-07-23T13:06:36+00:00,stage2b-stage2b_clean-fine,30.0,0.0857,fine,-3.99991,23.2928,15.0,12000,done,True,force history converged,6018,1545.3,3.7826,0.162,0.21782,4.4215,2.9373,23.2931,0.119,-14.4,0.079,
 2026-07-23T13:32:58+00:00,stage2b-stage2b_flagged-fine,30.0,0.0857,fine,-4.0,30.642,15.0,12000,done,True,force history converged,6133,1615.3,3.692,0.129,0.19743,5.8128,3.5624,33.3393,0.119,-36.5,0.027,
 2026-07-24T04:31:00+00:00,stage3-stage3_maxdf_winner-fine,30.0,0.0857,fine,-4.0,22.38399,15.0,15000,done,True,force history converged,4912,1345.3,3.4456,0.1191,0.15277,4.2632,2.8608,22.2086,0.119,-19.2,0.065,
+2026-07-24T04:53:26+00:00,stage3-stage3_pareto_knee-fine,30.0,0.0857,fine,-3.93997,15.24676,15.0,15000,done,True,force history converged,9151,2580.4,3.0186,0.1949,0.10404,3.1459,2.2775,14.9641,0.119,-4.0,0.106,
+2026-07-24T05:36:27+00:00,d7anchor-gapleg_g0p8-fine,30.0,0.0857,fine,0.0,12.0,15.0,15000,done,True,force history converged,6075,1470.3,3.7624,0.0294,0.20278,3.8123,2.6325,19.216,0.119,-1.3,0.115,
