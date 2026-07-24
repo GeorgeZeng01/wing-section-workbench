@@ -4,17 +4,22 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Wing Section Studio</title>
+<script>
+  /* set the theme before first paint — no flash */
+  try { document.documentElement.dataset.theme =
+          localStorage.getItem("wss-theme") || "light"; } catch (e) {}
+</script>
 <link rel="icon" href="/static/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" href="/static/favicon.png">
-<link rel="stylesheet" href="/static/css/app.css?v=10">
+<link rel="stylesheet" href="/static/css/app.css?v=11">
 </head>
 <body>
 
 <header class="topbar">
   <div class="brand">
     <svg viewBox="0 0 32 32" width="22" height="22" aria-hidden="true">
-      <path d="M3 20 Q10 8 29 14 Q18 22 3 20 Z" fill="#3987e5"/>
-      <line x1="2" y1="27" x2="30" y2="27" stroke="#8fa0c0" stroke-width="1.6"/>
+      <path d="M3 20 Q10 8 29 14 Q18 22 3 20 Z" fill="var(--e1)"/>
+      <line x1="2" y1="27" x2="30" y2="27" stroke="var(--steel)" stroke-width="1.6"/>
     </svg>
     <span class="brand-name">Wing Section Studio</span>
     <span class="brand-sub">multi-element design &amp; optimization</span>
@@ -26,6 +31,9 @@
     <button id="btn-open" class="btn ghost" title="Open a saved project file">Open</button>
     <button id="btn-save" class="btn ghost" title="Save the project to a file">Save</button>
     <input id="file-project" type="file" accept=".json" hidden>
+    <button id="btn-theme" class="theme-btn" type="button"
+            title="Switch between the light and dark theme"
+            aria-label="Switch theme"></button>
     <span id="server-dot" class="server-dot" title="Server status"></span>
   </div>
 </header>
@@ -212,6 +220,10 @@
     </div>
     <div id="vp-status" class="vp-status">–</div>
   </section>
+
+  <div id="dock-resize" class="dock-divider" role="separator"
+       aria-orientation="horizontal" aria-label="Resize the detail panels"
+       title="Drag to resize the detail panels — double-click to reset"></div>
 
   <!-- ============ results ============ -->
   <aside class="panel results" aria-label="Results">
@@ -443,11 +455,10 @@
         <span id="rans-note" class="note">checking Docker…</span>
       </div>
       <div class="progress" aria-hidden="true"><div id="rans-progress"></div></div>
-      <div id="rans-status" class="note">idle — runs the same 2D RANS truth
-        case the Export tab generates (simpleFoam + k-ω SST, moving ground) in
-        a local Docker container, then compares the converged section
-        coefficients against the panel-model estimate. Entirely optional: the
-        design workflow never requires it.</div>
+      <div id="rans-status" class="note">idle — runs the OpenFOAM truth case
+        (simpleFoam + k-ω SST, moving ground) in Docker and compares the
+        result against the panel estimate. Optional — the design workflow
+        never requires it.</div>
       <div class="chart-pair" style="margin-top:8px">
         <div id="rans-conv" class="chart-host"></div>
         <div id="rans-result"><div class="empty-note">No verification run yet.
@@ -464,8 +475,7 @@
           <span id="rans-flow-note" class="note">same view as the drawing:
             as driven, ground at the bottom, flow left to right</span>
         </div>
-        <img id="rans-flow-img" alt="RANS section flow field"
-             style="max-width:100%; border:1px solid #2a3550; border-radius:6px">
+        <img id="rans-flow-img" alt="RANS section flow field">
       </div>
     </div>
 
@@ -650,6 +660,7 @@
   </div>
 </template>
 
-<script type="module" src="/static/js/app.js?v=10"></script>
+<script type="module" src="/static/js/shell.js?v=11"></script>
+<script type="module" src="/static/js/app.js?v=11"></script>
 </body>
 </html>

@@ -227,7 +227,10 @@ export function lineChart(container, spec) {
 }
 
 /** Small airfoil outline preview. */
-export function airfoilPreview(container, coords, color = "#9AA5BC") {
+export function airfoilPreview(container, coords, color = null) {
+  color = color ||
+    getComputedStyle(document.documentElement).getPropertyValue("--steel").trim() ||
+    "#9AA5BC";
   container.innerHTML = "";
   if (!coords || !coords.length) return;
   const xs = coords.map(p => p[0]), ys = coords.map(p => p[1]);

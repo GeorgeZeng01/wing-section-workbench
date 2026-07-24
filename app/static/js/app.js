@@ -7,6 +7,11 @@ import { Viewport, SERIES } from "./viewport.js";
 const $ = (id) => document.getElementById(id);
 const NU = 1.5e-5;
 
+/* Resolve a chart color from the active theme at render time, so both
+   themes ink the same chart correctly (fallback = dark-theme value). */
+const ink = (name, fb) =>
+  getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fb;
+
 const CONFIG_DEFAULTS = {
   stack_aoa_deg: 0, ride_height_mm: 30, chord_mm: 350, span_mm: 1400,
   speed_ms: 15, rho: 1.225, nu: NU, ncrit: 7,
@@ -836,6 +841,20 @@ $("btn-goto-optimize").addEventListener("click", () => {
   document.querySelector('.tab[data-tab="optimizer"]').click();
 });
 
+/* Theme switch: everything drawn with resolved colors is re-inked from
+   the new theme's tokens (CSS-classed chrome re-inks by itself). */
+window.addEventListener("wss-themechange", () => {
+  viewport.render();
+  buildViewportLegend();
+  if (state.analysis) { renderResults(state.analysis); renderCp(state.analysis); }
+  if (state.lastSweep) renderSweep(state.lastSweep);
+  if (state.screenRows) renderScreenTable();
+  const active = document.querySelector(".tab.active");
+  if (!active) return;
+  if (active.dataset.tab === "polars") renderPolars();
+  if (active.dataset.tab === "optimizer") reattachOptimizer();
+});
+
 /* ---------------- polars tab ---------------- */
 
 function buildPolarChips() {
@@ -883,7 +902,7 @@ async function renderPolars(withXfoil = false) {
     const series = (xk, yk) => {
       const s = [{ name: "NeuralFoil", color: SERIES[i],
                    x: nf[xk], y: nf[yk] }];
-      if (xf) s.push({ name: "XFOIL", color: "#e9edf6", markers: "only",
+      if (xf) s.push({ name: "XFOIL", color: ink("--viz-ref", "#e9edf6"), markers: "only",
                        x: xf[xk], y: xf[yk] });
       return s;
     };
@@ -1178,7 +1197,7 @@ function renderPareto(s) {
       series: [{
         name: "front", color: SERIES[0], markers: "only",
         x: pts.map(p => p.drag_n), y: pts.map(p => p.downforce_n),
-        pointColors: pts.map(p => (flagged(p) ? "#fab219" : SERIES[0])),
+        pointColors: pts.map(p => (flagged(p) ? ink("--viz-flag", "#f2b544") : SERIES[0])),
         onPointClick: (i) => {
           applyDesign(pts[i].config);
           toast(`Pareto design applied — ${fmtN(pts[i].downforce_n, 0)} N ` +
@@ -1193,10 +1212,10 @@ function renderPareto(s) {
     // live evaluation cloud while the search runs (not clickable — these
     // are search-fidelity numbers)
     lineChart(host, {
-      series: [{ name: "evaluations", color: "#5a6a8a", markers: "only",
+      series: [{ name: "evaluations", color: ink("--viz-cloud", "#5a6a8a"), markers: "only",
                  x: s.cloud.map(c => c[1]), y: s.cloud.map(c => c[0]),
-                 pointColors: s.cloud.map(c => (c[2] ? "#fab219"
-                                                     : "#5a6a8a")) }],
+                 pointColors: s.cloud.map(c => (c[2] ? ink("--viz-flag", "#f2b544")
+                                                     : ink("--viz-cloud", "#5a6a8a"))) }],
       xLabel: "drag [N]", yLabel: "downforce [N]", height: 148,
     });
     note.hidden = true;
@@ -1816,6 +1835,7 @@ async function runSweep() {
 }
 
 function renderSweep(res) {
+  state.lastSweep = res;   // kept for theme-switch re-inking
   const variable = res.variable;
   const xLabel = MAP_LABELS[variable] || variable;
   const unit = MAP_UNITS[variable] || "";
@@ -1835,14 +1855,14 @@ function renderSweep(res) {
   // current operating point, interpolated onto the sweep
   const series = [
     { name: "downforce", color: SERIES[0], x: xs, y: dn, markers: true },
-    { name: "peak", color: "#fab219", markers: "only",
+    { name: "peak", color: ink("--viz-flag", "#f2b544"), markers: "only",
       x: [xs[ipk]], y: [dn[ipk]] },
   ];
   const cur = state.config[variable];
   for (let i = 0; i + 1 < xs.length; i++) {
     if ((cur - xs[i]) * (cur - xs[i + 1]) <= 0 && xs[i] !== xs[i + 1]) {
       const t = (cur - xs[i]) / (xs[i + 1] - xs[i]);
-      series.push({ name: "current", color: "#e9edf6", markers: "only",
+      series.push({ name: "current", color: ink("--viz-ref", "#e9edf6"), markers: "only",
                     x: [cur], y: [dn[i] + t * (dn[i + 1] - dn[i])] });
       break;
     }
@@ -1855,10 +1875,10 @@ function renderSweep(res) {
     const c_mm = state.config.chord_mm;
     const tb = res.trust_bands;
     xBands = [
-      { from: 0, to: tb.optimistic_below_hc * c_mm, color: "#e0645c",
+      { from: 0, to: tb.optimistic_below_hc * c_mm, color: ink("--viz-optimistic", "#ec6a60"),
         label: "estimate optimistic" },
       { from: tb.conservative_hc[0] * c_mm, to: tb.conservative_hc[1] * c_mm,
-        color: "#57b6f0", label: "estimate conservative" },
+        color: ink("--viz-conservative", "#57b6f0"), label: "estimate conservative" },
     ];
   }
   lineChart($("map-downforce"), {

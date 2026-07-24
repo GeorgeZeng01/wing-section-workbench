@@ -3,8 +3,27 @@
    Zoom (wheel), pan (drag), fit (button / double-click). */
 
 const NS = "http://www.w3.org/2000/svg";
-const SERIES = ["#3987e5", "#c98500", "#9085e9", "#199e70"];
-const STEEL = "#8fa0c0";
+
+/* Element identity + drawing chrome, resolved from the active theme's
+   tokens. SERIES is mutated in place so importers always see the live
+   values; a "wss-themechange" re-render picks them up. Tokens must stay
+   6-digit hex — call sites append alpha as `color + "30"`. */
+const SERIES = ["#3987e5", "#d95926", "#199e70", "#9085e9"];
+let STEEL = "#8fa0c0";
+let HATCH = "#3a4763";
+
+function refreshInk() {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (name, fb) => cs.getPropertyValue(name).trim() || fb;
+  SERIES[0] = v("--e1", SERIES[0]);
+  SERIES[1] = v("--e2", SERIES[1]);
+  SERIES[2] = v("--e3", SERIES[2]);
+  SERIES[3] = v("--e4", SERIES[3]);
+  STEEL = v("--steel", STEEL);
+  HATCH = v("--hatch", HATCH);
+}
+refreshInk();
+window.addEventListener("wss-themechange", refreshInk);
 
 function el(tag, attrs = {}, parent = null) {
   const n = document.createElementNS(NS, tag);
@@ -30,7 +49,11 @@ export class Viewport {
     const hadData = !!this.geo;
     this.geo = geo;
     this.chordMm = chordMm;
-    if (!hadData) this.fit(); else this.render();
+    if (!hadData) {
+      this.fit();
+      // re-fit once the first layout pass settles (fonts, grid sizing)
+      requestAnimationFrame(() => this.fit());
+    } else this.render();
   }
 
   setFrame(f) { this.frame = f; this.fit(); }
@@ -228,7 +251,7 @@ export class Viewport {
     const pat = el("pattern", { id: "gnd-hatch", width: 9, height: 9,
                                 patternUnits: "userSpaceOnUse",
                                 patternTransform: "rotate(45)" }, defs);
-    el("line", { x1: 0, y1: 0, x2: 0, y2: 9, stroke: "#3a4763",
+    el("line", { x1: 0, y1: 0, x2: 0, y2: 9, stroke: HATCH,
                  "stroke-width": 1 }, pat);
 
     // ground
@@ -326,7 +349,11 @@ export class Viewport {
       svg.appendChild(g);
     }
 
-    // scale bar (bottom left): a tidy round-number bar
+    // sheet chrome: drawing frame + title block, screen-fixed like a
+    // real drafting sheet. The scale bar is the title block's last row.
+    el("rect", { x: 5.5, y: 5.5, width: W - 11, height: H - 11, rx: 2,
+                 class: "sheet-frame" }, svg);
+
     const targetPx = 90;
     const mmPerPx = mm / this.view.s;
     const raw = targetPx * mmPerPx;
@@ -334,14 +361,43 @@ export class Viewport {
     let niceMm = pow;
     for (const k of [1, 2, 5, 10]) { if (pow * k >= raw) { niceMm = pow * k; break; } }
     const barPx = niceMm / mmPerPx;
-    const by = H - 18, bx = W - 20 - barPx;
-    el("line", { x1: bx, y1: by, x2: bx + barPx, y2: by, class: "scalebar" }, svg);
-    el("line", { x1: bx, y1: by - 4, x2: bx, y2: by + 4, class: "scalebar" }, svg);
-    el("line", { x1: bx + barPx, y1: by - 4, x2: bx + barPx, y2: by + 4,
-                 class: "scalebar" }, svg);
-    const t = el("text", { x: bx + barPx / 2, y: by - 7, class: "dim-label",
-                           "text-anchor": "middle" }, svg);
-    t.textContent = niceMm >= 1000 ? `${niceMm / 1000} m` : `${niceMm} mm`;
+    const barLabel = niceMm >= 1000 ? `${niceMm / 1000} m` : `${niceMm} mm`;
+
+    if (W > 430 && H > 220) {
+      const tbW = Math.max(216, barPx + 9 * barLabel.length + 34);
+      const tbH = 56;
+      const tbX = W - 5.5 - tbW, tbY = H - 5.5 - tbH;
+      el("rect", { x: tbX, y: tbY, width: tbW, height: tbH,
+                   class: "title-block" }, svg);
+      el("line", { x1: tbX, y1: tbY + 19, x2: tbX + tbW, y2: tbY + 19,
+                   class: "sheet-frame" }, svg);
+      const t1 = el("text", { x: tbX + 9, y: tbY + 13.5,
+                              class: "title-block-t" }, svg);
+      t1.textContent = "WING SECTION STUDIO";
+      const t2 = el("text", { x: tbX + 9, y: tbY + 33,
+                              class: "title-block-s" }, svg);
+      t2.textContent = (this.frame === "installed"
+        ? "AS DRIVEN · INVERTED" : "UPRIGHT · CATALOG") +
+        ` · C ${Math.round(mm)} MM`;
+      const by = tbY + 46, bx = tbX + 9;
+      el("line", { x1: bx, y1: by, x2: bx + barPx, y2: by, class: "scalebar" }, svg);
+      el("line", { x1: bx, y1: by - 4, x2: bx, y2: by + 4, class: "scalebar" }, svg);
+      el("line", { x1: bx + barPx, y1: by - 4, x2: bx + barPx, y2: by + 4,
+                   class: "scalebar" }, svg);
+      const t3 = el("text", { x: bx + barPx + 8, y: by + 3.5,
+                              class: "title-block-s" }, svg);
+      t3.textContent = barLabel;
+    } else {
+      // small viewports: just the tidy scale bar
+      const by = H - 18, bx = W - 20 - barPx;
+      el("line", { x1: bx, y1: by, x2: bx + barPx, y2: by, class: "scalebar" }, svg);
+      el("line", { x1: bx, y1: by - 4, x2: bx, y2: by + 4, class: "scalebar" }, svg);
+      el("line", { x1: bx + barPx, y1: by - 4, x2: bx + barPx, y2: by + 4,
+                   class: "scalebar" }, svg);
+      const t = el("text", { x: bx + barPx / 2, y: by - 7, class: "dim-label",
+                             "text-anchor": "middle" }, svg);
+      t.textContent = barLabel;
+    }
   }
 }
 
