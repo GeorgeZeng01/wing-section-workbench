@@ -11,7 +11,7 @@
 </script>
 <link rel="icon" href="/static/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" href="/static/favicon.png">
-<link rel="stylesheet" href="/static/css/app.css?v=13">
+<link rel="stylesheet" href="/static/css/app.css?v=16">
 </head>
 <body>
 
@@ -308,7 +308,7 @@
                 <option value="target">Hit a downforce target</option>
                 <option value="max_downforce">Maximize downforce (trusted)</option>
               </select><i></i></span></label>
-            <label class="field"><span class="f-label">Target</span>
+            <label class="field" id="opt-target-field"><span class="f-label">Target</span>
               <span class="f-wrap"><input id="opt-target" type="number" step="10" value="250"><i>N</i></span></label>
             <label class="field"
                    title="Global explores the whole variable space (differential evolution) before polishing — use it to find the best design for a target. Refine current skips the exploration and improves the design you have from where it is (Nelder–Mead) — quicker, stays in the same basin, ideal after small manual edits.">
@@ -686,7 +686,7 @@
   </div>
 </template>
 
-<script type="module" src="/static/js/shell.js?v=13"></script>
-<script type="module" src="/static/js/app.js?v=13"></script>
+<script type="module" src="/static/js/shell.js?v=16"></script>
+<script type="module" src="/static/js/app.js?v=16"></script>
 </body>
 </html>

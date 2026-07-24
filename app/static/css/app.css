@@ -256,6 +256,8 @@ body {
 .f-wrap input:focus { outline: none; }
 .f-wrap i { font-style: normal; color: var(--ink-3); font-size: var(--fs-0); }
 .field.readonly .f-wrap { background: transparent; border-style: dashed; }
+/* [hidden] can't beat .field's display:flex on its own */
+.field[hidden] { display: none; }
 input[type="number"] { appearance: textfield; -moz-appearance: textfield; }
 input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
   { -webkit-appearance: none; margin: 0; }
@@ -290,20 +292,28 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
 .el-card[data-idx="2"] { border-left-color: var(--e3); }
 .el-card[data-idx="3"] { border-left-color: var(--e4); }
 .el-card .f-wrap { background: var(--surface-1); }
-.el-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.el-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px;
+           margin-bottom: 8px; }
 .el-tag {
   font: 600 var(--fs-0) var(--mono); letter-spacing: 0.08em;
   color: var(--ink-2);
 }
 .el-title { font-size: var(--fs-1); color: var(--ink-2); flex: 1;
             overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.el-badges { display: flex; gap: 5px; }
+/* badges get their own full-width row and wrap freely — six of them (Re,
+   gap, ovl, TE, t, waist) never fit beside the title, and squeezing them
+   into that space is what made them unreadable */
+.el-badges { display: flex; flex-wrap: wrap; gap: 4px 5px; width: 100%; }
 .badge {
   font: var(--fs-0) var(--mono);
   padding: 1px 6px; border-radius: 3px;
   background: var(--surface-3); color: var(--ink-2);
   border: 1px solid var(--hairline-2);
-  overflow-wrap: anywhere;   /* a malformed field can't force a scrollbar */
+  /* each badge stays on one line and reads cleanly; a pathological
+     file-supplied value truncates with an ellipsis instead of either
+     squishing normal badges or forcing a scrollbar */
+  white-space: nowrap;
+  max-width: 30ch; overflow: hidden; text-overflow: ellipsis;
 }
 .badge.warn { color: var(--warning);
               border-color: color-mix(in srgb, var(--warning) 45%, transparent); }
@@ -338,6 +348,7 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
   border-radius: 5px;
   padding: 7px 13px;
   cursor: pointer;
+  white-space: nowrap;   /* a squeezed button must never wrap its label */
   transition: background .12s, border-color .12s;
 }
 .btn:hover:not(:disabled) { background: var(--surface-3); }
@@ -367,15 +378,20 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
 }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-.action-row {
-  display: flex; gap: 8px; padding: 12px 14px;
-  margin-top: auto;
+/* a plain wrapping button row by default — buttons keep their natural
+   width and drop to a new line rather than squeezing */
+.action-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+/* only the config panel's row is the sticky, full-width footer */
+.config > .action-row {
+  flex-wrap: nowrap;
+  padding: 12px 14px; margin-top: auto;
   position: sticky; bottom: 0;
   background: var(--surface-1);
   border-top: 1px solid var(--hairline);
 }
+.config > .action-row .btn,
+.opt-controls .action-row .btn { flex: 1; }
 .config .group:last-of-type { padding-bottom: 12px; border-bottom: none; }
-.action-row .btn { flex: 1; }
 
 .select, .select-inline {
   background: var(--surface-2); color: var(--ink);
@@ -632,9 +648,12 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
 .af-pool-row { display: flex; align-items: center; gap: 7px;
                margin-left: 22px; font-size: var(--fs-1); color: var(--ink-3); }
 .af-pool-row select:disabled { opacity: 0.45; }
-.opt-controls .action-row { padding: 4px 0; position: static;
-                            background: none; border-top: none; }
+.opt-controls .action-row { padding: 4px 0; }
 .opt-controls .fields { gap: 6px 10px; margin-bottom: 6px; }
+/* the re-rank row in the narrow optimizer column: the mesh select takes
+   its own row (base width:100%), then Verify/Cancel sit side by side
+   below — readable, never squeezed */
+#rerank-block .action-row { gap: 6px 8px; }
 .progress {
   height: 4px; border-radius: 2px;
   background: var(--surface-2); border: 1px solid var(--hairline);

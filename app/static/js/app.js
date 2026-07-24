@@ -1414,10 +1414,10 @@ function syncAfPool() {
    target-mode behavior that max mode does not have */
 function syncOptObjectiveUI({ statusToo = true } = {}) {
   const isMax = $("opt-objective").value === "max_downforce";
+  // maximize mode has no target — hide the field entirely (not just grey
+  // it), so the control set matches what the run actually uses
+  $("opt-target-field").hidden = isMax;
   $("opt-target").disabled = isMax;
-  $("opt-target").title = isMax
-    ? "Ignored while maximizing — the loading trust line is the constraint"
-    : "";
   // only the idle line follows the mode — a finished run's summary stays
   if (statusToo && !state.optJob
       && $("opt-status").textContent.startsWith("idle")) {
