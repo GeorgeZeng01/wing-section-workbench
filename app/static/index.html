@@ -132,6 +132,54 @@
       </div>
     </section>
 
+    <section class="group">
+      <div class="group-head">
+        <h2 class="group-title">Rules</h2>
+        <label class="check"
+               title="Competition rule envelope: user-entered geometric limits, checked on the installed wing at the configured ride height. Rules change every season, so nothing is hardcoded — enter this year's numbers and save them as a named preset. The drawing shows the envelope as a dashed box; the optimizer treats it as hard constraints.">
+          <input id="rules-on" type="checkbox"> apply</label>
+      </div>
+      <div id="rules-body" hidden>
+        <div class="fields two-col">
+          <label class="field"
+                 title="Cap on the installed streamwise length of the whole stack (all elements together, measured as driven). Blank = unconstrained.">
+            <span class="f-label">Max length</span>
+            <span class="f-wrap"><input id="rule-len" type="number" step="1" min="10" max="20000"><i>mm</i></span></label>
+          <label class="field"
+                 title="Highest point of any element above the road. Blank = unconstrained.">
+            <span class="f-label">Max height</span>
+            <span class="f-wrap"><input id="rule-height" type="number" step="1" min="1" max="5000"><i>mm</i></span></label>
+          <label class="field"
+                 title="The lowest point of the wing must stay at or above this height over the road. Blank = unconstrained.">
+            <span class="f-label">Min clearance</span>
+            <span class="f-wrap"><input id="rule-clear" type="number" step="1" min="0" max="1000"><i>mm</i></span></label>
+          <label class="field"
+                 title="Where the drawn box starts along x, relative to the wing's leading extent. Drawing anchor only — compliance is measured on extents, since the section can be mounted anywhere along the car.">
+            <span class="f-label">Box x-offset</span>
+            <span class="f-wrap"><input id="rule-xoff" type="number" step="1" min="-20000" max="20000" value="0"><i>mm</i></span></label>
+        </div>
+        <div class="fields two-col">
+          <label class="field"
+                 title="Named rule sets saved on this machine (they apply across projects). The active values always travel with the project itself.">
+            <span class="f-label">Preset</span>
+            <span class="f-wrap"><select id="rule-preset" class="select-inline">
+              <option value="">— none —</option>
+            </select><i></i></span></label>
+          <label class="field" title="Name for saving the current values as a preset, e.g. FSAE 2026.">
+            <span class="f-label">Save as</span>
+            <span class="f-wrap"><input id="rule-preset-name" type="text"
+              maxlength="60" placeholder="FSAE 2026"><i></i></span></label>
+        </div>
+        <div class="action-row">
+          <button id="rule-preset-save" class="btn tiny">Save preset</button>
+          <button id="rule-preset-del" class="btn tiny ghost">Delete preset</button>
+        </div>
+        <p class="group-note">The dashed box in the drawing is this envelope;
+        a violated edge turns amber with the overshoot in mm. The optimizer
+        refuses to start from a violating design and never proposes one.</p>
+      </div>
+    </section>
+
     <div class="action-row">
       <button id="btn-analyze" class="btn primary">Analyze section</button>
       <button id="btn-goto-optimize" class="btn">Optimize…</button>
@@ -145,6 +193,8 @@
             title="How the wing runs on the car: inverted, above the road. Analysis always uses this orientation. Exports can still be written in the upright catalog/CAD convention — see the Export tab.">
         As driven — inverted above the road</span>
       <label class="check"><input id="vp-dims" type="checkbox" checked> Dimensions</label>
+      <label class="check" title="Show the rule envelope box (when Rules are applied)">
+        <input id="vp-rules" type="checkbox" checked> Rules</label>
       <button id="vp-fit" class="btn tiny ghost" title="Fit drawing to view">Fit</button>
       <span class="vp-nav-hint">scroll to zoom · drag to pan</span>
       <span id="vp-legend" class="vp-legend"></span>
@@ -229,6 +279,13 @@
       <div class="opt-grid">
         <div class="opt-controls">
           <div class="fields two-col">
+            <label class="field"
+                   title="Hit a target: track the requested downforce, then minimize drag at the achievable level. Maximize downforce: most downforce the model can be TRUSTED about — every element is held inside the 90% loading line where RANS measured over-claims of 23–42%, and the winner is re-verified at full fidelity.">
+              <span class="f-label">Goal</span>
+              <span class="f-wrap"><select id="opt-objective" class="select-inline">
+                <option value="target">Hit a downforce target</option>
+                <option value="max_downforce">Maximize downforce (trusted)</option>
+              </select><i></i></span></label>
             <label class="field"><span class="f-label">Target</span>
               <span class="f-wrap"><input id="opt-target" type="number" step="10" value="250"><i>N</i></span></label>
             <label class="field"
@@ -249,6 +306,14 @@
             <label class="field" title="How strongly drag counts against a design. 0 = ignore drag; higher values trade downforce accuracy for cleaner, lower-drag settings.">
               <span class="f-label">Drag penalty</span>
               <span class="f-wrap"><input id="opt-drag-w" type="number" step="0.05" min="0" max="2" value="0.1"><i></i></span></label>
+            <label class="field"
+                   title="Optional efficiency floor: candidates must hold at least this downforce/drag ratio. Blank = off. Useful with Maximize downforce — pure maximization otherwise pays any drag price for the last newton.">
+              <span class="f-label">Min L/D</span>
+              <span class="f-wrap"><input id="opt-minld" type="number" step="0.5" min="0.5" max="50" placeholder="off"><i></i></span></label>
+            <label class="field"
+                   title="Viscous-data confidence floor (NeuralFoil's own confidence in each element's polar, 0–1). Candidates below the floor are dropped at the end and the search is steered away from them. 0.5 is the screener's bar and the default; raise it for conservative designs, lower toward 0 to accept anything (the badge still shows).">
+              <span class="f-label">Min confidence</span>
+              <span class="f-wrap"><input id="opt-minconf" type="number" step="0.05" min="0" max="1" value="0.5"><i></i></span></label>
           </div>
           <fieldset class="var-set">
             <legend>Free variables</legend>
@@ -280,6 +345,10 @@
         <div class="opt-charts">
           <div id="opt-conv" class="chart-host"></div>
           <div id="opt-obj" class="chart-host"></div>
+          <div id="opt-pareto" class="chart-host"
+               title="Every clean design the search evaluated, as the downforce–drag trade-off. Blue points are trusted; amber points carry a trust flag (low confidence, near stall, past the loading line, or the tight-slot signature). Click a front point to apply that design."></div>
+          <div id="opt-pareto-note" class="note" hidden>Pareto front —
+            click a point to apply that design. Amber = trust-flagged.</div>
         </div>
         <div class="opt-best">
           <h3 class="sub-title">Best design</h3>
@@ -290,6 +359,22 @@
               title="Distinct designs found during the search that also hit the target — different trade-offs, not just the single optimum. Apply one to inspect it in full.">
             Candidates</h3>
           <div id="opt-candidates"></div>
+          <h3 class="sub-title" id="rerank-title" hidden
+              title="Runs the winner, every candidate and the Pareto knee through the same 2D RANS truth case, one at a time, then re-ranks by MEASURED downforce. The panel model navigates; RANS measures — this is the maximum-accuracy step for the designs you would actually build. Medium mesh agreed with fine in the calibration campaign; coarse is screening only.">
+            RANS re-rank</h3>
+          <div id="rerank-block" hidden>
+            <div class="action-row">
+              <select id="rr-mesh" class="select-inline">
+                <option value="coarse">Coarse (screening)</option>
+                <option value="medium" selected>Medium</option>
+                <option value="fine">Fine (slow, definitive)</option>
+              </select>
+              <button id="btn-rerank" class="btn small">Verify shortlist</button>
+              <button id="btn-rerank-cancel" class="btn small ghost" disabled>Cancel</button>
+            </div>
+            <div id="rerank-status" class="note"></div>
+            <div id="rerank-table"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -351,6 +436,9 @@
           <span class="f-label">Max iterations</span>
           <span class="f-wrap"><input id="rans-iters" type="number" step="100" min="100" max="20000" value="10000" style="width:70px"><i></i></span></label>
         <button id="btn-rans-run" class="btn small primary" disabled>Verify with RANS</button>
+        <button id="btn-rans-stop" class="btn small" disabled
+                title="Stop the solve gracefully: the solver writes its current velocity and pressure fields first, so the flow view works on the partial run. The verdict says 'stopped by user' and no k_g is suggested from a hand-stopped tail. Cancel, by contrast, kills the run and keeps nothing.">
+          Stop &amp; keep fields</button>
         <button id="btn-rans-cancel" class="btn small ghost" disabled>Cancel</button>
         <span id="rans-note" class="note">checking Docker…</span>
       </div>
@@ -393,6 +481,9 @@
             <option value="spline">Spline (smooth, for lofting)</option>
             <option value="polyline">Polyline (exact points)</option>
           </select><i></i></span></label>
+        <label class="check"
+               title="Adds a bounding box as 4 lines on their own HITBOX layer — horizontals touching the lowest and highest points, verticals touching the leftmost and rightmost points of all airfoils together. Instant overall dimensions in CAD; delete the HITBOX layer when done.">
+          <input id="exp-hitbox" type="checkbox"> Bounding-box lines (DXF)</label>
       </div>
       <div class="export-grid">
         <div class="export-card">

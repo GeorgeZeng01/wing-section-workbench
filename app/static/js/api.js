@@ -43,6 +43,8 @@ export const api = {
   sweep: (config, variable, values) =>
     request("POST", "/api/sweep", { config, variable, values }),
   presets: () => request("GET", "/api/presets"),
+  rulePresets: () => request("GET", "/api/rule-presets"),
+  rulePresetsSave: (presets) => request("PUT", "/api/rule-presets", { presets }),
   session: () => request("GET", "/api/session"),
   sessionSave: (state) => request("POST", "/api/session", { state }),
   exportSave: (fmt, config, options = {}) =>
@@ -57,6 +59,12 @@ export const api = {
             { config, mesh_size: meshSize, max_iters: maxIters }),
   ransStatus: (id) => request("GET", `/api/rans/${id}`),
   ransCancel: (id) => request("POST", `/api/rans/${id}/cancel`),
+  ransStop: (id) => request("POST", `/api/rans/${id}/stop`),
+  ransQueueStart: (items, meshSize, maxIters = 10000) =>
+    request("POST", "/api/rans-queue/start",
+            { items, mesh_size: meshSize, max_iters: maxIters }),
+  ransQueueCurrent: () => request("GET", "/api/rans-queue/current"),
+  ransQueueCancel: () => request("POST", "/api/rans-queue/cancel"),
 };
 
 export async function downloadExport(fmt, config, options = {}) {

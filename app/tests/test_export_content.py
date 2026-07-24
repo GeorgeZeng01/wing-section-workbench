@@ -112,6 +112,37 @@ def main():
         check(f"dxf TE base line spans the contour endpoints ({e.dxf.layer})",
               got == want)
 
+    # ---- DXF hitbox: 4 lines on their own layer at the collective extremes
+    check("dxf hitbox absent by default", "HITBOX" not in layers)
+    data_h = export.dxf_bytes(CFG, "installed", "polyline",
+                              include_hitbox=True)
+    doc_h = ezdxf.read(io.StringIO(data_h.decode("utf-8")))
+    hlines = [e for e in doc_h.modelspace().query("LINE")
+              if e.dxf.layer == "HITBOX"]
+    allpts_h = np.vstack(inst_mm)
+    hx0, hx1 = allpts_h[:, 0].min(), allpts_h[:, 0].max()
+    hy0, hy1 = allpts_h[:, 1].min(), allpts_h[:, 1].max()
+    segs = {tuple(np.round(sorted([tuple(np.asarray(e.dxf.start)[:2]),
+                                   tuple(np.asarray(e.dxf.end)[:2])])
+                           , 3).flatten()) for e in hlines}
+    want_h = {tuple(np.round(sorted([a, b]), 3).flatten()) for a, b in (
+        ((hx0, hy0), (hx1, hy0)), ((hx0, hy1), (hx1, hy1)),
+        ((hx0, hy0), (hx0, hy1)), ((hx1, hy0), (hx1, hy1)))}
+    check("dxf hitbox = 4 lines touching the collective extremes",
+          len(hlines) == 4 and segs == want_h,
+          f"({len(hlines)} lines)")
+    # the design frame has no ground line but the box is still meaningful
+    data_hd = export.dxf_bytes(CFG, "design", "polyline",
+                               include_hitbox=True)
+    doc_hd = ezdxf.read(io.StringIO(data_hd.decode("utf-8")))
+    hd = [e for e in doc_hd.modelspace().query("LINE")
+          if e.dxf.layer == "HITBOX"]
+    allpts_d = np.vstack(design_mm)
+    check("dxf hitbox in the design frame spans the design extents",
+          len(hd) == 4 and abs(min(min(e.dxf.start[0], e.dxf.end[0])
+                                   for e in hd)
+                               - allpts_d[:, 0].min()) < 1e-3)
+
     # ---- SVG: true scale, ground at y = 0, y-flip consistent ----
     svg = export.svg_bytes(CFG, "installed").decode()
     vb = re.search(r'viewBox="([-\d.]+) 0 ([\d.]+) ([\d.]+)"', svg)

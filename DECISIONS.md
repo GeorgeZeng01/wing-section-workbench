@@ -1050,6 +1050,262 @@ into the banded map (a 2-D validity surface) — rejected as false
 precision from four configs; the two existing mechanisms already carry
 the message at the right granularity.
 
+## Rule envelopes and optimizer objectives (2026-07)
+
+**Rule envelopes are hard constraints, not soft bands.** The optimizer's
+loading/gap/overlap bands are preferences: `_baseline_allowance()` widens
+them so a start is never penalized for being what it already is
+(do-no-harm). Competition rules are legality — a design outside the box is
+not a worse design, it is not a legal design — so the envelope check marks
+evaluations infeasible by name (`rule: max_length_mm by 15.2 mm`), and a
+run started from a violating design refuses eagerly with a plain message
+instead of burning its budget on a search where every evaluation would be
+infeasible. Options considered: (a) treat the envelope like the soft bands
+and widen to the baseline — rejected, do-no-harm would legalize an illegal
+start; (b) silently gate per-evaluation only — rejected, a violating start
+would run to "no feasible design found" with no hint why; (c) eager
+refusal + per-evaluation gate (chosen).
+
+**One envelope object drives everything.** `geometry.envelope_check()` is
+the single compliance implementation; `geometry_report` (UI warnings +
+viewport box), `quick_objective_eval` (optimizer feasibility), and the
+optimizer's eager refusal all call it, so the drawing, the warning list
+and the optimizer can never disagree about legality. The verdict echoes
+the envelope limits so the viewport draws the box from the same object it
+colors violations with.
+
+**Envelope semantics v1: extent box in the installed frame at the
+configured ride height.** Limits are mm caps on installed extents (length,
+top height, ground clearance), not a positioned rectangle — the section
+can be mounted anywhere along the car, so length constrains extent and
+the drawn box's x-offset is display-only. All limits optional; values are
+always user-entered, never hardcoded (rules change every season).
+Alternatives: a positioned box in the wing-local frame (rejected — invites
+false violations from an arbitrary mounting origin); checking across a
+ride-height range (deferred — the rules FSAE-style teams care about are
+measured in static/reference condition; revisit if a real rulebook needs
+it).
+
+**Rule presets are a machine-level library; the active envelope travels
+with the project.** Named rule sets (`FSAE 2026`, …) live in
+`app_data/rule_presets.json` behind `GET/PUT /api/rule-presets` — the same
+rulebook applies across projects on one machine. The active envelope is a
+`rule_envelope` config field, so sessions and project files carry it
+automatically. Alternative considered: presets inside each project file —
+rejected, a new project would start with an empty rulebook and teams would
+re-type the season's numbers per project.
+
+**Target mode is now two-phase: attain, then descend.** The old search had
+two low-target failure modes, both measured on the shipped code: the
+non-thorough early stop kept the FIRST design that hit the target (at
+250 N the first on-target evaluation carried 35.4 N of drag; the design
+the search should have found carries 29.9 N), and a target below the
+stack's floor made the 60-weight tracking term reward shedding downforce
+by slot abuse — the gap/overlap penalties are weight 2, and with flap
+chords off the search has no legitimate shrink lever, so sabotage was the
+only move left. Now: phase A is the unchanged tracker; the run then
+resolves D* (the target when the clean penalty-gated pool reached it,
+else that pool's floor/ceiling) and phase B re-seeds from the lowest-drag
+on-level archive entries (diversified, multi-start, full paneling,
+reserved 35% of the budget) and minimizes drag inside a 0.8% deadzone
+spring at D*. Candidate selection re-scores the whole archive under the
+final objective so "candidate #1 has the lowest J" stays true, and the
+snapshot reports `dstar_n`/`target_note` so the UI quotes the measured
+floor ("about 59 N — more than the 5 N asked") instead of guessing from
+pinned variables. Options considered: (a) meet-or-exceed hinge objective —
+rejected, target mode serves aero balance where overshoot is also wrong;
+(b) leave target mode alone and add a separate min-drag-at-target mode —
+rejected, the first-hitter/early-stop behavior is a defect, not a
+preference; (c) two-phase with penalty-gated D* (chosen). Measured on the
+fixed benchmark (docs/benchmarks): 250 N winner drag 32.02 -> 31.08 N at
+the Standard budget, with Fast and Thorough now landing on the same
+design (31.08 vs 31.05 N); within a single run the first on-target
+tracker hit carried 35.4 N against the descended winner's 29.9 N (the
+budget-500 regression test pins that spread). Identical-runs-identical
+preserved; the hot-start do-no-harm guarantee (471 N baseline -> 482 N
+optimized at full fidelity) preserved. Note: in-band gap shading (0.8 %c
+is the band edge) is still penalty-free here by construction — pricing
+that is the recovery-metric decision below.
+
+**Max-downforce mode: the loading band hardens at the measured trust
+line, cliff-free in the search, hard at the output.** The measured fact
+this mode exists to respect: winners past the 0.90 free-air loading line
+over-claim 23-42% against fine-mesh RANS (replicated), so "maximize
+downforce" without the guardrail would be a fantasy-zone generator. In
+this mode the do-no-harm widening deliberately does NOT apply to the
+free-air loading band: an approach ramp starts at 0.85 (so the wall is
+felt with gradient), a steep smooth wall stands past 0.90 (at loading
+0.95 it costs more J than any plausible downforce gain buys), and the
+output carries the hard guarantee — every candidate re-checked at full
+fidelity, violators dropped, the best survivor promoted, and an explicit
+failure ("...best candidate loads 97% — enlarge the chord, add an
+element, or use target mode") when nothing survives. A hot baseline is
+NOT refused (unlike rule violations — legality vs trust): the run
+proceeds under the capped band with a note, and the UI says the winner
+may sit below the start's over-claimed number by design. Options
+considered: (a) mark loading > 0.90 infeasible mid-search — rejected,
+the same cliff the trust-penalty decision already rejected; (b) penalty
+scaling only, no output filter — rejected, the mode's entire output
+would be the over-claim regime the moment the penalty is out-bid;
+(c) ramp + wall + output guarantee (chosen). Reward is linear
+(60·(1 − downforce/baseline), scale fixed at run start) — no set-point,
+so the gradient must not vanish; measured on the fixed benchmark (after
+the review round below fixed the wall continuity and the clean-pool
+gate) the mode lifts the two-element baseline's 259.1 N claim to
+269.2 N with the winner riding the line at 90.0% loading, and pulls the
+recorded near-stall specimen from 112% back to 90%. Fine-mesh RANS then
+mapped the mode's own axis: -19.2% at loading 0.876 (pre-review-fix
+winner) and -24.4% at 0.900 (post-fix winner riding the line), against
+the -14% clean anchor near 0.85 — optimism is a continuum rising toward
+the line, not a step past it. Decision on that evidence: the 0.90
+boundary STANDS (it is where the recorded -37..-42% collapse regime
+begins, and moving it on four loading points would be curve-chasing —
+the same reasoning that rejected the global k_g refit); instead the
+gradient is documented in the mode's hint and LOG.md, and the RANS
+re-rank measures each actual winner. Anyone wanting the -14..-19%
+regime simply reads the re-rank table or backs the target off the line.
+
+**min_ld and min_confidence are floors with the same shape: soft hinge in
+the search, hard filter at the output.** `min_ld` (efficiency floor, the
+usable form of "best ratio" — pure max-L/D degenerates to the smallest
+wing) and `min_confidence` (user-set NeuralFoil confidence floor,
+default 0.5 = the screener's bar; the penalty knee follows the user's
+floor so the search is steered away from designs the filter would
+discard, and conf_pen0 keeps the charge baseline-relative). Both filters
+drop violating candidates at full fidelity and fail with a message naming
+the floor and the best value found when nothing passes. Consequence
+accepted at the default: a winner that would previously ship with a
+`low confidence` badge is now replaced by the best passing design, and
+the run fails outright only when nothing passes (the calibration campaign
+measured that badge class over-claiming to -42%, so shipping it as the
+winner was the worse default). Alternative considered: default the floor
+to "off" and enforce only when set — rejected as keeping the measured
+failure mode as the default output; floor 0 restores it explicitly.
+
+**Pareto front: mined from the archive at run end, re-analyzed at full
+fidelity, trust-colored, deliberately unfiltered.** The optimizer always
+archived every feasible evaluation with downforce AND drag, then threw
+the trade-off away; now the clean (penalty-gated) non-dominated set is
+downsampled to 24 points (extremes + farthest-point, knee-dense),
+re-analyzed at full paneling with the same trust summary candidates
+carry, and served in the snapshot as a clickable chart — click applies
+the design through the existing applyDesign path. The front is NOT run
+through the output filters: it is a view of the whole trade-off, and
+hiding the flagged region would misrepresent where the model stops being
+trustworthy — flagged points render amber instead. While the search
+runs, a strided downsample of the archive streams as a live grey cloud.
+Options considered: (a) expose the raw archive to the client and mine
+there — rejected, the front needs full-fidelity re-analysis and configs
+reconstructed server-side anyway; (b) live full-fidelity front during
+the run — rejected, up to 24 analyze() calls per poll; (c) final
+finalized front + live search-fidelity cloud (chosen).
+
+**Slot-flow trust metric: built, measured against the RANS record, and
+rejected — a geometric advisory ships instead.** The observed failure mode
+(flow detaching ahead of the main TE while the flap sits above the slot
+flow) suggested a Smith-1975 canonical-recovery metric on the coupled
+inviscid solution: a mispositioned flap removes the dumping-velocity
+relief, so the upstream element's demanded surface recovery should climb.
+Five variants were measured against every configuration with a fine-mesh
+RANS delta on record (`scripts/recovery_metric_check.py`, kept as the
+executable evidence): the naive ground-solution form reads 0.977-0.990
+for EVERY design (ground-image suction peaks, cp_min to -49, dominate the
+normalization); free-air and TE-offset variants leave the clean and
+warned classes overlapping; and the one variant that nearly separates
+them (TE dumping-velocity ratio) is a loading proxy that moves the WRONG
+way along the gap axis — the inviscid solver reads a tighter slot as
+MORE relief, because the real tight-gap failure is boundary-layer
+merging, which no inviscid quantity sees. Options considered: (a) wire
+the near-separating variant anyway — rejected, redundant with the
+RANS-validated loading machinery and actively wrong on the gap axis;
+(b) an unvalidated geometric capture-window with invented thresholds —
+rejected, nothing on record calibrates it; (c) ship a signature advisory
++ leave the quantitative floor to the RANS gap-axis leg (chosen). The
+check also CORRECTED an assumption this plan carried: the clean -14%
+stage-2 winners share the exact slot corner of the flagged ones (gap
+0.80, overlap ~0) — the record separates the over-claim classes by
+LOADING alone, and since the validated 1.5%c-gap baseline at comparable
+downforce measured ~0%, the healthy-winner -14% bias may itself partly
+be the tight-slot cost. That hypothesis is exactly what the gap-axis
+RANS leg measures. Until then, `analysis.slot_signature_warnings` flags
+the corner (gap <= ~1%c AND overlap < 0.5%c) with the recorded numbers
+quoted, in the analysis page and every optimizer candidate's warning
+count; no optimizer penalty is charged on geometry the record has not
+priced.
+
+**Adversarial review round (2026-07-23): 33 confirmed findings fixed;
+two accepted with rationale.** A five-dimension adversarial review of
+this branch's diff (each finding independently refuted-or-confirmed)
+caught, most importantly: the max-mode wall DIPPED to ~0 just past the
+0.90 line (the elif dropped the ramp's terminal value — the search was
+attracted into 0.90-0.908, the exact band the mode excludes), and the
+clean-pool gates tested the raw penalty including the ramp, which
+excluded the legitimate 0.885-0.90 shoulder from candidacy while
+admitting 0.90-0.9056 — the pool was inverted exactly across the trust
+line. Fix: the wall carries the ramp's terminal value, and the pools
+gate on `pen_gate` (penalty minus the max-mode loading shaping — the
+ramp is search pressure, not a verdict). Measured effect: the benchmark
+max-mode winner moved 259.1 -> 269.2 N, now riding the line at 90.0%
+loading. Also fixed: rule legality re-certified at full paneling before
+any candidate is returned; dropped winners promote the best survivor by
+the final objective (not a diversity pick); the solver guard made
+two-directional between single runs and the queue; user-stop verdicts
+mirror whether the stop demonstrably took effect; and a dozen smaller
+UI/report/test defects (see commit cc7d80f). Accepted without code
+change: the rule-preset PUT has no concurrency token (single-user
+localhost app; last-writer-wins on a hand-edited library is acceptable),
+and a ~one-poll race can conservatively label a residual-converged run
+"stopped by user" when the stop lands in the solver's final second —
+the mislabel direction withholds a k_g suggestion, never invents one.
+
+**RANS re-rank: the maximum-accuracy step is RANS at the END of the
+loop, not a different engine in it.** The user's ask was maximum
+accuracy. Measured reality: there is no viable viscous 2D multi-element
+ground-effect engine to swap in (MSES is licensed and fragile exactly
+here; an in-house viscous-inviscid coupling is a research project with
+its own unvalidated error bars); RANS-in-the-DE-loop is arithmetic
+nonsense (~1500 evaluations x hours); and the coarse mesh — the only
+fast RANS — mis-read a validated point by -29% in the campaign, worse
+than the panel model inside its trusted band. What ships: a sequential
+verification queue (app/core/rans_queue.py) that takes the shortlist —
+winner, candidates, the Pareto knee — through the existing cfd_run
+pipeline at medium mesh by default (medium agreed with fine in the
+campaign; fine for finals), re-ranks by MEASURED downforce, and
+classifies each panel-vs-RANS delta against the recorded bands (healthy
+band above -20%, over-claims below, conservative above +5%). Every item
+passes the rule-envelope gate before a solver hour is spent; the queue
+shares the single-solver guard; verdict rows persist with the session.
+Alternatives considered: surrogate/EI refinement around the RANS winner
+— deferred as the documented extension, the plain re-rank is the 80%
+that costs 20%; parallel solves — rejected, Docker/WSL2 is a single-lane
+resource and the one-job guard exists for measured reasons.
+
+**RANS "Stop & keep fields": the graceful writeNow path gets a user
+trigger, with an honest verdict.** Cancel hard-kills the container
+(`docker rm -f`), which preempts run.sh's writeCellCentres step — a
+cancelled run can never feed the flow view. The force-based auto-stop
+already had the right machinery (controlDict flipped to `stopAt
+writeNow`, solver writes fields and exits 0, run.sh completes, finalize
+restores the case); the new button routes a user request through exactly
+that path. Two deliberate choices: (a) the verdict is "stopped by user
+(fields written)", converged = False, and NO suggested_k_g — a
+hand-stopped tail must not feed calibration however flat it happens to
+look (options considered: offer k_g with a caution flag — rejected, the
+calibration log's discipline is that only converged verdicts contribute);
+(b) the request is refused with a 409 before the solver runs — there are
+no fields to keep yet, and pretending to "stop" a meshing job would just
+be a slower cancel. Cancel stays available unchanged.
+
+**DXF bounding box: 4 LINEs on a dedicated HITBOX layer, off by default.**
+Horizontals touch the stack's lowest/highest points, verticals its
+leftmost/rightmost — instant overall dimensions in CAD, deletable in one
+action by killing the layer. Options considered: (a) a closed LWPOLYLINE —
+rejected, four independent lines match how CAD users measure and trim
+against reference geometry, and either dies with the layer anyway;
+(b) always-on — rejected, most exports feed lofts where any non-contour
+geometry is noise. Available in both frames (the design frame has no
+ground line, but its box is still meaningful).
+
 ## Known limitations
 
 Documented, not fixed. The custom-airfoil registry lives in server memory

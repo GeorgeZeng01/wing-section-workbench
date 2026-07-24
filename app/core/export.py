@@ -52,7 +52,8 @@ def _layer_name(i: int, role: str) -> str:
 
 
 def dxf_bytes(cfg: StackConfig, frame: str = "installed",
-              entity: str = "spline", include_ground: bool = True) -> bytes:
+              entity: str = "spline", include_ground: bool = True,
+              include_hitbox: bool = False) -> bytes:
     import ezdxf
     from ezdxf import units
 
@@ -90,6 +91,21 @@ def dxf_bytes(cfg: StackConfig, frame: str = "installed",
         pad = 0.25 * (x1 - x0)
         msp.add_line((x0 - pad, 0.0), (x1 + pad, 0.0),
                      dxfattribs={"layer": "GROUND"})
+
+    if include_hitbox:
+        # collective bounding box as 4 separate LINEs on their own layer:
+        # each line touches the stack's extreme point on its side, so CAD
+        # users get instant overall dimensions and can delete the whole
+        # box by killing the HITBOX layer
+        doc.layers.add("HITBOX", color=6)   # magenta — clearly not geometry
+        allpts = np.vstack([_mm(e, cfg) for e in elements])
+        x0, x1 = allpts[:, 0].min(), allpts[:, 0].max()
+        y0, y1 = allpts[:, 1].min(), allpts[:, 1].max()
+        for a, b in (((x0, y0), (x1, y0)),   # bottom: touches lowest point
+                     ((x0, y1), (x1, y1)),   # top: touches highest point
+                     ((x0, y0), (x0, y1)),   # left: touches leading point
+                     ((x1, y0), (x1, y1))):  # right: touches trailing point
+            msp.add_line(a, b, dxfattribs={"layer": "HITBOX"})
 
     buf = io.StringIO()
     doc.write(buf, fmt="asc")
@@ -248,14 +264,16 @@ manifest records the achieved trailing-edge thickness per element.
 
 
 def zip_bundle(cfg: StackConfig, analysis_result: dict | None = None,
-               entity: str = "spline") -> bytes:
+               entity: str = "spline", include_hitbox: bool = False) -> bytes:
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("README.txt", _ZIP_README)
         z.writestr("dxf/section_installed.dxf",
-                   dxf_bytes(cfg, "installed", entity))
+                   dxf_bytes(cfg, "installed", entity,
+                             include_hitbox=include_hitbox))
         z.writestr("dxf/section_design.dxf",
-                   dxf_bytes(cfg, "design", entity, include_ground=False))
+                   dxf_bytes(cfg, "design", entity, include_ground=False,
+                             include_hitbox=include_hitbox))
         installed = _frame_elements(cfg, "installed")
         for i, e in enumerate(installed):
             tag = f"{i+1}_{e['role']}"

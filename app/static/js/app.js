@@ -53,6 +53,9 @@ const state = {
   screenRows: null,
   screenSort: { key: "CL_max", dir: -1 },
   screenShowLowConf: false,
+  rulePresets: [],            // machine-level rule-envelope library
+  ransRerank: null,           // last RANS re-rank rows (session-persisted)
+  rerankPoll: null,
 };
 
 const viewport = new Viewport($("viewport"));
@@ -111,6 +114,16 @@ function writeConfigToForm() {
     $("mfg-te").value = m.te_gap_mm ?? 1.2;
     $("mfg-mode").value = m.te_mode || "thicken";
     $("mfg-tmin").value = m.min_thickness_mm ?? 0;
+  }
+  const env = state.config.rule_envelope;
+  $("rules-on").checked = !!env;
+  $("rules-body").hidden = !env;
+  if (env) {
+    $("rule-len").value = env.max_length_mm ?? "";
+    $("rule-height").value = env.max_height_mm ?? "";
+    $("rule-clear").value = env.min_ground_clearance_mm ?? "";
+    $("rule-xoff").value = env.x_offset_mm ?? 0;
+    $("rule-preset").value = env.preset_name ?? "";
   }
   buildElementCards();
   updateTargetC();
@@ -197,6 +210,138 @@ function bindManufacturing() {
       state.config.manufacturing = readMfgForm();
       onConfigChanged();
     });
+  }
+}
+
+/* ---------------- rules envelope ---------------- */
+
+function readRulesForm() {
+  const num = (id) => {
+    const v = parseFloat($(id).value);
+    return Number.isFinite(v) ? v : null;
+  };
+  const env = {
+    max_length_mm: num("rule-len"),
+    max_height_mm: num("rule-height"),
+    min_ground_clearance_mm: num("rule-clear"),
+    x_offset_mm: num("rule-xoff") ?? 0,
+  };
+  const preset = $("rule-preset").value;
+  if (preset) env.preset_name = preset;
+  return env;
+}
+
+function bindRules() {
+  $("rules-on").addEventListener("change", () => {
+    if ($("rules-on").checked) {
+      state.config.rule_envelope = readRulesForm();
+    } else {
+      delete state.config.rule_envelope;
+    }
+    $("rules-body").hidden = !$("rules-on").checked;
+    onConfigChanged();
+  });
+  for (const id of ["rule-len", "rule-height", "rule-clear", "rule-xoff"]) {
+    $(id).addEventListener("input", () => {
+      if (!$("rules-on").checked) return;
+      $("rule-preset").value = "";   // hand edits leave the preset behind
+      state.config.rule_envelope = readRulesForm();
+      onConfigChanged();
+    });
+  }
+  $("rule-preset").addEventListener("change", () => {
+    const name = $("rule-preset").value;
+    const p = state.rulePresets.find((x) => x.name === name);
+    if (p) {
+      $("rule-len").value = p.envelope.max_length_mm ?? "";
+      $("rule-height").value = p.envelope.max_height_mm ?? "";
+      $("rule-clear").value = p.envelope.min_ground_clearance_mm ?? "";
+      $("rule-xoff").value = p.envelope.x_offset_mm ?? 0;
+      $("rule-preset-name").value = name;
+    }
+    if (!$("rules-on").checked) return;
+    state.config.rule_envelope = readRulesForm();
+    onConfigChanged();
+  });
+  $("rule-preset-save").addEventListener("click", saveRulePreset);
+  $("rule-preset-del").addEventListener("click", deleteRulePreset);
+}
+
+function renderRulePresetOptions() {
+  const sel = $("rule-preset");
+  const cur = state.config.rule_envelope?.preset_name || "";
+  sel.innerHTML = "";
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "— none —";
+  sel.appendChild(none);
+  for (const p of state.rulePresets) {
+    const o = document.createElement("option");
+    o.value = p.name;
+    o.textContent = p.name;     // textContent: preset names are user data
+    sel.appendChild(o);
+  }
+  sel.value = state.rulePresets.some((p) => p.name === cur) ? cur : "";
+}
+
+async function loadRulePresets() {
+  try {
+    const res = await api.rulePresets();
+    state.rulePresets = res.presets || [];
+  } catch {
+    state.rulePresets = [];    // endpoint unreachable: an empty library
+  }
+  renderRulePresetOptions();
+}
+
+async function saveRulePreset() {
+  const name = ($("rule-preset-name").value || "").trim();
+  if (!name) { toast("Give the preset a name first."); return; }
+  const env = readRulesForm();
+  delete env.preset_name;
+  if (env.max_length_mm == null && env.max_height_mm == null
+      && env.min_ground_clearance_mm == null) {
+    toast("Enter at least one rule limit before saving.");
+    return;
+  }
+  // case-insensitive overwrite, matching the server's duplicate check —
+  // else saving "fsae" over "FSAE" 422s as a duplicate
+  const presets = [...state.rulePresets.filter(
+                     (p) => p.name.toLowerCase() !== name.toLowerCase()),
+                   { name, envelope: env }]
+    .sort((a, b) => a.name.localeCompare(b.name));
+  try {
+    await api.rulePresetsSave(presets);
+    state.rulePresets = presets;
+    renderRulePresetOptions();
+    $("rule-preset").value = name;
+    if ($("rules-on").checked) {
+      state.config.rule_envelope = readRulesForm();
+      onConfigChanged();
+    }
+    toast(`Rule preset "${name}" saved.`, "good");
+  } catch (e) {
+    toast(`Preset not saved: ${e.message}`);
+  }
+}
+
+async function deleteRulePreset() {
+  const name = $("rule-preset").value;
+  if (!name) { toast("Select a preset to delete."); return; }
+  const presets = state.rulePresets.filter((p) => p.name !== name);
+  try {
+    await api.rulePresetsSave(presets);
+    state.rulePresets = presets;
+    // the active envelope's values stay (they are the design's rules) but
+    // they no longer come from a library preset
+    if (state.config.rule_envelope?.preset_name === name) {
+      delete state.config.rule_envelope.preset_name;
+      onConfigChanged();
+    }
+    renderRulePresetOptions();
+    toast(`Rule preset "${name}" deleted.`, "good");
+  } catch (e) {
+    toast(`Preset not deleted: ${e.message}`);
   }
 }
 
@@ -416,7 +561,8 @@ function sessionSnapshot() {
     }
   }
   return { config: state.config, target: state.target,
-           airfoil_names: state.airfoilNames, custom_airfoils: custom };
+           airfoil_names: state.airfoilNames, custom_airfoils: custom,
+           rans_rerank: state.ransRerank };
 }
 
 // the desktop shell serves on a fresh port (= new origin) every launch, so
@@ -532,6 +678,18 @@ function buildViewportLegend() {
 // the viewport always draws as driven (inverted, ground at y = 0) — the
 // orientation the analysis uses; upright output lives in the Export tab
 $("vp-dims").addEventListener("change", (e) => viewport.setDims(e.target.checked));
+$("vp-rules").addEventListener("change", (e) => {
+  viewport.setRules(e.target.checked);
+  try {
+    localStorage.setItem("wss-show-rules", e.target.checked ? "1" : "0");
+  } catch { /* storage blocked — the toggle just resets next launch */ }
+});
+try {
+  if (localStorage.getItem("wss-show-rules") === "0") {
+    $("vp-rules").checked = false;
+    viewport.setRules(false);
+  }
+} catch { /* default stays on */ }
 $("vp-fit").addEventListener("click", () => viewport.fit());
 
 /* ---------------- analysis + results ---------------- */
@@ -787,6 +945,13 @@ $("btn-opt-apply").addEventListener("click", applyBestDesign);
 $("ov-af").addEventListener("change", () => {
   $("ov-af-pool").disabled = !$("ov-af").checked;
 });
+$("opt-objective").addEventListener("change", () => {
+  const isMax = $("opt-objective").value === "max_downforce";
+  $("opt-target").disabled = isMax;
+  $("opt-target").title = isMax
+    ? "Ignored while maximizing — the loading trust line is the constraint"
+    : "";
+});
 
 // manufacturing guard: with prep off, the optimizer tunes knife-edge
 // trailing edges that change once the wing is made buildable. Ask before
@@ -828,8 +993,11 @@ async function launchOptimization() {
   // snapshot the target: charts and hints must describe THIS run even if
   // the target field is edited while it searches
   const target = state.target;
+  const minConf = parseFloat($("opt-minconf").value);
   const options = {
     target_downforce_n: target,
+    objective: $("opt-objective").value,
+    min_confidence: Number.isFinite(minConf) ? minConf : 0.5,
     mode: $("opt-mode").value,
     budget: parseInt($("opt-budget").value, 10),
     // 0 is a legal weight ("ignore drag") — don't || it away
@@ -842,6 +1010,8 @@ async function launchOptimization() {
     opt_shape: $("ov-shape").checked,
     airfoil_pool: $("ov-af-pool").value,
   };
+  const minLd = parseFloat($("opt-minld").value);
+  if (Number.isFinite(minLd)) options.min_ld = minLd;
   if (![options.opt_stack_aoa, options.opt_deflections, options.opt_positions,
         options.opt_chords, options.opt_airfoils, options.opt_shape]
         .some(Boolean)) {
@@ -896,6 +1066,11 @@ function pollOptimizer() {
         if (s.best_config) {
           state.optResult = s;
           $("btn-opt-apply").disabled = false;
+          // the shortlist exists now — offer the RANS re-rank
+          if (s.candidates && s.candidates.length) {
+            $("rerank-title").hidden = false;
+            $("rerank-block").hidden = false;
+          }
         } else if (s.state === "done") {
           $("opt-best-body").textContent =
             "The run finished without a usable design — nothing to apply. " +
@@ -934,12 +1109,18 @@ function renderOptimizer(s) {
   $("opt-status").textContent = bits.join(" · ");
   if (s.history && s.history.length) {
     const target = state.optTarget ?? state.target;
+    const isMax = s.objective === "max_downforce";
     lineChart($("opt-conv"), {
       series: [{ name: "downforce", color: SERIES[0],
                  x: s.history.map(h => h.eval),
                  y: s.history.map(h => h.downforce_n) }],
       xLabel: "evaluation", yLabel: "downforce [N]",
-      targetY: target, targetLabel: `target ${target} N`,
+      // max mode has no set-point; the measured floor/ceiling line (D*)
+      // replaces the target line when the run reported one
+      targetY: isMax ? null : (s.target_note ? s.dstar_n : target),
+      targetLabel: isMax ? null
+        : (s.target_note ? `achievable ${s.dstar_n} N`
+                         : `target ${target} N`),
       height: 128,
     });
     lineChart($("opt-obj"), {
@@ -950,6 +1131,7 @@ function renderOptimizer(s) {
       height: 128,
     });
   }
+  renderPareto(s);
   if (s.best && s.variables) {
     const NAMES = { deflection_deg: "deflection", chord_ratio: "chord",
                     slot_gap_pct: "slot gap", slot_overlap_pct: "overlap",
@@ -981,6 +1163,216 @@ function renderOptimizer(s) {
   }
 }
 
+function renderPareto(s) {
+  const host = $("opt-pareto");
+  const note = $("opt-pareto-note");
+  const flagged = (p) => {
+    const f = p.summary || {};
+    return f.low_confidence || f.near_stall || f.slot_signature
+      || (f.frac_max ?? 0) > 0.9;
+  };
+  if (s.pareto && s.pareto.length) {
+    // finalized front: full-fidelity numbers, clickable, trust-colored
+    const pts = s.pareto.slice().sort((a, b) => a.drag_n - b.drag_n);
+    lineChart(host, {
+      series: [{
+        name: "front", color: SERIES[0], markers: "only",
+        x: pts.map(p => p.drag_n), y: pts.map(p => p.downforce_n),
+        pointColors: pts.map(p => (flagged(p) ? "#fab219" : SERIES[0])),
+        onPointClick: (i) => {
+          applyDesign(pts[i].config);
+          toast(`Pareto design applied — ${fmtN(pts[i].downforce_n, 0)} N ` +
+                `at ${fmtN(pts[i].drag_n)} N drag. Re-analyzing.`, "good");
+        },
+      }],
+      xLabel: "drag [N]", yLabel: "downforce [N]", height: 148,
+    });
+    note.hidden = false;
+  } else if (s.cloud && s.cloud.length
+             && (s.state === "running" || s.state === "finalizing")) {
+    // live evaluation cloud while the search runs (not clickable — these
+    // are search-fidelity numbers)
+    lineChart(host, {
+      series: [{ name: "evaluations", color: "#5a6a8a", markers: "only",
+                 x: s.cloud.map(c => c[1]), y: s.cloud.map(c => c[0]),
+                 pointColors: s.cloud.map(c => (c[2] ? "#fab219"
+                                                     : "#5a6a8a")) }],
+      xLabel: "drag [N]", yLabel: "downforce [N]", height: 148,
+    });
+    note.hidden = true;
+  }
+}
+
+/* ---------------- RANS re-rank of the shortlist ---------------- */
+
+function rerankItems() {
+  const s = state.optResult;
+  if (!s || !s.candidates || !s.candidates.length) {
+    // no run in this page session — fall back to the restored table so a
+    // reloaded shortlist can still be re-verified (e.g. on a finer mesh)
+    return (state.ransRerank || [])
+      .filter((r) => r.config)
+      .slice(0, 8)
+      .map((r) => ({ label: r.label, config: r.config }));
+  }
+  const items = s.candidates.map((c) => ({
+    label: `candidate #${c.rank} — ` +
+           `${fmtN(c.summary?.downforce_n ?? c.downforce_n, 0)} N`,
+    config: c.config,
+    _x: JSON.stringify(c.x),
+  }));
+  // add the Pareto knee: the front point farthest from the line between
+  // the extremes (normalized axes) — the classic best-trade-off pick
+  const front = s.pareto || [];
+  if (front.length >= 3) {
+    const dn = front.map(p => p.downforce_n);
+    const dr = front.map(p => p.drag_n);
+    const dnS = Math.max(...dn) - Math.min(...dn) || 1;
+    const drS = Math.max(...dr) - Math.min(...dr) || 1;
+    const a = front[0], b = front[front.length - 1];
+    const ax = a.drag_n / drS, ay = a.downforce_n / dnS;
+    const bx = b.drag_n / drS, by = b.downforce_n / dnS;
+    const len = Math.hypot(bx - ax, by - ay) || 1;
+    let knee = null, kd = 0;
+    for (const p of front) {
+      const px = p.drag_n / drS, py = p.downforce_n / dnS;
+      const d = Math.abs((bx - ax) * (ay - py) - (ax - px) * (by - ay)) / len;
+      if (d > kd) { kd = d; knee = p; }
+    }
+    if (knee && !items.some(it => it._x === JSON.stringify(knee.x))) {
+      items.push({ label: `pareto knee — ${fmtN(knee.downforce_n, 0)} N`,
+                   config: knee.config, _x: "" });
+    }
+  }
+  return items.slice(0, 8).map(({ label, config }) => ({ label, config }));
+}
+
+async function startRerank() {
+  const items = rerankItems();
+  if (!items.length) {
+    toast("Run the optimizer first — the queue verifies its shortlist.");
+    return;
+  }
+  busy($("btn-rerank"), true);
+  try {
+    await api.ransQueueStart(items, $("rr-mesh").value);
+    $("btn-rerank-cancel").disabled = false;
+    pollRerank();
+  } catch (e) {
+    toast(`Could not start the verification queue: ${e.message}`);
+    busy($("btn-rerank"), false);
+  }
+}
+
+function pollRerank() {
+  clearInterval(state.rerankPoll);
+  let misses = 0;
+  const detach = (msg) => {
+    clearInterval(state.rerankPoll);
+    busy($("btn-rerank"), false);
+    $("btn-rerank-cancel").disabled = true;
+    if (msg) toast(msg);
+  };
+  state.rerankPoll = setInterval(async () => {
+    try {
+      const { queue } = await api.ransQueueCurrent();
+      if (!queue) {
+        // a restarted server has no queue at all — do not spin forever
+        if (++misses >= 5) {
+          detach("Lost the verification queue (server restarted?) — " +
+                 "its runs did not survive.");
+        }
+        return;
+      }
+      misses = 0;
+      renderRerank(queue);
+      if (["done", "failed", "cancelled"].includes(queue.state)) {
+        detach(queue.state === "failed"
+          ? `Verification queue failed: ${queue.error}` : null);
+        state.ransRerank = queue.rows;
+        persistSession();
+      }
+    } catch {
+      if (++misses >= 5) {
+        detach("Lost contact with the verification queue — reopen the " +
+               "tab to re-attach if the server is back.");
+      }
+    }
+  }, 2000);
+}
+
+function renderRerank(q) {
+  const rows = q.rows || [];
+  const status = $("rerank-status");
+  if (q.state) {
+    const act = (q.active != null && rows[q.active])
+      ? ` — solving ${rows[q.active].label}` : "";
+    status.textContent = `${q.state}${act} · ${q.mesh_size || ""} mesh · ` +
+                         `${Math.round(q.elapsed_s || 0)}s`;
+  } else {
+    status.textContent = "last verification (restored with the session)";
+  }
+  const host = $("rerank-table");
+  host.innerHTML = "";
+  if (!rows.length) return;
+  const tbl = document.createElement("table");
+  tbl.className = "rr-table";
+  const head = tbl.insertRow();
+  for (const h of ["#", "design", "panel N", "RANS N", "Δ%", "verdict",
+                   "state", ""]) {
+    const th = document.createElement("th");
+    th.textContent = h;
+    head.appendChild(th);
+  }
+  for (const r of rows) {
+    const tr = tbl.insertRow();
+    if (!r.converged) tr.className = "dim";
+    const cells = [
+      r.rank ?? "–", r.label,
+      r.panel_downforce_n != null ? fmtN(r.panel_downforce_n, 0) : "–",
+      r.rans_downforce_n != null ? fmtN(r.rans_downforce_n, 0) : "–",
+      r.delta_cl_pct != null
+        ? `${r.delta_cl_pct > 0 ? "+" : ""}${fmtN(r.delta_cl_pct, 1)}` : "–",
+      (r.verdict || "–") + (r.mesh_caution ? " · coarse mesh" : ""),
+      r.state + (r.error ? ` (${String(r.error).slice(0, 60)})` : ""),
+    ];
+    for (const c of cells) {
+      const td = tr.insertCell();
+      td.textContent = String(c);   // labels/errors are data, not markup
+    }
+    const td = tr.insertCell();
+    if (r.config) {
+      // a restored row can reference an uploaded airfoil the server no
+      // longer holds (uploads live in server memory) — applying it would
+      // just error, so say why instead
+      const lost = (r.config.elements || []).some((e) => {
+        const m = String(e.airfoil || "").match(/custom:[a-z0-9_-]+/);
+        return m && !state.customDat[m[0]];
+      });
+      const b = document.createElement("button");
+      b.className = "btn tiny";
+      b.textContent = "Apply";
+      if (lost) {
+        b.disabled = true;
+        b.title = "References an uploaded airfoil that is not present in " +
+                  "this session — re-upload it to apply this design.";
+      } else {
+        b.addEventListener("click", () => applyDesign(r.config));
+      }
+      td.appendChild(b);
+    }
+    const vd = tr.cells[5];
+    if (r.verdict === "over-claims") vd.style.color = "var(--warning)";
+    if (r.verdict === "healthy band") vd.style.color = "var(--good)";
+  }
+  host.appendChild(tbl);
+}
+
+$("btn-rerank").addEventListener("click", startRerank);
+$("btn-rerank-cancel").addEventListener("click", async () => {
+  try { await api.ransQueueCancel(); } catch { /* already gone */ }
+});
+
 function renderOptHints(s) {
   const host = $("opt-hints");
   host.innerHTML = "";
@@ -1005,7 +1397,19 @@ function renderOptHints(s) {
   // same on-target tolerance the optimizer applies to candidates (3%, min 1 N)
   const hit = Math.abs(s.best.downforce_n - target) <= Math.max(0.03 * target, 1);
   let msg = null;
-  if (pinnedLo.length && hit) {
+  if (s.target_note === "unreachable_low") {
+    // the optimizer measured the clean floor — quote it instead of guessing
+    msg = `The lowest clean downforce this stack can make is about ` +
+          `${s.dstar_n} N — more than the ${target} N asked. The winner ` +
+          `delivers that floor at minimum drag (no slot tricks to fake the ` +
+          `number). To genuinely reach ${target} N: drop an element, ` +
+          `enable flap chords, shrink the chord, or reduce speed.`;
+  } else if (s.target_note === "unreachable_high") {
+    msg = `${target} N is beyond this stack at these conditions — the ` +
+          `clean ceiling measured about ${s.dstar_n} N, and the winner ` +
+          `delivers it at minimum drag. Add an element, enlarge the ` +
+          `chord, or lower the target.`;
+  } else if (pinnedLo.length && hit) {
     msg = `Target reached, but ${pinnedLo.join(", ")} sat at the minimum — ` +
           `this stack can make far more than ${target} N. For a cleaner ` +
           `design, raise the target, drop an element, or shrink the chord.`;
@@ -1013,6 +1417,36 @@ function renderOptHints(s) {
     msg = `${pinnedHi.join(", ")} hit the maximum and the target was still ` +
           `missed — ${target} N is beyond this stack at these conditions. ` +
           `Add an element, enlarge the chord, or lower the target.`;
+  }
+  if (s.objective === "max_downforce") {
+    // target-mode heuristics don't apply; say what the mode guaranteed
+    msg = null;
+    const w0 = ((s.candidates || [])[0] || {}).summary;
+    if (s.state === "done" && w0 && w0.frac_max != null) {
+      msg = `Maximum trusted downforce: every element held inside the 90% ` +
+            `free-air loading line (winner peaks at ` +
+            `${Math.round(w0.frac_max * 100)}%). Fine-mesh RANS measured ` +
+            `panel optimism rising along this axis — about −14% near 85% ` +
+            `loading, −24% right at the line — versus the −37…−42% ` +
+            `collapse past it that this mode exists to exclude. Use the ` +
+            `RANS re-rank below to measure your actual winner.`;
+    }
+  }
+  if (s.load_cap_note === "baseline_exceeds_cap") {
+    const d = document.createElement("div");
+    d.className = "warning-item";
+    d.textContent = "The starting design already loads past the 90% trust " +
+      "line. Maximize mode will not follow it there — the winner can sit " +
+      "below the start's (over-claimed) number by design.";
+    host.appendChild(d);
+  }
+  if (s.conf_note === "baseline_below_floor") {
+    const d = document.createElement("div");
+    d.className = "warning-item";
+    d.textContent = "The starting design itself sits below the confidence " +
+      "floor; the search is only charged for leaning harder on distrusted " +
+      "data, but if nothing passes the floor the run will fail and say so.";
+    host.appendChild(d);
   }
   if (msg) {
     const d = document.createElement("div");
@@ -1098,7 +1532,13 @@ function renderCandidates(s) {
     const drag = f.drag_total_n ?? c.drag_n;
     const ld = f.efficiency_ld;
     const badges =
-      (c.on_target ? "" : `<span class="badge warn">off target</span>`) +
+      // "off target" is meaningless while maximizing — there is no target
+      (c.on_target || s.objective === "max_downforce"
+        ? "" : `<span class="badge warn">off target</span>`) +
+      (f.slot_signature ? `<span class="badge warn" title="Slot at the ` +
+        `workable floor with no overlap tuck — the corner the inviscid ` +
+        `model over-rates; no recorded RANS point supports it. See the ` +
+        `analysis warning.">slot corner</span>` : "") +
       (f.low_confidence ? `<span class="badge warn" title="NeuralFoil ` +
         `confidence is below 50% on at least one section — the viscous ` +
         `data behind this design is an extrapolation, not a prediction. ` +
@@ -1503,6 +1943,15 @@ $("btn-rans-run").addEventListener("click", startRansVerify);
 $("btn-rans-cancel").addEventListener("click", async () => {
   if (state.ransJob) { try { await api.ransCancel(state.ransJob); } catch {} }
 });
+$("btn-rans-stop").addEventListener("click", async () => {
+  if (!state.ransJob) return;
+  try {
+    await api.ransStop(state.ransJob);
+    $("btn-rans-stop").disabled = true;   // one request is enough
+  } catch (e) {
+    toast(`Could not stop gracefully: ${e.message}`);
+  }
+});
 
 async function startRansVerify() {
   const iters = parseInt($("rans-iters").value, 10);
@@ -1535,11 +1984,17 @@ function pollRans() {
       const s = await api.ransStatus(state.ransJob);
       misses = 0;
       renderRans(s);
+      // graceful stop is meaningful only while the solver iterates and no
+      // writeNow is already pending (progress pins at 0.97 once one is)
+      $("btn-rans-stop").disabled = !(state.ransJob && s.state === "running"
+                                      && s.iteration > 0
+                                      && s.progress < 0.97);
       if (["done", "failed", "cancelled"].includes(s.state)) {
         clearInterval(state.ransPoll);
         state.ransJob = null;
         $("btn-rans-run").disabled = false;
         $("btn-rans-cancel").disabled = true;
+        $("btn-rans-stop").disabled = true;
         if (s.state === "failed") {
           toast("RANS verification failed — details in the RANS tab.", "err");
           $("rans-result").innerHTML = "";
@@ -1570,6 +2025,7 @@ function pollRans() {
       state.ransJob = null;
       $("btn-rans-run").disabled = false;
       $("btn-rans-cancel").disabled = true;
+      $("btn-rans-stop").disabled = true;
       toast(`Lost the RANS job: ${e.message} — reopen this tab to ` +
             `re-attach if it is still running.`);
     }
@@ -1620,7 +2076,18 @@ function renderRansResult(s) {
   ];
   host.innerHTML = rows.map(([k, v]) =>
     `<div class="kv"><span>${k}</span><b>${v}</b></div>`).join("");
-  if (!r.converged) {
+  if (r.user_stopped) {
+    const w = document.createElement("div");
+    w.className = "warning-item";
+    w.textContent = `Stopped at your request — the fields were written, ` +
+      `so the flow views below show the partial solution. The force ` +
+      `numbers are a preview, not a result` +
+      (r.cl_drift != null ? ` (Cl drift ${(r.cl_drift * 100).toFixed(1)}% ` +
+        `per window)` : ``) +
+      `; rerun without stopping for a verdict. No k_g calibration is ` +
+      `offered from a hand-stopped run.`;
+    host.appendChild(w);
+  } else if (!r.converged) {
     const w = document.createElement("div");
     w.className = "warning-item crit";
     w.textContent = `NOT CONVERGED — the lift history was still trending ` +
@@ -1731,7 +2198,8 @@ document.querySelectorAll("[data-export]").forEach((b) => {
   b.addEventListener("click", async () => {
     busy(b, true);
     const fmt = b.dataset.export;
-    const options = { frame: $("exp-frame").value, entity: $("exp-entity").value };
+    const options = { frame: $("exp-frame").value, entity: $("exp-entity").value,
+                      include_hitbox: $("exp-hitbox").checked };
     try {
       const saved = await api.exportSave(fmt, state.config, options);
       lastExport = { ...saved, fmt, options };
@@ -1930,6 +2398,9 @@ async function restoreSession() {
     Object.assign(state.airfoilNames, saved.airfoil_names || {});
     state.config = withDefaults(saved.config);
     if (Number.isFinite(saved.target)) state.target = saved.target;
+    if (Array.isArray(saved.rans_rerank)) {
+      state.ransRerank = saved.rans_rerank;
+    }
     return true;
   } catch {
     return false;
@@ -1939,7 +2410,9 @@ async function restoreSession() {
 async function boot() {
   bindConfigInputs();
   bindManufacturing();
+  bindRules();
   loadPresets();
+  loadRulePresets();
   checkHealth();
   setInterval(checkHealth, 20000);
   // the desktop launcher's browser fallback reads request activity as "the
@@ -1954,6 +2427,22 @@ async function boot() {
   // explains the two actions
   refreshGeometry();
   reattachOptimizer();   // a reload must not orphan a running search
+
+  // re-attach a running verification queue, or restore the last table
+  try {
+    const { queue } = await api.ransQueueCurrent();
+    if (queue && ["pending", "running"].includes(queue.state)) {
+      $("rerank-title").hidden = false;
+      $("rerank-block").hidden = false;
+      busy($("btn-rerank"), true);
+      $("btn-rerank-cancel").disabled = false;
+      pollRerank();
+    } else if (state.ransRerank && state.ransRerank.length) {
+      $("rerank-title").hidden = false;
+      $("rerank-block").hidden = false;
+      renderRerank({ rows: state.ransRerank });
+    }
+  } catch { /* rediscovery is best-effort */ }
 
   if (restored) {
     toast("Continuing where you left off — use Load preset… to start fresh.",

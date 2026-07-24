@@ -283,3 +283,108 @@ racing band: −19 % at h/c 0.071, −0 % at 0.086, −1 % at 0.114, +67 % at
 conservative above ~50 mm. The `HC_CHOKE_OPTIMISM = 0.08` boundary sits
 exactly in the measured gap (broken at 0.071, validated at 0.086); no
 adjustment needed. Stage 1 verdict stands as recorded above.
+
+## 2026-07-23 — slot-relief surface metric: measured and rejected
+
+A canonical-pressure-recovery trust metric (Smith-1975 dumping-velocity
+relief on the coupled inviscid solution) was proposed to detect the
+observed optimizer failure — flow detaching ahead of the main TE while
+the flap sits above the slot flow. Five variants were measured against
+every configuration with a fine-mesh delta on this log
+(`scripts/recovery_metric_check.py`, rerunnable):
+
+  variant A (ground solution, peak→TE): 0.977–0.990 for EVERY design —
+    ground-image suction peaks (cp_min to −49) swamp the normalization;
+  variants B/C/D (free air, TE-offset, aft-only): clean and warned
+    classes overlap (gaps −0.06 … −0.14);
+  variant E (TE dumping-velocity ratio, free air): nearly separates the
+    classes (clean ≤ 1.172, warned ≥ 1.175) but is a loading proxy — and
+    on a gap sweep at fixed healthy loading it moves the WRONG way
+    (gap 3.0 → 0.8 %c lowers E from 1.24 to 1.12): the inviscid solver
+    reads a tighter slot as MORE relief. The real tight-gap failure is
+    boundary-layer merging, invisible to any inviscid quantity.
+
+Verdict: rejected for optimizer use; the loading fraction remains the
+validated trust separator. Corollary worth recording: the stage-2
+CLEAN winners (−14.2/−14.4 %) share the flagged winners' exact slot
+corner — gap 0.80 %c, overlap ≈ 0 — while the gap-1.5 %c baseline at
+comparable downforce measured ~0 %. The healthy-winner −14 % bias may
+therefore be partly the tight-slot cost. That hypothesis is the
+gap-axis leg below; until it lands, the corner carries a geometric
+advisory (`analysis.slot_signature_warnings`) quoting these numbers.
+
+PLANNED — gap-axis leg (D7): baseline geometry, healthy loading, gaps
+0.8 / 1.3 / 2.0 %c at 30 mm, medium mesh for the trend plus one fine
+anchor, via `scripts/rans_calibration.py --config`. Outcome: a measured
+gap floor (raise `GAP_WORKABLE_PCT[0]`) or a measured all-clear for the
+corner at moderate loading.
+
+## 2026-07-23 — stage-3 verdict runs (fine mesh) + first D7 anchor
+
+Three fine-mesh runs on the upgraded optimizer's outputs, all
+force-history converged (`runs.csv` labels stage3-*, d7anchor-*):
+
+    max-downforce winner (pre-review-fix, loading 0.876, claim 4.263):
+      RANS Cl 3.446 — Δ −19.2 %
+    pareto knee (191 N claim, L/D 10.6, claim 3.146):
+      RANS Cl 3.019 — Δ −4.0 %
+    D7 fine anchor — gap 0.80 %c at HEALTHY loading (defl 12, aoa 0,
+      claim 3.812): RANS Cl 3.762 — Δ −1.3 %
+
+Readings. (1) The trusted-max guardrail held: −19.2 % sits between the
+−14 % clean anchor and the −23 % warned onset — optimism grows toward
+the 0.90 line but the mode never entered the −37…−42 % regime; the
+post-review-fix winner (loading 0.900) is queued as stage3b. (2) A
+front-knee pick from a properly searched run is essentially honest
+(−4 %) — contrast the −59 % measured (coarse) on a junk 170 N front
+point scavenged from an unrelated low-target run: fronts are only as
+real as the search that populated them. (3) FIRST D7 EVIDENCE: the
+tight-gap corner at moderate loading measures −1.3 % at fine mesh —
+statistically indistinguishable from the gap-1.5 %c baseline (−0/−1 %).
+The corner alone is NOT the over-claim driver at healthy loading; the
+−14 % clean-winner bias tracks their higher loading, not their slot.
+The medium-trend legs (0.8/1.3/2.0) and the stage3b verdicts are
+running; the slot-corner advisory's wording gets recalibrated against
+the full set when they land.
+
+## 2026-07-24 — D7 trend + stage3b verdicts: three lessons, one surprise
+
+All five follow-up runs force-history converged (`runs.csv` d7-*,
+stage3b-*):
+
+    D7 medium trend, healthy loading (fine anchor at g0.8: −1.3 %):
+      gap 0.8 %c → −14.7 %   gap 1.3 %c → −20.0 %   gap 2.0 %c → −2.0 %
+    stage3b max winner (post-review fix, loading 0.900, claim 4.429):
+      RANS Cl 3.346 ± 0.061 — Δ −24.4 %
+    stage3b pareto knee (gap 0.89, ovl 0.31, defl 12.6, aoa −2.6,
+      claim 3.054): RANS Cl 5.457 ± 0.021 — Δ +78.7 %
+
+(1) MEDIUM MESH IS NOT CALIBRATION-GRADE AT RACING HEIGHT. The medium
+trend scatters −2…−20 % across tiny geometry changes and disagrees with
+the fine anchor by 13 points at the identical config — limit-cycle
+sampling plus an under-resolved venturi. The coarse caution extends:
+at 30 mm treat medium as screening too; only fine runs calibrate. The
+D7 verdict therefore rests on the fine anchor alone: the tight-gap
+corner at moderate loading is essentially exact (−1.3 %), so
+GAP_WORKABLE_PCT keeps its 0.8 floor and the slot-corner advisory is
+reworded from "no recorded point supports the corner" to the measured,
+loading-conditional truth.
+
+(2) THE LOADING-OPTIMISM GRADIENT IS NOW MAPPED: ~−14 % near 0.85
+loading, −19.2 % at 0.876, −24.4 % at 0.900. Optimism is a continuum
+rising toward the warning line, not a step past it — a max-downforce
+winner that rides the line pays about a quarter of its claim. The 0.90
+trust boundary stands (past it the collapse regime begins, −37…−42 %
+measured), but at-the-line winners should be read through this gradient
+— and the RANS re-rank measures each one individually.
+
+(3) NEW MEASURED FAILURE MODE — CONSERVATIVE, AT RACING HEIGHT. The
+stage3b knee under-claims by 79 %: its geometry carries an extreme
+inviscid ground coupling (c_ground/c_free ≈ 6.5; implied k_g 0.431 vs
+the curve's 0.119) that the bounded-gain model crushes. The recorded
+conservative band was mid-height (+35…+67 % at h/c 0.17–0.26); this
+shows the same under-claim can appear at h/c 0.086 for
+high-coupling geometries. Direction is safe (the wing delivers MORE
+than claimed) but Pareto fronts are shape-distorted in that class.
+Candidate predictor for a future leg: the c_ground/c_free ratio,
+already computed per evaluation. Not acted on yet — one point.

@@ -95,6 +95,25 @@ HC_CHOKE_OPTIMISM = 0.08
 # ride-height decisions are made.
 HC_CONSERVATIVE = (0.12, 0.35)
 
+# Slot-capture signature (2026-07): every recorded optimizer winner —
+# clean and flagged alike — sits in the corner the inviscid solver loves:
+# slot gap pinned at the workable floor with essentially no overlap tuck.
+# The gap-axis RANS leg then measured the corner itself: at MODERATE
+# loading it is essentially exact (fine mesh, -1.3% vs the gap-1.5%c
+# baseline's -0..-1%), so the corner alone is not the over-claim driver —
+# loading is, and every recorded over-claim (-14% shading to -24% at the
+# 0.90 line, -37..-42% past it) also sat in this corner at higher
+# loading. The advisory therefore stays (the observed detachment failures
+# all wore this geometry) but speaks in loading-conditional, measured
+# terms. A surface-pressure trust metric was built and measured against
+# the recorded classes first (scripts/recovery_metric_check.py) and
+# REJECTED: ground-image suction peaks normalize every design's canonical
+# recovery to ~0.98, and the inviscid solution actively rewards tighter
+# gaps — the real tight-gap failure is boundary-layer merging, which no
+# inviscid quantity sees.
+SLOT_SIG_GAP = 0.0105      # gap at/below ~1%c (the 0.8%c bound + margin)
+SLOT_SIG_OVERLAP = 0.005   # overlap below 0.5%c: no tuck under the TE
+
 
 def ground_gain_factor(ride_height_c: float) -> float:
     """Default realization-factor curve k_g(h/c).
@@ -134,6 +153,32 @@ def realized_gain(c_free: float, c_ground: float, cfg: StackConfig,
     g_real = float(cap * np.tanh(k_g * g_inv / cap) * choke)
     r = g_real / g_inv if abs(g_inv) > 1e-12 else 0.0
     return g_real, float(k_g), float(r)
+
+
+def slot_signature_warnings(design: list[dict]) -> list[str]:
+    """The recorded over-claim slot signature, checked geometrically.
+
+    One implementation shared by analyze() and quick_objective_eval so the
+    analysis page and the optimizer's candidate warning counts agree."""
+    out = []
+    for i in range(1, len(design)):
+        g = design[i].get("slot_gap")
+        o = design[i].get("slot_overlap")
+        if g is None or o is None:
+            continue
+        if g <= SLOT_SIG_GAP and o < SLOT_SIG_OVERLAP:
+            out.append(
+                f"{design[i]['role']}: slot at the workable floor "
+                f"({g * 100:.2f}%c gap) with no overlap tuck "
+                f"({o * 100:.2f}%c) — the corner the optimizer gravitates "
+                f"to, and the geometry every observed detachment failure "
+                f"wore. Fine-mesh truth (docs/calibration): at moderate "
+                f"loading this corner measured -1.3% (essentially exact), "
+                f"but optimism climbs steeply with loading everywhere "
+                f"(-14% near 85%, -24% at the 90% line, -37..-42% past "
+                f"it). Watch the loading meters; prefer 1.5-2.5%c gap "
+                f"with 2-4%c overlap when in doubt, or verify with RANS.")
+    return out
 
 
 def induced_drag_n(downforce_n: float, cfg: StackConfig,
@@ -283,6 +328,8 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
             f"estimate as optimistic and the profile drag (capped at the "
             f"pre-stall polar) as understated; verify with RANS or tunnel "
             f"data.")
+    sig_warnings = slot_signature_warnings(design)
+    warnings += sig_warnings
     if cfg.ride_height_c < HC_CHOKE_OPTIMISM:
         warnings.append(
             f"ride height h/c = {cfg.ride_height_c:.3f} is below the "
@@ -352,6 +399,7 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
         },
         "cp_distributions": cp_plots,
     }
+    out["slot_signature"] = bool(sig_warnings)
     if include_geometry:
         geo = geometry.geometry_report(cfg)
         out["geometry"] = geo
@@ -365,6 +413,13 @@ def quick_objective_eval(cfg: StackConfig, model_size: str = "large") -> dict:
     if any(e.get("intersects") for e in design):
         return {"feasible": False, "reason": "intersection"}
     installed = geometry.install_stack(design, cfg.ride_height_c)
+    # rule envelope is a hard legality constraint: outside the box is
+    # infeasible by name, checked before the (much costlier) panel solve
+    rules = geometry.envelope_check(installed, cfg)
+    if rules is not None and not rules["ok"]:
+        v = rules["violations"][0]
+        return {"feasible": False,
+                "reason": f"rule: {v['rule']} by {v['by_mm']:.1f} mm"}
     coords = [e["coords"] for e in installed]
     try:
         free, ground = panel.solve_pair(coords, 0.0)
@@ -427,6 +482,7 @@ def quick_objective_eval(cfg: StackConfig, model_size: str = "large") -> dict:
         "cd_capped": cd_capped,
         "gaps": gaps,
         "overlaps": overlaps,
+        "slot_signature": bool(slot_signature_warnings(design)),
     }
 
 
@@ -480,6 +536,13 @@ def _sweep_point(cfg: StackConfig, design: list[dict], installed: list[dict],
         n_warnings += 1                           # combined Re-floor caveat
     if cfg.ride_height_c < HC_CHOKE_OPTIMISM:
         n_warnings += 1                           # sub-choke optimism caveat
+    # parity with analyze(): rule violations move with ride height (the
+    # envelope is checked at each swept height), and the slot-signature
+    # advisory counts here too
+    rules = geometry.envelope_check(installed, cfg)
+    if rules is not None and not rules["ok"]:
+        n_warnings += len(rules["violations"])
+    n_warnings += len(slot_signature_warnings(design))
 
     drag_profile_n = q * area * cd_stack
     drag_induced, _ = induced_drag_n(downforce_n, cfg, installed)

@@ -483,5 +483,47 @@ if not (Path(__file__).resolve().parents[2] / "xfoil" / "xfoil.exe").exists():
     check("xfoil engine absent -> 424 with guidance", s_x == 424,
           f"(got {s_x})")
 
+# ---- rule envelope + rule presets ----
+# the preset library is MACHINE-level state (app_data/rule_presets.json):
+# on a scratch server it is isolated by WSS_DATA_DIR, but a standalone run
+# against a live server must put the user's library back afterwards
+_s_keep, _r_keep = call("GET", "/api/rule-presets")
+s_g, r_g = call("POST", "/api/geometry",
+                {"config": {**GOOD, "rule_envelope": {"max_height_mm": 60}}})
+check("geometry with a violated envelope -> 200 + rules verdict",
+      s_g == 200 and r_g["rules"] and not r_g["rules"]["ok"], f"(got {s_g})")
+s_gb, _ = call("POST", "/api/geometry",
+               {"config": {**GOOD, "rule_envelope": {"max_length_mm": -3}}})
+check("geometry with a bogus envelope -> 422", s_gb == 422, f"(got {s_gb})")
+s_ov, r_ov = call("POST", "/api/optimize",
+                  {"config": {**GOOD, "rule_envelope": {"max_height_mm": 60}},
+                   "options": {"target_downforce_n": 200}})
+check("optimize from a rule-violating start -> 422 naming the rule",
+      s_ov == 422 and "violates rule" in str(r_ov.get("detail", "")),
+      f"(got {s_ov}: {str(r_ov)[:80]})")
+s_p0, r_p0 = call("GET", "/api/rule-presets")
+check("rule presets GET on a fresh server -> empty list",
+      s_p0 == 200 and r_p0["presets"] == [], f"(got {s_p0}: {r_p0})")
+s_p1, _ = call("PUT", "/api/rule-presets", {"presets": [
+    {"name": "FSAE test", "envelope": {"max_length_mm": 700,
+                                       "max_height_mm": 250}}]})
+s_p2, r_p2 = call("GET", "/api/rule-presets")
+check("rule presets save + reload round-trip",
+      s_p1 == 200 and s_p2 == 200 and len(r_p2["presets"]) == 1
+      and r_p2["presets"][0]["name"] == "FSAE test"
+      and r_p2["presets"][0]["envelope"]["max_length_mm"] == 700.0,
+      f"(got {s_p1}/{s_p2}: {r_p2})")
+s_p3, _ = call("PUT", "/api/rule-presets", {"presets": [
+    {"name": "bad", "envelope": {"max_height_mm": -1}}]})
+check("rule preset with a bogus envelope -> 422", s_p3 == 422, f"(got {s_p3})")
+s_p4, _ = call("PUT", "/api/rule-presets", {"presets": [
+    {"name": "dup", "envelope": {}}, {"name": "DUP", "envelope": {}}]})
+check("rule presets with duplicate names -> 422", s_p4 == 422, f"(got {s_p4})")
+s_p5, _ = call("PUT", "/api/rule-presets", {"presets": [{"name": "", "envelope": {}}]})
+check("rule preset without a name -> 422", s_p5 == 422, f"(got {s_p5})")
+if _s_keep == 200 and isinstance(_r_keep, dict):
+    call("PUT", "/api/rule-presets",
+         {"presets": _r_keep.get("presets", [])})   # restore the library
+
 print(f"\n{sum(results)}/{len(results)} adversarial checks passed")
 sys.exit(0 if all(results) else 1)
