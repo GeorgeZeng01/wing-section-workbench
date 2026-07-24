@@ -1095,6 +1095,34 @@ automatically. Alternative considered: presets inside each project file —
 rejected, a new project would start with an empty rulebook and teams would
 re-type the season's numbers per project.
 
+**Target mode is now two-phase: attain, then descend.** The old search had
+two low-target failure modes, both measured on the shipped code: the
+non-thorough early stop kept the FIRST design that hit the target (at
+250 N the first on-target evaluation carried 35.4 N of drag; the design
+the search should have found carries 29.9 N), and a target below the
+stack's floor made the 60-weight tracking term reward shedding downforce
+by slot abuse — the gap/overlap penalties are weight 2, and with flap
+chords off the search has no legitimate shrink lever, so sabotage was the
+only move left. Now: phase A is the unchanged tracker; the run then
+resolves D* (the target when the clean penalty-gated pool reached it,
+else that pool's floor/ceiling) and phase B re-seeds from the lowest-drag
+on-level archive entries (diversified, multi-start, full paneling,
+reserved 35% of the budget) and minimizes drag inside a 0.8% deadzone
+spring at D*. Candidate selection re-scores the whole archive under the
+final objective so "candidate #1 has the lowest J" stays true, and the
+snapshot reports `dstar_n`/`target_note` so the UI quotes the measured
+floor ("about 66 N — more than the 5 N asked") instead of guessing from
+pinned variables. Options considered: (a) meet-or-exceed hinge objective —
+rejected, target mode serves aero balance where overshoot is also wrong;
+(b) leave target mode alone and add a separate min-drag-at-target mode —
+rejected, the first-hitter/early-stop behavior is a defect, not a
+preference; (c) two-phase with penalty-gated D* (chosen). Measured on the
+fixed benchmark: 250 N winner drag 32.0 N -> 29.9 N with 296 vs 574
+evaluations; identical-runs-identical preserved; the hot-start do-no-harm
+guarantee (471 N baseline -> 482 N optimized) preserved. Note: in-band
+gap shading (0.8 %c is the band edge) is still penalty-free here by
+construction — pricing that is the recovery-metric decision below.
+
 **DXF bounding box: 4 LINEs on a dedicated HITBOX layer, off by default.**
 Horizontals touch the stack's lowest/highest points, verticals its
 leftmost/rightmost — instant overall dimensions in CAD, deletable in one

@@ -1151,7 +1151,19 @@ function renderOptHints(s) {
   // same on-target tolerance the optimizer applies to candidates (3%, min 1 N)
   const hit = Math.abs(s.best.downforce_n - target) <= Math.max(0.03 * target, 1);
   let msg = null;
-  if (pinnedLo.length && hit) {
+  if (s.target_note === "unreachable_low") {
+    // the optimizer measured the clean floor — quote it instead of guessing
+    msg = `The lowest clean downforce this stack can make is about ` +
+          `${s.dstar_n} N — more than the ${target} N asked. The winner ` +
+          `delivers that floor at minimum drag (no slot tricks to fake the ` +
+          `number). To genuinely reach ${target} N: drop an element, ` +
+          `enable flap chords, shrink the chord, or reduce speed.`;
+  } else if (s.target_note === "unreachable_high") {
+    msg = `${target} N is beyond this stack at these conditions — the ` +
+          `clean ceiling measured about ${s.dstar_n} N, and the winner ` +
+          `delivers it at minimum drag. Add an element, enlarge the ` +
+          `chord, or lower the target.`;
+  } else if (pinnedLo.length && hit) {
     msg = `Target reached, but ${pinnedLo.join(", ")} sat at the minimum — ` +
           `this stack can make far more than ${target} N. For a cleaner ` +
           `design, raise the target, drop an element, or shrink the chord.`;

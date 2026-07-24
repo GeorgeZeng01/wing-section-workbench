@@ -98,6 +98,24 @@ CAND_MAX = 6               # candidate designs returned per run
 CAND_DIVERSITY = 0.12      # min normalized per-variable spread between them
 CAND_TARGET_TOL = 0.03     # alternates must land within 3% of the target
 
+# two-phase target search. Phase A ("attain") is the classic tracker; the
+# run then resolves D* — the target if the clean pool reached it, else the
+# clean feasible floor/ceiling — and phase B ("descend") minimizes drag
+# while a deadzoned spring holds the downforce at D*. This is what fixes
+# the two low-target pathologies: the early stop no longer ends the run on
+# the FIRST design that hit the target (descend always runs, seeded from
+# the lowest-drag on-target designs), and an unreachable-from-above target
+# no longer rewards shedding downforce by sabotaging slot flow (sabotage
+# carries penalty >= PEN_OK, so it can neither define D* nor seed descend).
+PEN_OK = 0.5               # "no live constraint penalty" — shared gate for
+                           # the early stop, candidate pools and D*
+PHASE_B_FRAC = 0.35        # share of the eval budget reserved for descend
+DEADZONE_F = 0.008         # descend: |downforce-D*|/D* treated as "on level"
+                           # (same width as the early-stop tolerance, so the
+                           # simplex can slide ALONG the on-target manifold
+                           # trading the last 0.1% of tracking for drag)
+DESCEND_DRAG_W = 0.30      # descend drag-weight floor (user's if higher)
+
 # viscous-data trust penalty. Soft by construction: a screened library stack
 # (confidence well above CONF_FLOOR, stalling inside the polar grid) pays
 # nothing, and even a fully flagged element costs about as much as an ~11%
@@ -521,6 +539,11 @@ class Job:
         self.best = None           # {"x", "J", "downforce_n", "drag_n"}
         self.best_config = None
         self.result = None         # full analysis of the best design
+        self.dstar = None          # achievable downforce level, set between
+                                   # the attain and descend phases
+        self.target_note = None    # None | "unreachable_low" (target below
+                                   # the clean floor) | "unreachable_high"
+        self._obj_phase = "attain"  # attain | descend (objective() branch)
         self.archive: list[dict] = []   # every feasible evaluation (for
                                         # candidate selection at the end)
         self.candidates = None     # ranked diverse designs, set on finish
@@ -610,18 +633,33 @@ class Job:
         # matching itself — a standing offset would break _target_reached()
         # and the candidates' penalty gate for the whole run
         j_pen += max(0.0, _confidence_penalty(ev) - self.conf_pen0)
-        # the target term must dominate realistic drag savings inside ~1%
-        # of target, or induced drag (which falls with downforce^2) would
-        # pull the optimum a few percent under the requested load
-        j = (60.0 * f_err ** 2
-             + w_drag * ev["drag_n"] / max(abs(target), 1.0) * 10.0
-             + j_pen)
+        if self._obj_phase == "descend" and self.dstar is not None:
+            # descend: hold the achievable level D* inside a small deadzone
+            # and spend the freedom on drag. Outside the deadzone the same
+            # 60-weight spring as the tracker takes over, so the simplex
+            # cannot buy drag by drifting off the level.
+            scale = max(abs(self.dstar), 1.0)
+            f_dev = max(0.0, abs(ev["downforce_n"] - self.dstar) / scale
+                        - DEADZONE_F)
+            j = (60.0 * f_dev ** 2
+                 + max(w_drag, DESCEND_DRAG_W) * ev["drag_n"] / scale * 10.0
+                 + j_pen)
+        else:
+            # the target term must dominate realistic drag savings inside
+            # ~1% of target, or induced drag (which falls with downforce^2)
+            # would pull the optimum a few percent under the requested load
+            j = (60.0 * f_err ** 2
+                 + w_drag * ev["drag_n"] / max(abs(target), 1.0) * 10.0
+                 + j_pen)
 
         with self._lock:
             self.archive.append({"x": [round(float(v), 5) for v in x],
                                  "J": float(j), "penalty": float(j_pen),
                                  "downforce_n": round(ev["downforce_n"], 1),
                                  "drag_n": round(ev["drag_n"], 2),
+                                 "frac_max": round(max(ev["fracs"]), 3)
+                                 if ev.get("fracs") else None,
+                                 "phase": self._obj_phase,
                                  "panels": self._opt_panels})
             if self.best is None or j < self.best["J"]:
                 self.best = {"x": [round(float(v), 5) for v in x],
@@ -655,28 +693,105 @@ class Job:
                 dmax = max(dmax, abs(float(xa) - float(xb)) / s)
         return dmax
 
+    def _rescore(self, a: dict) -> float:
+        """An archive entry's value under the FINAL (descend) objective.
+
+        The archive mixes attain-phase and descend-phase J values, which
+        are not comparable; selection therefore re-scores every entry from
+        its stored downforce/drag/penalty — no re-evaluation needed."""
+        dstar = (self.dstar if self.dstar is not None
+                 else float(self.options.get("target_downforce_n", 200.0)))
+        w_drag = float(self.options.get("drag_weight", 0.10))
+        scale = max(abs(dstar), 1.0)
+        f_dev = max(0.0, abs(a["downforce_n"] - dstar) / scale - DEADZONE_F)
+        return (60.0 * f_dev ** 2
+                + max(w_drag, DESCEND_DRAG_W) * a["drag_n"] / scale * 10.0
+                + a["penalty"])
+
+    def _resolve_dstar(self) -> None:
+        """The downforce level the descend phase holds, set between phases.
+
+        Reachable targets keep D* = target. A target below what the CLEAN
+        pool can shed to (loading variables pinned, nothing legitimate left
+        to give) resolves D* to that clean floor; the mirror case resolves
+        to the clean ceiling. Sabotaged designs cannot define the level:
+        the pool is gated on penalty < PEN_OK, and slot-flow abuse carries
+        band/trust penalties. D* is measured at the attain phase's paneling
+        — the descend deadzone absorbs the coarse-vs-full bias, and the
+        candidates re-analyze at full fidelity anyway."""
+        target = float(self.options.get("target_downforce_n", 200.0))
+        with self._lock:
+            pool = [a for a in self.archive if a["penalty"] < PEN_OK]
+        self.dstar = target
+        self.target_note = None
+        if not pool:
+            return
+        tol = max(CAND_TARGET_TOL * abs(target), 1.0)
+        dns = [a["downforce_n"] for a in pool]
+        if any(abs(d - target) <= tol for d in dns):
+            return
+        if min(dns) > target + tol:
+            self.dstar = float(min(dns))
+            self.target_note = "unreachable_low"
+        elif max(dns) < target - tol:
+            self.dstar = float(max(dns))
+            self.target_note = "unreachable_high"
+
+    def _descend_starts(self, n: int, x_fallback) -> list:
+        """Descend seeds: the lowest-drag clean archive entries already on
+        D*, diversified so multi-start explores different basins of the
+        on-level manifold instead of polishing one point three times."""
+        with self._lock:
+            pool = [a for a in self.archive if a["penalty"] < PEN_OK]
+        tol = max(CAND_TARGET_TOL * abs(self.dstar or 1.0), 1.0)
+        on = sorted((a for a in pool
+                     if abs(a["downforce_n"] - (self.dstar or 0.0)) <= tol),
+                    key=lambda a: a["drag_n"])
+        if not on:
+            if self.best is not None:
+                return [np.array(self.best["x"])]
+            return [np.array(x_fallback)]
+        spans = [max(v["hi"] - v["lo"], 1e-9) for v in self.variables]
+        picked = [on[0]]
+        for a in on[1:]:
+            if len(picked) >= n:
+                break
+            if min(self._distance(a, p, spans) for p in picked) \
+                    > CAND_DIVERSITY:
+                picked.append(a)
+        for a in on[1:]:   # top up in plain drag order if diversity ran dry
+            if len(picked) >= n:
+                break
+            if a not in picked:
+                picked.append(a)
+        return [np.array(a["x"]) for a in picked]
+
     def _select_candidates(self) -> list[dict]:
         """The best design plus up to CAND_MAX-1 alternates from everything
-        the search evaluated: on target, nearly as good on the objective,
-        and chosen farthest-point-first so they are genuinely different
-        designs rather than jitter around the optimum."""
+        the search evaluated: on the achievable level D*, nearly as good
+        under the final objective, and chosen farthest-point-first so they
+        are genuinely different designs rather than jitter around the
+        optimum."""
         with self._lock:
             archive = list(self.archive)
         if not archive:
             return []
-        target = float(self.options.get("target_downforce_n", 200.0))
+        dstar = (self.dstar if self.dstar is not None
+                 else float(self.options.get("target_downforce_n", 200.0)))
         spans = [max(v["hi"] - v["lo"], 1e-9) for v in self.variables]
-        by_j = sorted(archive, key=lambda a: a["J"])
+        by_j = sorted(archive, key=self._rescore)
         # the winner must come from full-fidelity evaluations when any exist
         # — the coarse search paneling carries a bias larger than the drag
         # differences between near-optimal designs
         full = [a for a in by_j if a.get("panels") == self._full_panels]
         best = full[0] if full else by_j[0]
-        tol = max(CAND_TARGET_TOL * abs(target), 1.0)
+        tol = max(CAND_TARGET_TOL * abs(dstar), 1.0)
         good = [a for a in by_j
-                if abs(a["downforce_n"] - target) <= tol and a["penalty"] < 0.5]
-        j_slack = best["J"] + max(0.15 * abs(best["J"]), 0.02)
-        pool = ([a for a in good if a["J"] <= j_slack]
+                if abs(a["downforce_n"] - dstar) <= tol
+                and a["penalty"] < PEN_OK]
+        best_j = self._rescore(best)
+        j_slack = best_j + max(0.15 * abs(best_j), 0.02)
+        pool = ([a for a in good if self._rescore(a) <= j_slack]
                 or good[:100] or by_j[:100])
         picked = [best]
         while len(picked) < CAND_MAX:
@@ -696,7 +811,9 @@ class Job:
         for rank, a in enumerate(self._select_candidates(), 1):
             cfg_c = apply_vector(self.config, self.variables,
                                  np.array(a["x"]), self.shortlists)
-            entry = {"rank": rank, "J": round(a["J"], 4),
+            # J is the FINAL-objective re-score: the archive mixes phase
+            # objectives, and "candidate #1 has the lowest J" must stay true
+            entry = {"rank": rank, "J": round(self._rescore(a), 4),
                      "downforce_n": a["downforce_n"], "drag_n": a["drag_n"],
                      "x": a["x"], "config": cfg_c}
             if self.shortlists:
@@ -731,6 +848,10 @@ class Job:
                       else a["downforce_n"])
             entry["on_target"] = bool(
                 abs(ref_dn - target) <= max(CAND_TARGET_TOL * abs(target), 1.0))
+            if self.dstar is not None:
+                entry["at_dstar"] = bool(
+                    abs(ref_dn - self.dstar)
+                    <= max(CAND_TARGET_TOL * abs(self.dstar), 1.0))
             out.append(entry)
         return out
 
@@ -813,7 +934,7 @@ class Job:
         # downforce on target and no live constraint penalties (the drag term
         # is a real force trade-off, not a penalty, so it is not gated on)
         return (abs(b["downforce_n"] - target) <= max(0.008 * abs(target), 0.5)
-                and b.get("penalty", 99.0) < 0.5)
+                and b.get("penalty", 99.0) < PEN_OK)
 
     def run(self):
         from scipy.optimize import differential_evolution, minimize
@@ -855,15 +976,19 @@ class Job:
             # basin) with a wider population, then polishes multi-start
             thorough = mode == "global" and budget >= 3000
 
+            # descend gets a fixed, predictable share of the budget; an
+            # early-stopped attain phase simply ends the run sooner rather
+            # than shrinking the drag-descend work (the descend is what
+            # turns "first design that hit the target" into "lowest-drag
+            # design at the achievable level")
+            budget_b = max(150, int(budget * PHASE_B_FRAC))
             if mode == "global":
                 popsize = (16 if thorough
                            else max(6, min(12, budget // (25 * dim))))
                 maxiter = max(8, budget // (popsize * dim))
-                polish_fev = max(150, budget // 5)
-                self.plan_total = popsize * dim * (maxiter + 1) + polish_fev
+                self.plan_total = popsize * dim * (maxiter + 1) + budget_b
             else:
-                polish_fev = max(150, budget)
-                self.plan_total = polish_fev
+                self.plan_total = max(100, budget - budget_b) + budget_b
 
             def _de_callback(*args, **kwargs):
                 # stop the global phase early once the target is nailed —
@@ -878,25 +1003,35 @@ class Job:
                     maxiter=maxiter, seed=1, tol=1e-4, mutation=(0.4, 0.9),
                     recombination=0.8, polish=False, callback=_de_callback,
                 )
-            # local refinement (both modes end with it), at FULL panel
+            else:
+                # local mode: pull the current design toward the target
+                # first (at full resolution — there is no coarse phase to
+                # bias against), so descend has an on-level start to seed
+                # from even when the start was far off target
+                self.phase = "refining"
+                self._opt_panels = self._full_panels
+                attain_fev = max(100, budget - budget_b)
+                if self._cancel.is_set():
+                    raise _Cancelled()
+                minimize(self.objective, x0, method="Nelder-Mead",
+                         bounds=bounds,
+                         options={"maxfev": attain_fev,
+                                  "xatol": 1e-4, "fatol": 1e-5})
+
+            # descend phase (both modes end with it), at FULL panel
             # resolution — the coarse search paneling carries a bias larger
-            # than the drag differences that matter — and from several
-            # diverse starts on bigger budgets, so repeated runs converge to
-            # the same plateau minimum instead of scattering across it
+            # than the drag differences that matter — from diverse on-level
+            # starts, minimizing drag while the deadzoned spring holds D*
             self.phase = "refining"
-            if self._target_reached() and not thorough:
-                polish_fev = min(polish_fev, 60 * dim)
-            starts = ([np.array(self.best["x"])]
-                      if self.best is not None else [x0])
-            n_starts = 3 if thorough else 1
-            if n_starts > 1:
-                for alt in self._select_candidates()[1:n_starts]:
-                    starts.append(np.array(alt["x"]))
+            self._resolve_dstar()
             with self._lock:
                 coarse_best = self.best
                 self.best = None   # the winner must be a full-fidelity eval
+            self._obj_phase = "descend"
             self._opt_panels = self._full_panels
-            fev_each = max(100, polish_fev // len(starts))
+            n_starts = 3 if thorough else 2
+            starts = self._descend_starts(n_starts, x0)
+            fev_each = max(100, budget_b // len(starts))
             with self._lock:
                 # re-plan so the progress bar keeps moving after an early
                 # stop instead of freezing at the fraction of the never-run
@@ -987,6 +1122,9 @@ class Job:
                 "eta_s": round(eta, 1) if eta is not None else None,
                 "history": list(self.history[-400:]),
                 "best": self.best,
+                "dstar_n": (round(self.dstar, 1)
+                            if self.dstar is not None else None),
+                "target_note": self.target_note,
                 "variables": [{**v} for v in self.variables],
                 "best_config": self.best_config,
                 "result": self.result if self.state in ("done", "cancelled")
