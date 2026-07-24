@@ -1123,6 +1123,39 @@ guarantee (471 N baseline -> 482 N optimized) preserved. Note: in-band
 gap shading (0.8 %c is the band edge) is still penalty-free here by
 construction — pricing that is the recovery-metric decision below.
 
+**Slot-flow trust metric: built, measured against the RANS record, and
+rejected — a geometric advisory ships instead.** The observed failure mode
+(flow detaching ahead of the main TE while the flap sits above the slot
+flow) suggested a Smith-1975 canonical-recovery metric on the coupled
+inviscid solution: a mispositioned flap removes the dumping-velocity
+relief, so the upstream element's demanded surface recovery should climb.
+Five variants were measured against every configuration with a fine-mesh
+RANS delta on record (`scripts/recovery_metric_check.py`, kept as the
+executable evidence): the naive ground-solution form reads 0.977-0.990
+for EVERY design (ground-image suction peaks, cp_min to -49, dominate the
+normalization); free-air and TE-offset variants leave the clean and
+warned classes overlapping; and the one variant that nearly separates
+them (TE dumping-velocity ratio) is a loading proxy that moves the WRONG
+way along the gap axis — the inviscid solver reads a tighter slot as
+MORE relief, because the real tight-gap failure is boundary-layer
+merging, which no inviscid quantity sees. Options considered: (a) wire
+the near-separating variant anyway — rejected, redundant with the
+RANS-validated loading machinery and actively wrong on the gap axis;
+(b) an unvalidated geometric capture-window with invented thresholds —
+rejected, nothing on record calibrates it; (c) ship a signature advisory
++ leave the quantitative floor to the RANS gap-axis leg (chosen). The
+check also CORRECTED an assumption this plan carried: the clean -14%
+stage-2 winners share the exact slot corner of the flagged ones (gap
+0.80, overlap ~0) — the record separates the over-claim classes by
+LOADING alone, and since the validated 1.5%c-gap baseline at comparable
+downforce measured ~0%, the healthy-winner -14% bias may itself partly
+be the tight-slot cost. That hypothesis is exactly what the gap-axis
+RANS leg measures. Until then, `analysis.slot_signature_warnings` flags
+the corner (gap <= ~1%c AND overlap < 0.5%c) with the recorded numbers
+quoted, in the analysis page and every optimizer candidate's warning
+count; no optimizer penalty is charged on geometry the record has not
+priced.
+
 **DXF bounding box: 4 LINEs on a dedicated HITBOX layer, off by default.**
 Horizontals touch the stack's lowest/highest points, verticals its
 leftmost/rightmost — instant overall dimensions in CAD, deletable in one
