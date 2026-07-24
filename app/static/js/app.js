@@ -1765,6 +1765,11 @@ function renderPareto(s) {
     return f.low_confidence || f.near_stall || f.slot_signature
       || (f.frac_max ?? 0) > 0.9;
   };
+  // if anything is about to draw, the placeholder must be gone first — a
+  // host that is display:none (under .empty) can't measure its own width
+  if ((s.pareto && s.pareto.length) || (s.cloud && s.cloud.length)) {
+    $("opt-charts").classList.remove("empty");
+  }
   if (s.pareto && s.pareto.length) {
     // finalized front: full-fidelity numbers, clickable, trust-colored
     const pts = s.pareto.slice().sort((a, b) => a.drag_n - b.drag_n);
