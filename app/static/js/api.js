@@ -59,6 +59,7 @@ export const api = {
             { config, mesh_size: meshSize, max_iters: maxIters }),
   ransStatus: (id) => request("GET", `/api/rans/${id}`),
   ransCancel: (id) => request("POST", `/api/rans/${id}/cancel`),
+  ransStop: (id) => request("POST", `/api/rans/${id}/stop`),
 };
 
 export async function downloadExport(fmt, config, options = {}) {

@@ -322,6 +322,100 @@ job_f.iteration = 2500
 job_f._cl_drift, job_f._cd_drift = 0.001, 0.005
 check("force-converged detector fires on flat histories",
       job_f._force_converged())
+
+# ---- user stop-and-keep-fields ----
+
+job_ns = cfd_run.RansJob(CFG_D, "coarse", 3000)
+check("stop-and-keep is refused before the solver runs",
+      job_ns.stop_graceful() is False)
+
+# verdict: a hand-stopped run below the cap is a preview — never
+# "converged", never a k_g source, but a normal done state (flow view)
+job_u = cfd_run.RansJob(CFG_D, "coarse", 3000)
+cdir_u = job_u.case_dir / "postProcessing" / "forceCoeffs1" / "0"
+cdir_u.mkdir(parents=True, exist_ok=True)
+_lines = ["# Time Cd Cd(f) Cd(r) Cl Cl(f) Cl(r)"]
+_lines += [f"{i + 1} 0.2 0.1 0.1 {2.0 + 0.001 * i:.5f} 1 1"
+           for i in range(1500)]
+(cdir_u / "coefficient.dat").write_text("\n".join(_lines) + "\n")
+job_u.t_start = time.time()
+job_u._force_stop = True
+job_u._stopped_by_user = True
+job_u._finalize()
+ur = job_u.result
+check("user-stopped run: done with an honest verdict",
+      job_u.state == "done" and ur
+      and ur["stop_reason"] == "stopped by user (fields written)"
+      and ur["converged"] is False and ur["user_stopped"] is True,
+      f"({ur and (ur['stop_reason'], ur['converged'])})")
+check("user-stopped run offers no k_g suggestion",
+      ur and ur["suggested_k_g"] is None)
+
+
+# end to end: the request lands mid-solve, flips controlDict, and the
+# finalize keeps the case runnable
+class SlowFakeProc(FakeProc):
+    def poll(self):
+        self._polls += 1
+        cdir = self.case / "postProcessing" / "forceCoeffs1" / "0"
+        cdir.mkdir(parents=True, exist_ok=True)
+        upto = min(self.rows, self._polls * 40)
+        lines = ["# Time Cd Cd(f) Cd(r) Cl Cl(f) Cl(r)"]
+        lines += [f"{i + 1} 0.2 0.1 0.1 {2.0 + 0.001 * i:.4f} 1 1"
+                  for i in range(upto)]
+        (cdir / "coefficient.dat").write_text("\n".join(lines) + "\n")
+        if self._polls >= 10:
+            self.returncode = self.rc
+            return self.rc
+        return None
+
+
+def run_user_stop_job():
+    job = cfd_run.RansJob(CFG_D, "coarse", 1000)   # cap far above the rows
+
+    def build_with_controldict(cfg, case_dir, mesh, iters):
+        out = fake_build_case(cfg, case_dir, mesh, iters)
+        sysd = case_dir / "system"
+        sysd.mkdir(parents=True, exist_ok=True)
+        (sysd / "controlDict").write_text(
+            "stopAt          endTime;\nendTime         1000;\n",
+            encoding="utf-8")
+        return out
+
+    def stopper():
+        for _ in range(2000):
+            if job.stop_graceful():
+                return
+            time.sleep(0.002)
+
+    real = (cfd_run._popen, cfd_run.cfd.build_case, cfd_run.availability,
+            cfd_run.POLL_S, cfd_run._docker)
+    cfd_run.cfd.build_case = build_with_controldict
+    cfd_run.availability = fake_availability
+    cfd_run.POLL_S = 0.01
+    cfd_run._docker = lambda args, timeout: type(
+        "R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    cfd_run._popen = lambda cmd, **kw: SlowFakeProc(job.case_dir, 400, 0)
+    t = threading.Thread(target=stopper, daemon=True)
+    try:
+        t.start()
+        job.run()
+    finally:
+        (cfd_run._popen, cfd_run.cfd.build_case, cfd_run.availability,
+         cfd_run.POLL_S, cfd_run._docker) = real
+    t.join(timeout=5)
+    return job
+
+
+job_us = run_user_stop_job()
+us = job_us.result
+check("live user stop lands: done, user-stopped verdict",
+      job_us.state == "done" and us and us["user_stopped"] is True
+      and us["stop_reason"] == "stopped by user (fields written)",
+      f"(state {job_us.state}, {us and us['stop_reason']})")
+check("live user stop restored the retained controlDict",
+      "stopAt          endTime;" in
+      (job_us.case_dir / "system" / "controlDict").read_text())
 job_f._cl_drift = 0.02
 check("force-converged detector holds while Cl still trends",
       not job_f._force_converged())

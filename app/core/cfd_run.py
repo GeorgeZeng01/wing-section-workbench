@@ -302,6 +302,9 @@ class RansJob:
         self._cd_drift: float | None = None
         self._flat_polls = 0                  # consecutive flat polls
         self._force_stop = False              # runner requested writeNow
+        self._user_stop = threading.Event()   # user asked to stop-and-keep
+        self._stopped_by_user = False         # the user request took effect
+        self._solving = False                 # solver container is running
 
     # ---- progress plumbing ----
 
@@ -512,6 +515,7 @@ class RansJob:
             proc = _popen(cmd, stdout=log_fh, stderr=subprocess.STDOUT,
                           creationflags=_CREATE_NO_WINDOW,
                           env={**os.environ})
+            self._solving = True
             try:
                 while True:
                     rc = proc.poll()
@@ -533,6 +537,16 @@ class RansJob:
                     # post-solve steps, so a stop requested in that window
                     # is a no-op on an already-exited solver — harmless,
                     # and the finalize verdict re-checks the outcome.)
+                    # user stop-and-keep: same writeNow mechanism as the
+                    # auto stop, but the finalize verdict stays honest
+                    # ("stopped by user", never "converged", no k_g)
+                    if (self._user_stop.is_set() and not self._force_stop
+                            and self._request_graceful_stop()):
+                        self._force_stop = True
+                        self._stopped_by_user = True
+                        with self._lock:
+                            self.phase = ("stopping at your request — "
+                                          "writing final fields")
                     if not self._force_stop:
                         self._flat_polls = (self._flat_polls + 1
                                             if self._force_converged() else 0)
@@ -603,7 +617,13 @@ class RansJob:
         # a transient snapshot, not a result — say so, loudly. The drift
         # excludes the startup transient, same as the stop decision.
         cl_drift = drift(data["cl"][FORCE_STOP_SKIP:])
-        if self._force_stop and n_run < self.n_iters:
+        if self._stopped_by_user and n_run < self.n_iters:
+            # a user stop is a preview, not a result: never "converged",
+            # never a k_g suggestion — a hand-stopped tail must not feed
+            # calibration, however flat it happens to look
+            converged = False
+            stop_reason = "stopped by user (fields written)"
+        elif self._force_stop and n_run < self.n_iters:
             # the request demonstrably took effect (the solver quit early)
             converged, stop_reason = True, "force history converged"
         elif n_run < self.n_iters:
@@ -670,6 +690,7 @@ class RansJob:
                 # screening number, and a k_g pinned from one can bake that
                 # bias into every estimate in the session
                 "mesh_caution": self.mesh_size == "coarse",
+                "user_stopped": self._stopped_by_user,
                 "case_dir": str(self.case_dir),
             }
             self.phase = None
@@ -708,6 +729,19 @@ class RansJob:
 
     def cancel(self) -> None:
         self._cancel.set()
+
+    def stop_graceful(self) -> bool:
+        """Stop-and-keep-fields: flip controlDict to writeNow at the next
+        poll, let run.sh finish its post-processing (writeCellCentres and
+        the results extraction), and finalize normally — so the flow view
+        works on the partial run. The verdict says "stopped by user" and
+        offers no k_g. Returns False while the solver is not running yet
+        (nothing worth keeping — that is what cancel is for)."""
+        with self._lock:
+            if not (self._solving and self.state == "running"):
+                return False
+        self._user_stop.set()
+        return True
 
 
 # ---------- registry ----------

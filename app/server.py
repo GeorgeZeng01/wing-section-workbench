@@ -400,6 +400,22 @@ def rans_cancel(job_id: str):
     return {"ok": True}
 
 
+@app.post("/api/rans/{job_id}/stop")
+def rans_stop(job_id: str):
+    """Stop-and-keep-fields: graceful writeNow stop so the velocity and
+    pressure fields of the partial run stay viewable. Distinct from
+    cancel, which hard-kills the container and keeps nothing."""
+    from .core import cfd_run
+    job = cfd_run.get(job_id)
+    if job is None:
+        raise HTTPException(404, detail="unknown job")
+    if not job.stop_graceful():
+        raise HTTPException(409, detail="the solver is not running yet — "
+                                        "there are no fields to keep; use "
+                                        "Cancel instead")
+    return {"ok": True}
+
+
 @app.get("/api/rans/{job_id}/flow")
 def rans_flow(job_id: str, field: str = "umag"):
     """The solved section flow as a PNG — rendered once, cached in the

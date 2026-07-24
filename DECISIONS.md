@@ -1218,6 +1218,22 @@ quoted, in the analysis page and every optimizer candidate's warning
 count; no optimizer penalty is charged on geometry the record has not
 priced.
 
+**RANS "Stop & keep fields": the graceful writeNow path gets a user
+trigger, with an honest verdict.** Cancel hard-kills the container
+(`docker rm -f`), which preempts run.sh's writeCellCentres step — a
+cancelled run can never feed the flow view. The force-based auto-stop
+already had the right machinery (controlDict flipped to `stopAt
+writeNow`, solver writes fields and exits 0, run.sh completes, finalize
+restores the case); the new button routes a user request through exactly
+that path. Two deliberate choices: (a) the verdict is "stopped by user
+(fields written)", converged = False, and NO suggested_k_g — a
+hand-stopped tail must not feed calibration however flat it happens to
+look (options considered: offer k_g with a caution flag — rejected, the
+calibration log's discipline is that only converged verdicts contribute);
+(b) the request is refused with a 409 before the solver runs — there are
+no fields to keep yet, and pretending to "stop" a meshing job would just
+be a slower cancel. Cancel stays available unchanged.
+
 **DXF bounding box: 4 LINEs on a dedicated HITBOX layer, off by default.**
 Horizontals touch the stack's lowest/highest points, verticals its
 leftmost/rightmost — instant overall dimensions in CAD, deletable in one

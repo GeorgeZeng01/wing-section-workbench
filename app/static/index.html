@@ -420,6 +420,9 @@
           <span class="f-label">Max iterations</span>
           <span class="f-wrap"><input id="rans-iters" type="number" step="100" min="100" max="20000" value="10000" style="width:70px"><i></i></span></label>
         <button id="btn-rans-run" class="btn small primary" disabled>Verify with RANS</button>
+        <button id="btn-rans-stop" class="btn small" disabled
+                title="Stop the solve gracefully: the solver writes its current velocity and pressure fields first, so the flow view works on the partial run. The verdict says 'stopped by user' and no k_g is suggested from a hand-stopped tail. Cancel, by contrast, kills the run and keeps nothing.">
+          Stop &amp; keep fields</button>
         <button id="btn-rans-cancel" class="btn small ghost" disabled>Cancel</button>
         <span id="rans-note" class="note">checking Docker…</span>
       </div>

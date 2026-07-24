@@ -1748,6 +1748,15 @@ $("btn-rans-run").addEventListener("click", startRansVerify);
 $("btn-rans-cancel").addEventListener("click", async () => {
   if (state.ransJob) { try { await api.ransCancel(state.ransJob); } catch {} }
 });
+$("btn-rans-stop").addEventListener("click", async () => {
+  if (!state.ransJob) return;
+  try {
+    await api.ransStop(state.ransJob);
+    $("btn-rans-stop").disabled = true;   // one request is enough
+  } catch (e) {
+    toast(`Could not stop gracefully: ${e.message}`);
+  }
+});
 
 async function startRansVerify() {
   const iters = parseInt($("rans-iters").value, 10);
@@ -1780,11 +1789,17 @@ function pollRans() {
       const s = await api.ransStatus(state.ransJob);
       misses = 0;
       renderRans(s);
+      // graceful stop is meaningful only while the solver iterates and no
+      // writeNow is already pending (progress pins at 0.97 once one is)
+      $("btn-rans-stop").disabled = !(state.ransJob && s.state === "running"
+                                      && s.iteration > 0
+                                      && s.progress < 0.97);
       if (["done", "failed", "cancelled"].includes(s.state)) {
         clearInterval(state.ransPoll);
         state.ransJob = null;
         $("btn-rans-run").disabled = false;
         $("btn-rans-cancel").disabled = true;
+        $("btn-rans-stop").disabled = true;
         if (s.state === "failed") {
           toast("RANS verification failed — details in the RANS tab.", "err");
           $("rans-result").innerHTML = "";
@@ -1815,6 +1830,7 @@ function pollRans() {
       state.ransJob = null;
       $("btn-rans-run").disabled = false;
       $("btn-rans-cancel").disabled = true;
+      $("btn-rans-stop").disabled = true;
       toast(`Lost the RANS job: ${e.message} — reopen this tab to ` +
             `re-attach if it is still running.`);
     }
