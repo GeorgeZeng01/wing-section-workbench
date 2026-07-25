@@ -33,7 +33,7 @@ _EPS = 1e-12
 
 class PanelSolution:
     __slots__ = ("Cl", "Cd_numerical", "Cm_le", "elements", "midpoints",
-                 "cp", "element_index", "n_panels")
+                 "cp", "element_index", "n_panels", "vt", "panel_lengths")
 
     def __init__(self, **kw):
         for k, v in kw.items():
@@ -177,6 +177,11 @@ def _assemble_and_solve(geo, us, vs, uv, vv, alpha_deg, ref_chord):
         cp=cp,
         element_index=elem_of,
         n_panels=M,
+        # signed tangential velocity along the CCW contour direction — the
+        # wake-shadow screen splits each contour at the stagnation point,
+        # which needs the sign that |vt| = sqrt(1-cp) cannot recover
+        vt=vt,
+        panel_lengths=length,
     )
 
 

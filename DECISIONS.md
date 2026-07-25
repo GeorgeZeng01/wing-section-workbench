@@ -1396,6 +1396,99 @@ box guaranteeing ≥ 8 cells across the jet on every preset. The meshed wall
 polyline is also densified independently of the panel count — surface
 resolution used to be whatever the panel solver happened to want.
 
+## Separation awareness (2026-07-24)
+
+The user kept measuring early flow separation on RANS solves of
+optimizer products — the flow visibly dead ahead of the trailing edge —
+while the optimizer reported clean designs. The retained case record
+made the failure precise: on EVERY converged three-element case the
+second element ran 22–40 % reversed wall-shear faces (the standing
+bubble sits right on top of it in the flow fields), the mains were
+attached, and the optimizer's loading budget — an element-integral check
+against isolated CL_max — had nothing to say about any of it. The
+mechanism is wake confluence, not element stall: the element sits in its
+neighbors' circulation shadow, the stream over its upper side (the
+stream carrying the upstream wake) decelerates below about half the
+freestream, and the wake+boundary-layer system over that side collapses.
+
+**Measure-first, again.** Three candidate screens were built and run
+against the wall-shear record before anything was wired
+(`scripts/separation_metric_check.py`, truth preserved in
+`docs/calibration/wall_truth.json` because run-dir housekeeping deletes
+cases). (a) A full integral-BL march — Thwaites, Michel with the
+short-bubble rule, Head with Ludwieg–Tillman — stopped at the first
+H-crossing: flags the VALIDATED baseline's flap (its nose-spill bubble
+reads as total separation) while grading the genuinely dead elements the
+same as healthy ones. (b) The same march run through to the trailing
+edge with re-heal: Head's entrainment closure, built for attached
+layers, pumps every separated stretch back to attached. Both rejected —
+at the booked realization the free-air-dominated distributions of dying
+and healthy elements are nearly identical pointwise, so no chordwise
+march on them can rank designs. (c) The **wake-shadow screen**: minimum
+realized upper-side velocity over the 15–92 % arc window, elements after
+the first. Separates the record cleanly — separated-measured 0.389–0.459,
+attached/partial-measured 0.533–0.619, the no-wall-truth "flagged"-class
+flaps in the 0.519–0.524 gray between — and is stable under paneling
+45–70 and realization ratio 0→0.35. Shipped with the line at 0.50 (mid-gap, half
+the freestream) and the caution band to 0.53.
+
+**Wiring follows the house pattern.** `analyze()` reports per-element
+`shadow_min`/status with a collapse warning citing the record; the
+optimizer charges the same hardened, cliff-free shape as the max-mode
+loading band — a light ramp across the 0.50–0.53 gray band (capped at
+0.3, under the clean-pool gate, because legitimate on-target designs and
+the no-truth flagged class both live there) and a steep wall below the
+line that carries the ramp's terminal value (the shallowest recorded
+collapse costs ~17; the two-element benchmark's 300 N chase costs ~0) —
+gates the clean pool at the 0.50 line, and badges candidates
+(`shadow_collapse`, gray-band `shadow_warn`). Target mode keeps the
+do-no-harm rule — a collapsed baseline slides its wall to 0.03 below
+its own value and pays NO gray-band ramp in the slid region (sized to
+the measured paneling drift plus what a legitimate +5 % target chase
+moves the metric; the hot-baseline regression pins this): it is never
+refused, matching or modestly out-chasing itself is free, and only
+going deeper meets the wall. Max-downforce mode does NOT widen (its contract is trusted
+output) and its full-fidelity output filter drops candidates that still
+collapse, with the drop named in the failure message. The verification
+queue now carries each row's wall verdict and demotes any design
+measuring an element separated below every attached row, under both
+ranking objectives — measured forces from a separated flow state stop
+buying podiums. Rejected alternative: tightening the loading bands
+instead — the record shows the dying elements at loading fractions 0.48–
+0.77, squarely inside every band; no loading threshold separates these
+classes without also strangling healthy designs.
+
+**Descend seeding hardened alongside (measured on the hot-baseline
+regression).** Adding any new objective structure reroutes the seeded
+differential-evolution path, and the hot-baseline regression exposed a
+pre-existing fragility that the reroute tipped over: descend seeded only
+from the CLEAN pool's lowest-drag edge, so when the pool thins near the
+level (a hot baseline's on-level designs mostly wear gate bumps) every
+simplex started below the level, took the easy aoa-relief exit through
+the spring's deadzone, and stalled at 477–478 N against a 483 N
+equilibrium — while a zero-penalty on-level design demonstrably existed.
+Two changes, both to seeding rather than to any recorded dynamic
+constant: descend now seeds the attain phase's own best FIRST in target
+mode (descend exists to polish what attain found; a seed is a starting
+point, not a verdict — the clean-pool gate still owns D*, the candidate
+pools and the output, so the sabotage protections stand), and every mode
+runs three descend starts instead of two (the third basin is what
+recovers the along-level valley; costs ~90 extra full-paneling
+evaluations per standard run). Max mode keeps pool-only seeding — its
+attain best can sit behind the trust wall it exists to enforce.
+
+**Scope stated where it is used.** The screen is validated on climbing
+front-wing stacks in ground effect at h/c 0.086–0.114, s1223-class
+sections, against five cases (two fine, one medium, plus a coarse and a
+transient snapshot kept for the record); the first element is exempt
+(no upstream wake, and the record confirms mains attached at upper-side
+minima down to 0.44 — the loading machinery owns that failure mode).
+Tight-gap slot-jet merging remains invisible to every inviscid quantity
+— the slot-signature advisory and the RANS queue stay the referees
+there. The check script exits nonzero the day the thresholds stop
+separating the record, and `test_wake_shadow.py` pins the same classes
+in the offline suite.
+
 ## Known limitations
 
 Documented, not fixed. The custom-airfoil registry lives in server memory

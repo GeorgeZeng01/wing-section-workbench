@@ -24,6 +24,7 @@ OFFLINE = ["test_manufacturing.py", "test_panel_validation.py",
            "test_rules_envelope.py", "test_optimizer_target_modes.py",
            "test_slot_signature.py", "test_optimizer_objectives.py",
            "test_pareto_front.py", "test_rans_queue.py",
+           "test_wake_shadow.py",
            "test_geometry_hardening.py", "test_server_hardening.py"]
 
 

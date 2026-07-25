@@ -23,6 +23,11 @@ soft penalties keeping the design in the healthy high-lift envelope:
   - slot overlap inside a -1%c .. 5%c band
   - element loading below ~105% of isolated CL_max
   - realized ground-effect loading inside the model's validity allowance
+  - wake-shadow floor: every downstream element's upper-side stream
+    minimum above the measured separation line (wake_shadow.py — the
+    RANS-wall-shear-validated screen for the top-side flow collapse that
+    the loading checks cannot see; max-downforce mode also drops
+    collapsed candidates at full fidelity)
   - viscous-data trust: NeuralFoil confidence below CONF_FLOOR, and loaded
     elements whose polar never stalled in the grid or whose drag lookup was
     clamped at the stall branch (the signals the evaluations already
@@ -57,7 +62,7 @@ import uuid
 
 import numpy as np
 
-from . import analysis
+from . import analysis, wake_shadow
 from .geometry import StackConfig
 
 # Slot geometry as percent of chord. The optimizer searches the workable
@@ -153,6 +158,35 @@ MIN_LD_W = 40.0            # min_ld soft-hinge weight (mirror of the bands)
 LD_SLACK = 0.98            # output filter: ld >= 0.98 * min_ld
 
 PARETO_MAX = 24            # front points re-analyzed at full fidelity
+
+# wake-shadow separation screen (wake_shadow.py — measured against the
+# RANS wall-shear record before wiring). On the ABSOLUTE lines (healthy
+# baselines) the shape is the max-mode loading band's, cliff-free: a
+# LIGHT ramp across the 0.50-0.53 gray band (caution — the recorded
+# flagged-class flaps live there, but so do legitimate on-target
+# designs; capped at 0.3 so a graze never leaves the clean pool on
+# penalty alone), then a steep wall below the measured separation line
+# that CARRIES the ramp's terminal value (the max-mode dip lesson): the
+# shallowest recorded collapse (0.459) costs ~17, a healthy 300 N chase
+# on the two-element benchmark costs ~0. Target mode is
+# baseline-relative (do-no-harm): a baseline already under the line gets
+# its wall slid to SHADOW_HEADROOM below its own value and NO ramp —
+# matching or modestly out-chasing itself is free, only the wall stands
+# (from zero; it is that region's first penalty, so there is no dip).
+# Max-downforce mode never slides — its contract is trusted output, and
+# the full-fidelity output filter drops collapsed candidates outright.
+SHADOW_RAMP_W = 0.3
+SHADOW_WALL_W = 25.0
+SHADOW_SCALE = 0.05          # wall scale, in Ue/V_inf units
+SHADOW_HEADROOM = 0.03       # do-no-harm wall position below a hot
+                             # baseline: covers the measured paneling
+                             # drift (<0.01) plus what a legitimate +5%
+                             # target chase moves the metric (~0.015 on
+                             # the hot-baseline regression) with margin.
+                             # Slid bands charge no gray-band ramp — the
+                             # start and its chase region are penalty-free
+                             # by construction, only the wall stands
+SHADOW_GATE_SLACK = 0.005    # paneling drift measured < 0.01 across 45-70
 
 # viscous-data trust penalty. Soft by construction: a screened library stack
 # (confidence well above CONF_FLOOR, stalling inside the polar grid) pays
@@ -668,6 +702,9 @@ class Job:
         n_flaps = max(0, len(self.config.get("elements", [])) - 1)
         self.load_band: list[float] | None = None
         self.ground_band: list[float] | None = None
+        self.shadow_band: list[float | None] | None = None
+        self.shadow_note = None    # "baseline_below_sep" when the START
+                                   # already collapses the shadow screen
         self.conf_pen0: list[tuple[float, float]] = []
                                # baseline's own trust-penalty parts, per
                                # element and signal (see objective)
@@ -765,6 +802,29 @@ class Job:
             j_pen += 2.0 * _band_penalty(g, band, 0.005)
         for o, band in zip(ev["overlaps"], self.overlap_bands):
             j_pen += 2.0 * _band_penalty(o, band, 0.01)
+        # wake-shadow separation screen: light ramp across the gray band,
+        # steep wall (carrying the ramp's terminal value) below the
+        # measured separation line. On a band slid below the line by
+        # do-no-harm (the baseline itself sits under it) there is NO
+        # ramp — same contract as the loading bands: matching or
+        # modestly out-chasing an already-hot baseline costs nothing
+        # until the wall built from that baseline, and only the wall
+        # stands (from zero — no dip, it is the region's first penalty)
+        shadow_mins = ev.get("shadow_mins") or []
+        sbands = self.shadow_band or []
+        band_w = wake_shadow.SHADOW_WARN - wake_shadow.SHADOW_SEP
+        for i, v in enumerate(shadow_mins):
+            if v is None:
+                continue
+            sep_i = (sbands[i] if i < len(sbands)
+                     and sbands[i] is not None
+                     else wake_shadow.SHADOW_SEP)
+            slid = sep_i < wake_shadow.SHADOW_SEP - 1e-12
+            if v < sep_i:
+                j_pen += ((0.0 if slid else SHADOW_RAMP_W)
+                          + SHADOW_WALL_W * ((sep_i - v) / SHADOW_SCALE) ** 2)
+            elif not slid and v < sep_i + band_w:
+                j_pen += SHADOW_RAMP_W * ((sep_i + band_w - v) / band_w) ** 2
         # trust penalty, baseline-relative like the loading bands: a start
         # that already sits on low-confidence data (a re-optimized shaped
         # design) is penalized only for leaning HARDER on it, never for
@@ -835,6 +895,15 @@ class Job:
             band[0] - OVERLAP_GATE_SLACK <= o <= band[1] + OVERLAP_GATE_SLACK
             for o, band in zip(ev["overlaps"], self.overlap_bands)
             if o is not None)
+        # shadow gate: raw class membership at the measured separation
+        # line (the band entry IS that line, slid down where the baseline
+        # itself sits deeper — never above it)
+        in_band = in_band and all(
+            v is None
+            or v >= (sbands[i] if i < len(sbands)
+                     and sbands[i] is not None
+                     else wake_shadow.SHADOW_SEP) - SHADOW_GATE_SLACK
+            for i, v in enumerate(shadow_mins))
         pen_gate = j_pen - load_shape_pen + (0.0 if in_band else PEN_OK)
 
         with self._lock:
@@ -969,9 +1038,20 @@ class Job:
         return float(min(vals) if low else max(vals))
 
     def _descend_starts(self, n: int, x_fallback) -> list:
-        """Descend seeds: the lowest-drag clean archive entries already on
+        """Descend seeds: the attain phase's own best first — descend
+        exists to polish what attain found, and the attain best sits on
+        the level by construction whenever the target was reached (it may
+        wear a gate bump, but a seed is a starting point, not a verdict:
+        the clean-pool gate still owns D*, the candidate pools and the
+        output) — then the lowest-drag clean archive entries already on
         D*, diversified so multi-start explores different basins of the
-        on-level manifold instead of polishing one point three times."""
+        on-level manifold instead of polishing one point three times.
+        Without the attain seed, a run whose clean pool thins near the
+        level starts every simplex at the pool's low-downforce edge and
+        can stall below the level with the descend budget spent
+        (measured on the hot-baseline regression: 477.6 N stalled vs
+        480.6 N with the attain seed plus the third start).
+        """
         with self._lock:
             pool = [a for a in self.archive
                     if a.get("pen_gate", a["penalty"]) < PEN_OK]
@@ -997,14 +1077,20 @@ class Job:
                 return [np.array(self.best["x"])]
             return [np.array(x_fallback)]
         spans = [max(v["hi"] - v["lo"], 1e-9) for v in self.variables]
-        picked = [on[0]]
-        for a in on[1:]:
+        picked = []
+        if self.objective_mode != "max_downforce" and x_fallback is not None:
+            # the attain best, wrapped so the diversity distance can
+            # compare it (max mode keeps pool-only seeding: its descend
+            # polishes the strongest CLEAN designs, and its attain best
+            # can sit behind the trust wall)
+            picked.append({"x": [float(v) for v in x_fallback]})
+        for a in on:
             if len(picked) >= n:
                 break
-            if min(self._distance(a, p, spans) for p in picked) \
-                    > CAND_DIVERSITY:
+            if not picked or min(self._distance(a, p, spans)
+                                 for p in picked) > CAND_DIVERSITY:
                 picked.append(a)
-        for a in on[1:]:   # top up in plain drag order if diversity ran dry
+        for a in on:   # top up in plain drag order if diversity ran dry
             if len(picked) >= n:
                 break
             if a not in picked:
@@ -1115,6 +1201,15 @@ class Job:
                         for e, top in zip(
                             els, self.load_band or [1.05] * len(els)))),
                     "slot_signature": bool(r.get("slot_signature")),
+                    # wake-shadow screen at full fidelity — the separation
+                    # badge, and max mode's hard drop criterion
+                    "shadow_collapse": bool(any(
+                        e.get("shadow_status") == "collapse" for e in els)),
+                    "shadow_warn": bool(any(
+                        e.get("shadow_status") == "warn" for e in els)),
+                    "shadow_min": min((e["shadow_min"] for e in els
+                                       if e.get("shadow_min") is not None),
+                                      default=None),
                 }
             except Exception:
                 entry["summary"] = None
@@ -1145,8 +1240,9 @@ class Job:
         if not guarded:
             return out
         drops = {"loading": 0, "confidence": 0, "ld": 0, "rules": 0,
-                 "unverified": 0}
+                 "shadow": 0, "unverified": 0}
         best_frac, best_conf, best_ld = None, None, None
+        best_shadow = None
         kept = []
         for entry in out:
             if check_rules:
@@ -1173,12 +1269,23 @@ class Job:
                 continue
             frac, conf = s.get("frac_max"), s.get("confidence_min")
             ld = s.get("efficiency_ld")
+            sh = s.get("shadow_min")
             best_frac = frac if best_frac is None else min(best_frac, frac)
             best_conf = conf if best_conf is None else max(best_conf, conf)
             best_ld = ld if best_ld is None else max(best_ld, ld)
+            if sh is not None:
+                best_shadow = sh if best_shadow is None \
+                    else max(best_shadow, sh)
             if (self.objective_mode == "max_downforce" and frac is not None
                     and frac > analysis.LOAD_WARN + MAXDF_FRAC_SLACK_FULL):
                 drops["loading"] += 1
+                continue
+            if (self.objective_mode == "max_downforce"
+                    and s.get("shadow_collapse")):
+                # trusted-output contract: a design whose top-side flow is
+                # predicted collapsed (measured 22-40% reversed in RANS at
+                # this level) is not a trustworthy maximum
+                drops["shadow"] += 1
                 continue
             if conf is not None and conf < self.min_conf - 0.005:
                 drops["confidence"] += 1
@@ -1193,7 +1300,8 @@ class Job:
             # objective, not whatever diversity pick happened to be next
             kept.sort(key=lambda e: e["J"])
             self._drop_stats = {**drops, "best_frac": best_frac,
-                                "best_conf": best_conf, "best_ld": best_ld}
+                                "best_conf": best_conf, "best_ld": best_ld,
+                                "best_shadow": best_shadow}
         for i, entry in enumerate(kept, 1):
             entry["rank"] = i
         return kept
@@ -1268,6 +1376,8 @@ class Job:
                     "frac_max": round(max(e["loading_fraction"]
                                           for e in els), 3),
                     "slot_signature": bool(r.get("slot_signature")),
+                    "shadow_collapse": bool(any(
+                        e.get("shadow_status") == "collapse" for e in els)),
                 },
             })
         # full fidelity can reorder the coarse-search points: re-sort and
@@ -1309,6 +1419,15 @@ class Job:
                 f"re-measured at full paneling — the search sat exactly on "
                 f"a limit; give the envelope a millimetre of margin or "
                 f"tighten the design")
+        if d.get("shadow"):
+            best_sh = d.get("best_shadow")
+            parts.append(
+                f"{d['shadow']} candidate(s) dropped for predicted "
+                f"wake-shadow collapse (an element's top-side stream below "
+                f"the measured 0.50 separation line"
+                + (f"; best candidate bottomed at {best_sh:.2f}"
+                   if best_sh is not None else "")
+                + "). Open the stagger between elements or use target mode")
         if d.get("unverified") and not parts:
             parts.append("every candidate failed its full-fidelity "
                          "re-analysis — the guarantees could not be "
@@ -1350,6 +1469,23 @@ class Job:
             self.load_band = [max(1.05, f + 0.03) for f in ev0["fracs"]]
         self.ground_band = [max(analysis.GROUND_CL_ALLOWANCE, f + 0.05)
                             for f in ev0["fracs_ground"]]
+        sm0 = ev0.get("shadow_mins") or []
+        if any(v is not None and v < wake_shadow.SHADOW_SEP for v in sm0):
+            # the START already collapses the shadow screen — the UI can
+            # say why the winner may sit below the baseline's number
+            self.shadow_note = "baseline_below_sep"
+        if self.objective_mode != "max_downforce":
+            # do-no-harm widening, target mode only: max mode's contract
+            # is trusted output, and its full-fidelity filter drops
+            # collapsed candidates — widening the search band would spend
+            # budget converging on designs the filter then discards.
+            # Entries are the per-element EFFECTIVE separation line: the
+            # measured 0.50, slid down to HEADROOM below a baseline that
+            # already sits under it (never above 0.50)
+            self.shadow_band = [
+                None if v is None
+                else min(wake_shadow.SHADOW_SEP, v - SHADOW_HEADROOM)
+                for v in sm0]
         self.conf_pen0 = _confidence_parts(ev0, self.min_conf)
         if (ev0.get("confidences")
                 and min(ev0["confidences"]) < self.min_conf):
@@ -1505,7 +1641,12 @@ class Job:
                 self.best = None   # the winner must be a full-fidelity eval
             self._obj_phase = "descend"
             self._opt_panels = self._full_panels
-            n_starts = 3 if thorough else 2
+            # three starts in every mode: the attain best plus two clean
+            # pool basins. Two-start descends measurably stall on hot
+            # baselines — the simplex leaves the level through the easy
+            # aoa-relief exit and the one remaining basin rarely holds the
+            # along-level valley (the hot-baseline regression pins this)
+            n_starts = 3
             # fallback for degenerate pools: the attain phase's best (best
             # was just cleared under the lock, so pass it explicitly —
             # falling back to x0 would discard the whole attain budget)
@@ -1641,6 +1782,7 @@ class Job:
                 "objective": self.objective_mode,
                 "load_cap_note": self.load_cap_note,
                 "conf_note": self.conf_note,
+                "shadow_note": self.shadow_note,
                 "variables": [{**v} for v in self.variables],
                 "best_config": self.best_config,
                 "result": self.result if self.state in ("done", "cancelled")

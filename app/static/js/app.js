@@ -1017,6 +1017,20 @@ function renderResults(res) {
       ` · <span class="gload${gf > 2.0 ? " warn" : ""}" title="realized ` +
       `ground-effect operating point: Cl ${fmtN(e.Cl_operating, 2)} — ` +
       `${fmtN(gf, 2)}× the isolated CLmax">g-load ${fmtN(gf, 2)}</span>`;
+    // wake-shadow line (downstream elements only) — it does NOT fit on
+    // the loading subline: that line clears the 297px column by ~6 chars
+    // (the round-4 wrap fix), so the shadow gets its own muted subline
+    // in the same voice. Measured separation line 0.50·V∞, caution band
+    // to 0.53; the analysis warning carries the full story when hot.
+    const shadow = e.shadow_min == null ? "" :
+      `<div class="load-sub"><span class="gload` +
+      `${e.shadow_status !== "ok" ? " warn" : ""}" ` +
+      `title="wake-shadow: the stream over this element's upper side ` +
+      `bottoms at ${fmtN(e.shadow_min, 2)}·V∞ (measured separation line ` +
+      `0.50, caution band to 0.53)">wake-shadow ${fmtN(e.shadow_min, 2)}` +
+      (e.shadow_status === "collapse" ? " — collapse"
+        : e.shadow_status === "warn" ? " — gray band" : "") +
+      `</span></div>`;
     // the element label + loading % on one clean line; the detailed
     // coefficients on a muted subline below so nothing wraps mid-metric
     row.innerHTML =
@@ -1024,7 +1038,7 @@ function renderResults(res) {
       `<span>${(frac * 100).toFixed(0)}%</span></div>` +
       `<div class="load-sub">Cl ${fmtN(e.Cl_checked, 2)}/` +
       `${fmtN(e.CL_max_isolated, 2)} · gnd ×${fmtN(e.ground_multiplier, 1)}` +
-      `${gload}</div>` +
+      `${gload}</div>${shadow}` +
       `<div class="load-track">` +
       `<div class="load-fill" style="width:${Math.min(frac / scale, 1) * 100}%;` +
       `background:${SERIES[i]}"></div>` +
@@ -1776,7 +1790,7 @@ function renderPareto(s) {
   const flagged = (p) => {
     const f = p.summary || {};
     return f.low_confidence || f.near_stall || f.slot_signature
-      || (f.frac_max ?? 0) > 0.9;
+      || f.shadow_collapse || (f.frac_max ?? 0) > 0.9;
   };
   // if anything is about to draw, the placeholder must be gone first — a
   // host that is display:none (under .empty) can't measure its own width
@@ -1945,8 +1959,8 @@ function renderRerank(q) {
   const tbl = document.createElement("table");
   tbl.className = "rr-table";
   const head = tbl.insertRow();
-  for (const h of ["#", "design", "panel N", "RANS N", "Δ%", "verdict",
-                   "state", ""]) {
+  for (const h of ["#", "design", "panel N", "RANS N", "Δ%", "flow",
+                   "verdict", "state", ""]) {
     const th = document.createElement("th");
     th.textContent = h;
     head.appendChild(th);
@@ -1954,12 +1968,18 @@ function renderRerank(q) {
   for (const r of rows) {
     const tr = tbl.insertRow();
     if (!r.converged) tr.className = "dim";
+    // measured attachment, compact (full per-element verdict as tooltip);
+    // a separated row is demoted in rank by the server for the same reason
+    const flow = r.worst_reversed == null ? "–"
+      : r.worst_reversed > 0.20 ? "separated"
+      : r.worst_reversed > 0.10 ? "partial" : "attached";
     const cells = [
       r.rank ?? "–", r.label,
       r.panel_downforce_n != null ? fmtN(r.panel_downforce_n, 0) : "–",
       r.rans_downforce_n != null ? fmtN(r.rans_downforce_n, 0) : "–",
       r.delta_cl_pct != null
         ? `${r.delta_cl_pct > 0 ? "+" : ""}${fmtN(r.delta_cl_pct, 1)}` : "–",
+      flow,
       // the caution covers every mesh below fine, so name the one the
       // queue actually ran rather than assuming coarse
       (r.verdict || "–") + (r.mesh_caution
@@ -1971,6 +1991,10 @@ function renderRerank(q) {
       const td = tr.insertCell();
       td.textContent = String(c);   // labels/errors are data, not markup
     }
+    const fd = tr.cells[5];
+    if (r.wall_verdict) fd.title = r.wall_verdict;
+    if (flow === "separated") fd.style.color = "var(--warning)";
+    else if (flow === "attached") fd.style.color = "var(--good)";
     const td = tr.insertCell();
     if (r.config) {
       // a restored row can reference an uploaded airfoil the server no
@@ -1992,7 +2016,7 @@ function renderRerank(q) {
       }
       td.appendChild(b);
     }
-    const vd = tr.cells[5];
+    const vd = tr.cells[6];
     if (r.verdict === "over-claims") vd.style.color = "var(--warning)";
     if (r.verdict === "healthy band") vd.style.color = "var(--good)";
   }
@@ -2077,6 +2101,21 @@ function renderOptHints(s) {
     d.textContent = "The starting design itself sits below the confidence " +
       "floor; the search is only charged for leaning harder on distrusted " +
       "data, but if nothing passes the floor the run will fail and say so.";
+    host.appendChild(d);
+  }
+  if (s.shadow_note === "baseline_below_sep") {
+    const d = document.createElement("div");
+    d.className = "warning-item";
+    d.textContent = "The starting design already collapses the wake-shadow " +
+      "screen (an element's top-side stream below the measured 0.50 " +
+      "separation line — the flow state behind the recorded 22–40% " +
+      "reversed-flow RANS cases). " +
+      (s.objective === "max_downforce"
+        ? "Maximize mode will not follow it there, and candidates that " +
+          "stay collapsed are dropped at full fidelity."
+        : "The search is only charged for pushing deeper; expect the " +
+          "candidates to carry the separation-risk badge until the " +
+          "shadowing is opened up.");
     host.appendChild(d);
   }
   if (msg) {
@@ -2191,6 +2230,16 @@ function renderCandidates(s) {
         `at the pre-stall polar (drag understated), or its polar never ` +
         `stalled in the analyzed range (CL_max is a lower bound, not a ` +
         `stall). Verify with RANS.">near stall</span>` : "") +
+      (f.shadow_collapse ? `<span class="badge warn" title="Wake-shadow ` +
+        `collapse: the stream over an element's upper side bottoms below ` +
+        `0.50·V∞ — every wall-shear-graded element on record at this ` +
+        `level measured 22–40% reversed flow in RANS. The flow will not ` +
+        `reach that element's trailing edge; see the analysis warning.` +
+        `">separation risk</span>`
+        : f.shadow_warn ? `<span class="badge warn" title="Wake-shadow ` +
+        `gray band (0.50–0.53·V∞): between the measured attached and ` +
+        `separated classes — the recorded flagged-class flaps sit here. ` +
+        `Verify with RANS.">shadow gray band</span>` : "") +
       (f.warnings ? `<span class="badge warn">${esc(f.warnings)} warning` +
                     `${+f.warnings > 1 ? "s" : ""}</span>` : "");
     const head = document.createElement("div");
@@ -3355,7 +3404,8 @@ async function buildReport() {
           const s = cd.summary || {};
           const flags = [s.low_confidence ? "low conf" : "",
                          s.near_stall ? "near stall" : "",
-                         s.slot_signature ? "slot corner" : ""]
+                         s.slot_signature ? "slot corner" : "",
+                         s.shadow_collapse ? "sep risk" : ""]
             .filter(Boolean).join(", ") || "clean";
           return `<tr><td>${esc(cd.rank)}</td>` +
             `<td>${fmtN(s.downforce_n ?? cd.downforce_n, 0)} N</td>` +

@@ -101,9 +101,13 @@ application window, then to the default browser.
   slot), or **my uploads only** —
   optimize over just the sections you can actually build. The
   objective drives predicted downforce to a target while penalizing drag,
-  slot geometry outside the healthy band, element overload, and
-  intersections. Runs on a worker thread with live convergence charts and
-  progress. A finished run returns the best design **plus up to three
+  slot geometry outside the healthy band, element overload, predicted
+  wake-shadow collapse (the RANS-validated screen for a downstream
+  element's top-side flow dying in its neighbors' shadow — the recorded
+  failure mode the loading budget cannot see), and intersections.
+  Max-downforce mode additionally re-checks every returned candidate at
+  full fidelity and drops any that still collapse the screen. Runs on a
+  worker thread with live convergence charts and progress. A finished run returns the best design **plus up to three
   candidate designs** — on-target alternates chosen farthest-point-first
   from everything the search evaluated, so they are genuinely different
   set-ups (different slot geometry, incidence, or airfoils) rather than
@@ -181,7 +185,10 @@ sectional load, applied with one click (offered only from a run whose force
 history actually converged). Each run also reports its measured y+ and a
 per-element attachment verdict read from the wall shear field, so a high
 load can be told apart from a separated one; a run still trending labels
-its own mean a bound rather than a result. Entirely opt-in: the button only
+its own mean a bound rather than a result. The shortlist verification
+queue carries the same verdict per row and demotes any design measuring
+an element separated below every attached one — a separated flow state's
+forces cannot buy it a podium. Entirely opt-in: the button only
 enables when Docker Desktop is running, one run at a time, cancellable.
 Working cases land under `app_data/rans/` (the newest few are kept) with
 full logs and a ParaView-openable `case.foam`. The 2D case's drag is
@@ -218,6 +225,20 @@ own Reynolds number, warnings from 90 %, criticals from 110 % — and at the
 realized ground-effect operating point (the same per-element CL the drag
 lookup uses; these compose exactly to `C_est`). A realized operating point
 past 2× the isolated stall limit flags the estimate as optimistic.
+
+A third, independent screen catches the failure the loading budget cannot
+see: **wake-shadow collapse**. On a multi-element stack a downstream
+element can sit so deep in its neighbors' circulation shadow that the
+stream over its *upper* side — the stream carrying the upstream wake —
+falls below about half the freestream, and the top-side flow collapses
+into a standing bubble well before the trailing edge. Every wall-shear-
+graded RANS case on record separates cleanly on this number: elements
+that measured 22–40 % reversed flow all sat at upper-side minima ≤ 0.46·V∞
+while every attached element sat ≥ 0.53 (`docs/calibration/wall_truth.json`,
+`scripts/separation_metric_check.py`). The analysis reports each
+downstream element's `shadow_min` with the measured 0.50 separation line
+and a 0.50–0.53 caution band; the first element is exempt (no upstream
+wake — its loading budget covers it).
 
 Drag has two parts: per-element profile drag from each section's polar at
 its realized ground-effect operating CL — clamped to the pre-stall branch of
@@ -269,6 +290,7 @@ app/
     geometry.py        stack construction, frames, slot metrics
     panel.py           multi-element panel method with ground effect
     viscous.py         NeuralFoil polars + XFOIL reference runs
+    wake_shadow.py     RANS-validated wake-shadow separation screen
     analysis.py        combined analysis and the corrected estimate
     optimizer.py       target-downforce search (background jobs)
     shaping.py         Hicks–Henne camber/thickness refinement of sections

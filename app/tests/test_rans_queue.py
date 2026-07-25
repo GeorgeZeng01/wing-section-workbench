@@ -71,11 +71,14 @@ def fake_availability(refresh=False):
 
 class FlatProc:
     """Fake solver: writes a flat force history (converges by residuals,
-    below the cap) and exits cleanly after a few polls."""
-    def __init__(self, case_dir, cl, cd=0.2, polls=3):
+    below the cap) and exits cleanly after a few polls. wall_frac, when
+    given, also writes a wallShearStress field whose wing patches read
+    that reversed-flow fraction (20 faces per element)."""
+    def __init__(self, case_dir, cl, cd=0.2, polls=3, wall_frac=None):
         self.case = case_dir
         self.cl = cl
         self.cd = cd
+        self.wall_frac = wall_frac
         self.polls_to_exit = polls
         self.returncode = None
         self._polls = 0
@@ -90,6 +93,19 @@ class FlatProc:
         lines += [f"{i + 1} {self.cd:.4f} 0.1 0.1 {self.cl:.4f} 1 1"
                   for i in range(1500)]
         (cdir / "coefficient.dat").write_text("\n".join(lines) + "\n")
+        if self.wall_frac is not None:
+            n = 20
+            n_rev = round(self.wall_frac * n)
+            vecs = " ".join(["(1 0 0)"] * n_rev + ["(-1 0 0)"] * (n - n_rev))
+            blocks = "".join(
+                f"    wing_e{k}\n    {{\n        type calculated;\n"
+                f"        value nonuniform List<vector> {n}({vecs});\n"
+                f"    }}\n" for k in (1, 2))
+            tdir = self.case / "500"
+            tdir.mkdir(parents=True, exist_ok=True)
+            (tdir / "wallShearStress").write_text(
+                "internalField nonuniform List<vector> 1((0 0 0));\n"
+                "boundaryField\n{\n" + blocks + "}\n")
         if self._polls >= self.polls_to_exit:
             self.returncode = 0
             return 0
@@ -121,12 +137,14 @@ class _Patched:
             "R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
         def popen(cmd, **kw):
-            cl, cd = self.runs[min(self.calls, len(self.runs) - 1)]
+            run = self.runs[min(self.calls, len(self.runs) - 1)]
+            cl, cd = run[0], run[1]
+            wall = run[2] if len(run) > 2 else None
             self.calls += 1
             # the -v mount argument carries the case dir
             case = Path(next(a for a in cmd if ":/case" in str(a))
                         .split(":/case")[0])
-            return FlatProc(case, cl, cd, self.polls)
+            return FlatProc(case, cl, cd, self.polls, wall_frac=wall)
         cfd_run._popen = popen
         return self
 
@@ -273,6 +291,29 @@ def main():
     check("fine mesh rows carry calibrated verdicts and no caution",
           all(r["mesh_caution"] is False
               and not r["verdict"].startswith("screening") for r in rt))
+
+    # ---- measured separation demotes: B posts the higher downforce but
+    # its wall shear grades it separated (40% reversed faces); under the
+    # fallback measured-downforce ranking it must still rank BEHIND the
+    # attached A — forces from a separated flow state are not a podium ----
+    wait_solver_idle()
+    with _Patched(runs=((2.5, 0.2, 0.05), (3.0, 0.2, 0.40))):
+        rans_queue.start([{"label": "att", "config": CFG_D},
+                          {"label": "sep", "config": CFG_D2}],
+                         "medium", 300)
+        snap_w = wait_queue()
+    rw = snap_w["rows"]
+    check("wall verdict: rows carry the measured attachment state",
+          rw[0]["worst_reversed"] == 0.05 and rw[1]["worst_reversed"] == 0.4
+          and "separated" in (rw[1]["wall_verdict"] or ""),
+          f"(worst {[r['worst_reversed'] for r in rw]})")
+    check("wall verdict: separated row is demoted below the attached one",
+          rw[0]["rank"] == 1 and rw[1]["rank"] == 2,
+          f"(ranks {[r['rank'] for r in rw]}, "
+          f"cl {[r['cl_rans'] for r in rw]})")
+    check("wall verdict: rows without diagnostics stay un-penalized "
+          "(earlier queues ranked on forces alone)",
+          all(r["worst_reversed"] is None for r in rows))
 
     # ---- crash mid-queue: the in-flight solve is cancelled and the
     # remaining rows are reconciled instead of staying 'queued' inside a

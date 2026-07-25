@@ -70,7 +70,7 @@ import dataclasses
 
 import numpy as np
 
-from . import geometry, panel, viscous
+from . import geometry, panel, viscous, wake_shadow
 from .geometry import StackConfig
 
 LOAD_WARN = 0.90
@@ -165,6 +165,41 @@ def realized_gain(c_free: float, c_ground: float, cfg: StackConfig,
     return g_real, float(k_g), float(r)
 
 
+def shadow_warnings(shadows: list[dict], design: list[dict]) -> list[str]:
+    """Warning prose for wake-shadow states (wake_shadow.stack_shadow
+    output). One implementation shared by analyze() and the operating
+    map's warning-count parity — the messages and the counts must agree.
+    """
+    out = []
+    warn_band = []
+    for i, s in enumerate(shadows):
+        v = s.get("shadow_min")
+        if v is None:
+            continue
+        role = design[i]["role"] if i < len(design) else f"element {i + 1}"
+        if s.get("status") == "collapse":
+            out.append(
+                f"{role}: wake-shadow collapse — the stream over its upper "
+                f"side bottoms at {v:.2f}·V∞, below the measured "
+                f"0.50 separation line. Every wall-shear-graded element on "
+                f"record at this level ran 22-40% reversed flow in RANS "
+                f"(docs/calibration/wall_truth.json): the top-side flow "
+                f"will not reach this element's trailing edge and the "
+                f"downforce estimate does not describe that flow state. "
+                f"Open the stagger/gap to its neighbors, reduce loading, "
+                f"or verify with RANS before trusting this design.")
+        elif s.get("status") == "warn":
+            warn_band.append(f"{role} ({v:.2f})")
+    if warn_band:
+        out.append(
+            f"wake-shadow caution on: {', '.join(warn_band)} — upper-side "
+            f"stream minima inside the 0.50-0.53 gray band between the "
+            f"measured attached (>= 0.53) and detached (<= 0.46) classes; "
+            f"the recorded flagged-class flaps sit exactly here. Verify "
+            f"with RANS before trusting the estimate.")
+    return out
+
+
 def slot_signature_warnings(design: list[dict]) -> list[str]:
     """The recorded over-claim slot signature, checked geometrically.
 
@@ -247,6 +282,8 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
     c_free = -free.Cl
     c_ground = -ground.Cl
     c_est, k_g, r_gain = corrected_downforce(c_free, c_ground, cfg)
+    # wake-shadow screen at the same realized field the estimate books
+    shadows = wake_shadow.stack_shadow(free, ground, r_gain)
 
     q = cfg.q_pa
     area = cfg.chord_m * (cfg.span_mm / 1000.0)
@@ -320,6 +357,9 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
                 if i else None,
             "slot_overlap_pct": round(design[i].get("slot_overlap", np.nan) * 100, 2)
                 if i else None,
+            "shadow_min": shadows[i]["shadow_min"],
+            "shadow_status": shadows[i]["status"],
+            "shadow_arc": shadows[i]["arc_at_min"],
         })
     clamped = [e["role"] for i, e in enumerate(design)
                if cfg.element_re(i) < viscous.RE_FLOOR]
@@ -359,6 +399,7 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
             "apply the suggested k_g to recalibrate.")
     sig_warnings = slot_signature_warnings(design)
     warnings += sig_warnings
+    warnings += shadow_warnings(shadows, design)
     if cfg.ride_height_c < HC_CHOKE_OPTIMISM:
         warnings.append(
             f"ride height h/c = {cfg.ride_height_c:.3f} is below the "
@@ -498,6 +539,7 @@ def quick_objective_eval(cfg: StackConfig, model_size: str = "large") -> dict:
     drag_induced, _ = induced_drag_n(downforce_n, cfg, installed)
     gaps = [e.get("slot_gap") for e in design[1:]]
     overlaps = [e.get("slot_overlap") for e in design[1:]]
+    shadows = wake_shadow.stack_shadow(free, ground, r_gain)
     return {
         "feasible": True,
         "downforce_n": downforce_n,
@@ -514,6 +556,9 @@ def quick_objective_eval(cfg: StackConfig, model_size: str = "large") -> dict:
         "gaps": gaps,
         "overlaps": overlaps,
         "slot_signature": bool(slot_signature_warnings(design)),
+        # wake-shadow screen (None for the exempt first element) — the
+        # optimizer's separation penalty/gate reads these
+        "shadow_mins": [s["shadow_min"] for s in shadows],
     }
 
 
@@ -576,6 +621,8 @@ def _sweep_point(cfg: StackConfig, design: list[dict], installed: list[dict],
     if rules is not None and not rules["ok"]:
         n_warnings += len(rules["violations"])
     n_warnings += len(slot_signature_warnings(design))
+    n_warnings += len(shadow_warnings(
+        wake_shadow.stack_shadow(free, ground, r_gain), design))
 
     drag_profile_n = q * area * cd_stack
     drag_induced, _ = induced_drag_n(downforce_n, cfg, installed)

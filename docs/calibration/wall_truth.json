@@ -1,0 +1,110 @@
+{
+  "_provenance": [
+    "Per-element wall-shear attachment truth extracted 2026-07-24 from the",
+    "retained RANS case directories under app_data/rans (config.json verbatim,",
+    "reversed-flow fractions from foam_post.wall_report on the newest written",
+    "wallShearStress field). Recorded here because run-dir housekeeping keeps",
+    "only the newest few cases. reversed_frac thresholds as reported in-app:",
+    "attached <= 0.10, partial <= 0.20, separated > 0.20.",
+    "gate=true rows are converged (or near-converged) solves used by",
+    "scripts/separation_metric_check.py as the wire-in discrimination gate;",
+    "the 628-iteration transient snapshot is kept for the record only."
+  ],
+  "cases": [
+    {
+      "case_id": "1c4bf2d726c3",
+      "label": "saved 3-element s1223 d8.9/27 (the 2026-07-24 A/B case)",
+      "mesh": "fine",
+      "n_iters": 8204,
+      "note": "continued to 12000 as probe-finecont, converged (LOG.md)",
+      "gate": true,
+      "reversed_frac": {"wing_e1": 0.057, "wing_e2": 0.217, "wing_e3": 0.027},
+      "config": {
+        "stack_aoa_deg": -3.88, "ride_height_mm": 40, "chord_mm": 350,
+        "span_mm": 1400, "speed_ms": 20, "rho": 1.225, "nu": 1.5e-05,
+        "ncrit": 7, "viscous_efficiency": 0.85, "efficiency_3d": 0.9,
+        "span_efficiency": 0.9, "n_panels_per_side": 70,
+        "manufacturing": {"te_gap_mm": 2, "te_mode": "thicken",
+                          "min_thickness_mm": 2},
+        "elements": [
+          {"airfoil": "s1223", "chord_ratio": 1, "deflection_deg": 0},
+          {"airfoil": "s1223", "chord_ratio": 0.28, "deflection_deg": 8.9,
+           "slot_gap_pct": 1.3, "slot_overlap_pct": 1.2},
+          {"airfoil": "s1223", "chord_ratio": 0.2, "deflection_deg": 27,
+           "slot_gap_pct": 1.3, "slot_overlap_pct": 1.3}
+        ]
+      }
+    },
+    {
+      "case_id": "77db1be5b847",
+      "label": "same config, coarse mesh",
+      "mesh": "coarse",
+      "n_iters": 5589,
+      "note": "coarse exaggerates separation (recorded mesh caveat); not a gate row",
+      "gate": false,
+      "reversed_frac": {"wing_e1": 0.104, "wing_e2": 0.330, "wing_e3": 0.031},
+      "config": "same_as:1c4bf2d726c3"
+    },
+    {
+      "case_id": "df1865bb82a3",
+      "label": "3-element s1223 d0/37.6, slot corner on e3",
+      "mesh": "medium",
+      "n_iters": 4214,
+      "note": "Cl drift +2.37%/window at stop — treated as settled enough to class flow state",
+      "gate": true,
+      "reversed_frac": {"wing_e1": 0.078, "wing_e2": 0.392, "wing_e3": 0.298},
+      "config": {
+        "stack_aoa_deg": -4, "ride_height_mm": 40, "chord_mm": 350,
+        "span_mm": 1400, "speed_ms": 20, "rho": 1.225, "nu": 1.5e-05,
+        "ncrit": 7, "viscous_efficiency": 0.85, "efficiency_3d": 0.9,
+        "span_efficiency": 0.9, "n_panels_per_side": 70,
+        "manufacturing": {"te_gap_mm": 2, "te_mode": "thicken",
+                          "min_thickness_mm": 2},
+        "elements": [
+          {"airfoil": "s1223", "chord_ratio": 1, "deflection_deg": 0},
+          {"airfoil": "s1223", "chord_ratio": 0.28, "deflection_deg": 0,
+           "slot_gap_pct": 1.1, "slot_overlap_pct": 0},
+          {"airfoil": "s1223", "chord_ratio": 0.2, "deflection_deg": 37.6,
+           "slot_gap_pct": 0.9, "slot_overlap_pct": 0.6}
+        ]
+      }
+    },
+    {
+      "case_id": "859e79a7486d",
+      "label": "shape-refined 3-element (s1223/as6099/be6699 bases) d9.9/17.4",
+      "mesh": "fine",
+      "n_iters": 10000,
+      "note": "converged, drift +0.07%/window; e3 at 0.118 is borderline partial and is NOT gated on",
+      "gate": true,
+      "reversed_frac": {"wing_e1": 0.076, "wing_e2": 0.397, "wing_e3": 0.118},
+      "config": {
+        "stack_aoa_deg": -3.11, "ride_height_mm": 40, "chord_mm": 350,
+        "span_mm": 1400, "speed_ms": 20, "rho": 1.225, "nu": 1.5e-05,
+        "ncrit": 7, "viscous_efficiency": 0.85, "efficiency_3d": 0.9,
+        "span_efficiency": 0.9, "n_panels_per_side": 70,
+        "manufacturing": {"te_gap_mm": 2, "te_mode": "thicken",
+                          "min_thickness_mm": 2},
+        "elements": [
+          {"airfoil": "shape:+0.0055:-0.0115:+0.0075:0.960:s1223",
+           "chord_ratio": 1, "deflection_deg": 0},
+          {"airfoil": "shape:-0.0025:-0.0050:+0.0070:1.030:as6099",
+           "chord_ratio": 0.336, "deflection_deg": 9.9,
+           "slot_gap_pct": 1.4, "slot_overlap_pct": 3.4},
+          {"airfoil": "shape:+0.0040:-0.0005:+0.0030:1.210:be6699",
+           "chord_ratio": 0.381, "deflection_deg": 17.4,
+           "slot_gap_pct": 1.9, "slot_overlap_pct": 1.8}
+        ]
+      }
+    },
+    {
+      "case_id": "61bca3ea40f6",
+      "label": "same shaped stack, 628-iteration transient snapshot",
+      "mesh": "medium",
+      "n_iters": 628,
+      "note": "NOT converged (drift +11.7%/window) — the main reads 31.6% reversed in the startup transient but relaxes to attached by convergence (859e79a7486d). Record only.",
+      "gate": false,
+      "reversed_frac": {"wing_e1": 0.316, "wing_e2": 0.408, "wing_e3": 0.031},
+      "config": "same_as:859e79a7486d"
+    }
+  ]
+}

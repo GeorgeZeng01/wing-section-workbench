@@ -444,3 +444,57 @@ entry (stage3b knee, implied 0.431). The estimate, not the RANS, is
 the outlier; analyze() now emits an estimate-fidelity note on 3+
 element heavily loaded stacks, and the RANS card explains the
 conservatism instead of presenting a bare "+66 %".
+
+## 2026-07-24 — Wall-shear truth set and the wake-shadow screen
+
+Trigger: repeated user-observed early separation on RANS solves of
+optimizer products ("the airflow never reaches the trailing edge"),
+suspected optimizer blindness. The retained cases under app_data/rans
+carry wallShearStress fields, so the flow state is measurable per
+element rather than argued from pictures. Extracted verbatim into
+`wall_truth.json` (five cases; two fine, one medium converged, one
+coarse duplicate, one 628-iteration transient snapshot):
+
+- EVERY converged 3-element case runs its second element separated
+  (reversed-face fractions 0.217 / 0.392 / 0.397), mains attached
+  (0.057–0.078), final flaps attached-to-partial (0.027–0.118, one
+  0.298 in the slot corner at 37.6° deflection).
+- The transient snapshot reads the MAIN at 0.316 reversed at 628
+  iterations; its converged continuation relaxes the main to 0.076
+  and keeps e2 at 0.397 — early-iteration flow states are not verdicts
+  (matches the drift-verdict rules from the 07-24 realism round).
+- The optimizer graded all of these clean: the dying elements sit at
+  free-air loading fractions 0.48–0.77, inside every band. Loading is
+  the wrong axis for this failure mode.
+
+Candidate screens measured against that record
+(`scripts/separation_metric_check.py`, executable evidence):
+
+1. Integral-BL march (Thwaites → Michel/short-bubble → Head with
+   Ludwieg–Tillman, both sides, booked realized field), stop at first
+   H ≥ 2.4: flags the validated baseline's flap (nose-spill bubble,
+   lost-arc 0.93) — sep-truth 0.030–0.942 vs att-class 0.000–0.927,
+   OVERLAPS. REJECTED.
+2. Same march, marched through with re-heal (terminal-run rule):
+   Head's entrainment re-attaches every dead element — sep-truth
+   0.000–0.049, OVERLAPS. REJECTED. Root cause for both: at the booked
+   realization (r ≈ 0.15) the free-air-dominated Ue distributions of
+   dying and healthy elements differ by less than the method can use.
+3. Wake-shadow screen (min realized upper-side Ue, 15–92 % arc,
+   elements after the first): separated-measured 0.389–0.459 vs
+   attached/partial-measured 0.533–0.619, gap +0.074, SEPARATES. The
+   stage-2 flagged-class flaps (no wall truth, delta −37…−42 %) land
+   at 0.519–0.524, inside the gray band — consistent with their class.
+   Stable: paneling 45/50/70 drifts < 0.01; r swept 0 → 0.35 shifts
+   ~0.03 uniformly with ordering intact. SHIPPED at SHADOW_SEP 0.50,
+   SHADOW_WARN 0.53 (wake_shadow.py; wired per DECISIONS.md
+   "Separation awareness").
+
+Scope: front-wing climbing stacks, h/c 0.086–0.114, s1223-class
+sections, fully-turbulent SST truth runs. The screen says nothing about
+tight-gap slot-jet merging (still invisible inviscidly — slot-signature
+advisory + RANS remain the referees) and exempts the first element
+(no upstream wake; mains measured attached at upper-side minima down
+to 0.44). Re-run the check script after any panel-solver or geometry
+change: it exits nonzero when the thresholds stop separating this
+record.

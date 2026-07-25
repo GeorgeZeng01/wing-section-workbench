@@ -6,7 +6,10 @@ cfd_run pipeline one at a time — the one-job guard is real: Docker/WSL2
 is a single-lane resource — then re-ranks the rows under the objective
 the shortlist was optimized for (measured drag at the target level for
 target mode, measured downforce for max-downforce) and classifies each
-delta against the recorded calibration classes.
+delta against the recorded calibration classes. Each row also carries
+the per-element wall-shear attachment verdict, and any row measuring an
+element separated ranks behind every attached row — high forces from a
+separated flow state are not a podium.
 
 The queue never spends solver hours on an illegal design: every item is
 rule-envelope-checked eagerly at submission, same gate as the optimizer.
@@ -150,6 +153,7 @@ class QueueJob:
                 "drag_rans_n": None, "case_dir": None,
                 "delta_cl_pct": None, "converged": None, "stop_reason": None,
                 "mesh_caution": None, "verdict": None, "error": None,
+                "wall_verdict": None, "worst_reversed": None,
                 "rank": None,
             })
         self.state = "pending"   # pending | running | done | failed
@@ -232,6 +236,16 @@ class QueueJob:
                                 self.mesh_size),
                             case_dir=r.get("case_dir"))
                         row["verdict"] = classify(r, self.mesh_size)
+                        # measured attachment state: a separated row must
+                        # not outrank an attached one, whatever its forces
+                        # say — the ranking demotes on this
+                        row["wall_verdict"] = r.get("wall_verdict")
+                        wall = r.get("wall_report") or {}
+                        sep = wall.get("separation") or {}
+                        fracs = [p.get("reversed_frac") for p in sep.values()
+                                 if p.get("reversed_frac") is not None]
+                        row["worst_reversed"] = (max(fracs) if fracs
+                                                 else None)
                     elif s["state"] == "failed":
                         row["error"] = s.get("error")
             ranked = self._ranked_rows()
@@ -276,9 +290,22 @@ class QueueJob:
         order them by overshoot: instead rows within RANK_TARGET_TOL of
         the target rank by measured drag, and rows that missed the level
         rank after them by distance to it. Max-downforce (and unknown-
-        provenance) shortlists rank by measured downforce."""
+        provenance) shortlists rank by measured downforce.
+
+        Measured separation outranks everything: a row whose wall shear
+        grades any element separated (reversed fraction past the in-app
+        0.20 line) ranks behind every attached row under either
+        objective — its forces are the product of a flow state the
+        screening model does not describe, so they cannot buy it a
+        podium. Rows without wall diagnostics (older cases) keep tier 0
+        rather than being punished for missing data."""
         rows = [r for r in self.rows
                 if r["converged"] and r["rans_downforce_n"] is not None]
+
+        def sep_tier(r):
+            w = r.get("worst_reversed")
+            return 1 if w is not None and w > 0.20 else 0
+
         t = self.target_downforce_n
         if self.objective == "target" and t:
             scale = max(abs(t), 1.0)
@@ -287,11 +314,13 @@ class QueueJob:
                 miss = abs(r["rans_downforce_n"] - t) / scale
                 drag = r.get("drag_rans_n")
                 if miss <= RANK_TARGET_TOL and drag is not None:
-                    return (0, drag, miss)
-                return (1, miss, drag if drag is not None else 1e9)
+                    return (sep_tier(r), 0, drag, miss)
+                return (sep_tier(r), 1, miss,
+                        drag if drag is not None else 1e9)
 
             return sorted(rows, key=key)
-        return sorted(rows, key=lambda r: -r["rans_downforce_n"])
+        return sorted(rows, key=lambda r: (sep_tier(r),
+                                           -r["rans_downforce_n"]))
 
     # ---- API surface ----
 
