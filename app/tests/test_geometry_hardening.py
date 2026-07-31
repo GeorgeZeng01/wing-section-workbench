@@ -109,5 +109,39 @@ cfg_str = geometry.StackConfig.from_dict(
 check("numeric-string n_panels_per_side still accepted",
       cfg_str.n_panels_per_side == 40)
 
+# ---- validator floor matches the panel solver's minimum --------------------
+# repanel(n_points_per_side=N) yields 2N-1 contour points and the panel
+# solver refuses anything under 20, so the lowest accepted count must solve
+check("n_panels_per_side 10 (19 points — unsolvable) is rejected",
+      npanels_rejected(10))
+cfg_floor = geometry.StackConfig.from_dict(
+    {**BASE_CFG, "n_panels_per_side": 11})
+_, pts_floor = airfoils.repaneled("naca0012", cfg_floor.n_panels_per_side)
+check("floor value yields enough points for the panel solver",
+      len(pts_floor) >= 20, f"({len(pts_floor)} points)")
+
+# ---- mfg: TE bound applies anywhere in the spec chain -----------------------
+# the optimizer's opt_shape re-wrap yields "shape:...:mfg:...:base"; a
+# wrapped 12%c gap opens the TE to 42 mm exactly like a bare one and must
+# be refused by the same physical bound
+_WRAP = "shape:+0.0005:+0.0000:+0.0000:1.000:mfg:thicken:{gap}:s1223"
+
+
+def stack_rejected(spec):
+    try:
+        geometry.StackConfig.from_dict(
+            {**BASE_CFG, "elements": [{"airfoil": spec}]})
+    except ValueError:
+        return True
+    return False
+
+
+check("bare mfg: 12%c gap is rejected (42 mm TE on a 350 mm chord)",
+      stack_rejected("mfg:thicken:0.12:s1223"))
+check("shape-wrapped mfg: 12%c gap is rejected the same way",
+      stack_rejected(_WRAP.format(gap="0.12")))
+check("shape-wrapped mfg: with a buildable gap still validates",
+      not stack_rejected(_WRAP.format(gap="0.003")))
+
 print(f"\n{sum(results)}/{len(results)} geometry hardening checks passed")
 sys.exit(0 if all(results) else 1)

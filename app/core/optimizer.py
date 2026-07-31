@@ -1803,8 +1803,23 @@ _jobs_lock = threading.Lock()
 
 
 def start(config: dict, options: dict) -> str:
-    job = Job(config, options)
+    """Start one interactive search. One at a time, like the RANS start
+    path: the search saturates every core it can reach, and repeated starts
+    at a large budget would stack CPU-bound worker threads until the machine
+    is unusable."""
+    job = Job(config, options)   # validates eagerly
     with _jobs_lock:
+        # guard and slot claim under the SAME lock, so two concurrent starts
+        # cannot both pass the check. The blocking set is current()'s active
+        # set: "finalizing" is a full analysis of the winner plus the Pareto
+        # pass, as CPU-bound as the search itself. j.state is read without
+        # the per-job lock (as the prune below always has), so the registry
+        # lock is never held while waiting on a job lock.
+        for j in _jobs.values():
+            if j.state in ("pending", "running", "finalizing"):
+                raise RuntimeError(
+                    "an optimization is already running — cancel it or "
+                    "wait for it to finish")
         # keep the registry small
         done_ids = [k for k, j in _jobs.items()
                     if j.state in ("done", "failed", "cancelled")]
@@ -1824,9 +1839,10 @@ def current() -> dict:
     """The active (or, failing that, most recent) job — lets a reloaded UI
     re-attach to a running search instead of orphaning it.
 
-    Optimizer jobs can overlap (a reload orphans one while the user starts
-    another), so the MOST RECENT active job is returned — re-attaching to the
-    oldest would leave the run the user actually cares about unmonitored."""
+    start() admits one job at a time, but the registry also keeps the last
+    few finished ones, so the MOST RECENT job is the one returned —
+    re-attaching to an older entry would leave the run the user actually
+    cares about unmonitored."""
     with _jobs_lock:
         jobs = list(_jobs.values())
     active = [j for j in jobs if j.state in ("pending", "running",
@@ -1834,12 +1850,16 @@ def current() -> dict:
     # ranked by creation, not start: a just-created job is still "pending"
     # with t_start None until its thread runs, and keying on t_start made
     # it lose to any older running job during exactly the window a UI
-    # polls after POSTing it
+    # polls after POSTing it. Registry insertion order breaks t_created
+    # TIES toward the newer job — back-to-back constructions can land on
+    # the same Windows clock tick (measured: 4 of 12 pairs), and max()
+    # alone would hand a tie to the OLDER job.
     if active:
-        j = max(active, key=lambda j: j.t_created)
+        j = max(enumerate(active), key=lambda p: (p[1].t_created, p[0]))[1]
         return {"job_id": j.id, "state": j.state}
     if jobs:
-        last = max(jobs, key=lambda j: j.t_created)
+        last = max(enumerate(jobs),
+                   key=lambda p: (p[1].t_created, p[0]))[1]
         return {"job_id": last.id, "state": last.state}
     return {"job_id": None, "state": None}
 
@@ -1852,4 +1872,7 @@ def last_candidate_job() -> Job | None:
         jobs = [j for j in _jobs.values() if j.candidates]
     if not jobs:
         return None
-    return max(jobs, key=lambda j: j.t_created)
+    # same tie-break as current(): registry insertion order breaks
+    # t_created ties toward the NEWER job (back-to-back constructions can
+    # land on the same Windows clock tick)
+    return max(enumerate(jobs), key=lambda p: (p[1].t_created, p[0]))[1]

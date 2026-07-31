@@ -11,7 +11,7 @@
 </script>
 <link rel="icon" href="/static/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" href="/static/favicon.png">
-<link rel="stylesheet" href="/static/css/app.css?v=21">
+<link rel="stylesheet" href="/static/css/app.css?v=26">
 </head>
 <body>
 
@@ -144,7 +144,7 @@
       <div class="group-head">
         <h2 class="group-title">Rules</h2>
         <label class="check"
-               title="Competition rule envelope: user-entered geometric limits, checked on the installed wing at the configured ride height. Rules change every season, so nothing is hardcoded — enter this year's numbers and save them as a named preset. The drawing shows the envelope as a dashed box; the optimizer treats it as hard constraints.">
+               title="Competition rule envelope: geometric limits checked on the installed wing at the configured ride height — except the height caps, when a Rule ride height is set below. Rules change every season, so nothing is hardcoded — enter this year's numbers and save them as a named preset, or start from a built-in draft preset and verify it against your own rulebook. The drawing shows the box limits as a dashed box, edge limits show on each element's card; the optimizer treats them as hard constraints.">
           <input id="rules-on" type="checkbox"> apply</label>
       </div>
       <div id="rules-body" hidden>
@@ -168,7 +168,28 @@
         </div>
         <div class="fields two-col">
           <label class="field"
-                 title="Named rule sets saved on this machine (they apply across projects). The active values always travel with the project itself.">
+                 title="Floor under the leading-edge radius of curvature, measured on the as-built nose. FSAE rule T.7.1.4 requires a radius on forward-facing edges someone could walk into — in the 2027 draft that is at least 5 mm on horizontal edges (3 mm on vertical ones, which a 2D section cannot see). The rule also allows a permanently attached leading-edge piece to provide the radius. Blank = off.">
+            <span class="f-label">Min LE radius</span>
+            <span class="f-wrap"><input id="rule-le-radius" type="number" step="0.5" min="0.1" max="100" placeholder="off"><i>mm</i></span></label>
+          <label class="field"
+                 title="Which elements have to meet the radius. Frontmost element: the usual case, where only the leading nose is exposed and the flaps sit behind it. Every element: use it when the stack is staggered, or when the section is mounted so more than one nose faces forward. The frontmost element is found from the geometry, not assumed to be the main.">
+            <span class="f-label">Radius applies to</span>
+            <span class="f-wrap"><select id="rule-le-scope" class="select-inline">
+              <option value="frontmost">Frontmost element</option>
+              <option value="all">Every element</option>
+            </select><i></i></span></label>
+          <label class="field"
+                 title="Floor under the built trailing-edge thickness. FSAE rule T.7.1.5 only says edges a person may touch must not be sharp — it gives NO number, so this floor is yours to set and defend. It is checked on the as-built contour, so the Manufacturing TE thickness above is what has to meet it. Blank = off.">
+            <span class="f-label">Min TE thickness</span>
+            <span class="f-wrap"><input id="rule-te-thick" type="number" step="0.1" min="0.1" max="100" placeholder="off"><i>mm</i></span></label>
+          <label class="field"
+                 title="Ride height the HEIGHT caps are measured at. FSAE rule T.7.3.1 measures aero limits with the wheels straight and no driver in the car — i.e. at its highest static ride height — while ground clearance is worst case laden. The top and the bottom of the box therefore belong to two different load cases. Enter the unladen height here and the caps are re-checked with the stack raised to it; the clearance floor stays on the configured ride height. Blank = both measured at the configured ride height.">
+            <span class="f-label">Rule ride height</span>
+            <span class="f-wrap"><input id="rule-measure-height" type="number" step="1" min="0" max="1000"><i>mm</i></span></label>
+        </div>
+        <div class="fields two-col">
+          <label class="field"
+                 title="Built-in draft envelopes, plus the named rule sets saved on this machine (those apply across projects). The active values always travel with the project itself. Built-in presets cannot be overwritten or deleted — save your own edits under a new name.">
             <span class="f-label">Preset</span>
             <span class="f-wrap"><select id="rule-preset" class="select-inline">
               <option value="">— none —</option>
@@ -182,9 +203,19 @@
           <button id="rule-preset-save" class="btn tiny">Save preset</button>
           <button id="rule-preset-del" class="btn tiny ghost">Delete preset</button>
         </div>
+        <p id="rule-preset-note" class="group-note" hidden></p>
         <p class="group-note">The dashed box in the drawing is this envelope;
-        a violated edge turns amber with the overshoot in mm. The optimizer
-        refuses to start from a violating design and never proposes one.</p>
+        a violated edge turns amber with the overshoot in mm. The edge limits
+        are per element and show as badges on that element's card. The
+        optimizer refuses to start from a violating design and never proposes
+        one.</p>
+        <p class="group-note">The built-in FSAE 2027 presets are read from a
+        <b>public-comment draft</b> (version 0.0, 21 July 2026) that states on
+        its face it is <b>not valid for competition</b> — the numbers will move
+        before V1. Treat them as a starting point, check them against the
+        rulebook your event actually runs, and remember this is a 2D section:
+        endplate edges, plan-view keep-outs, span limits and mount rules are
+        real rules nothing here can decide for you.</p>
       </div>
     </section>
 
@@ -257,8 +288,8 @@
     <div class="pins-sec">
       <h3 class="sub-title">Pinned designs</h3>
       <div id="pins-empty" class="empty-note">Pin analyzed designs to build
-        a compared iteration record — pins restore with one click and are
-        saved with the project.</div>
+        a side-by-side iteration record — pins restore with one click and
+        are saved with the project.</div>
       <div id="pins-list"></div>
       <button id="btn-pin" class="btn small" disabled>Pin current design</button>
     </div>
@@ -273,6 +304,7 @@
       <button class="tab" data-tab="screener" role="tab">Airfoil screener</button>
       <button class="tab" data-tab="maps" role="tab">Maps</button>
       <button class="tab" data-tab="rans" role="tab">RANS verify</button>
+      <button class="tab" data-tab="fluent2d" role="tab">Fluent 2D</button>
       <button class="tab" data-tab="export" role="tab">Export</button>
     </nav>
 
@@ -302,7 +334,7 @@
         <div class="opt-controls">
           <div class="fields two-col">
             <label class="field full"
-                   title="Hit a target: track the requested downforce, then minimize drag at the achievable level. Maximize downforce: most downforce the model can be TRUSTED about — every element is held inside the 90% loading line where RANS measured over-claims of 23–42%, and the winner is re-verified at full fidelity.">
+                   title="Hit a target: track the requested downforce, then minimize drag at the achievable level. Maximize downforce: most downforce the model can be TRUSTED about — every element is held inside the 90% loading line where RANS measured over-claims of 23–42%, designs with a wake-shadow collapse are dropped, and the winner is re-verified at full fidelity.">
               <span class="f-label">Goal</span>
               <span class="f-wrap"><select id="opt-objective" class="select-inline">
                 <option value="target">Hit a downforce target</option>
@@ -371,7 +403,7 @@
           <div id="opt-conv" class="chart-host"></div>
           <div id="opt-obj" class="chart-host"></div>
           <div id="opt-pareto" class="chart-host"
-               title="Every clean design the search evaluated, as the downforce–drag trade-off. Blue points are trusted; amber points carry a trust flag (low confidence, near stall, past the loading line, or the tight-slot signature). Click a front point to apply that design."></div>
+               title="Every clean design the search evaluated, as the downforce–drag trade-off. Blue points are trusted; amber points carry a trust flag (low confidence, near stall, past the loading line, a wake-shadow collapse, or the tight-slot signature). Click a front point to apply that design."></div>
           <div id="opt-pareto-note" class="note" hidden>Pareto front —
             click a point to apply that design. Amber = trust-flagged.</div>
         </div>
@@ -381,11 +413,11 @@
           <div id="opt-hints"></div>
           <button id="btn-opt-apply" class="btn" disabled>Apply to configuration</button>
           <h3 class="sub-title" id="opt-cand-title" hidden
-              title="Distinct designs found during the search that also hit the target — different trade-offs, not just the single optimum. Apply one to inspect it in full.">
+              title="Distinct designs found during the search that also hit the target — or, in maximize mode, land within a few percent of the best trusted downforce — different trade-offs, not just the single optimum. Apply one to inspect it in full.">
             Candidates</h3>
           <div id="opt-candidates"></div>
           <h3 class="sub-title" id="rerank-title" hidden
-              title="Runs the winner, every candidate and the Pareto knee through the same 2D RANS truth case, one at a time, then re-ranks on the MEASURED numbers, consistently with the objective: target runs rank by measured drag among the designs that hit the target, maximum-downforce runs rank by measured downforce. The panel model navigates; RANS measures — this is the maximum-accuracy step for the designs you would actually build. Only fine-mesh runs carry a calibrated verdict; coarse and medium are labelled screening only.">
+              title="Runs the winner, every candidate and the Pareto knee through the same 2D RANS truth case, one at a time, then re-ranks on the MEASURED numbers, consistently with the objective: target runs rank by measured drag among the designs that hit the target, maximum-downforce runs rank by measured downforce, and any row whose measured flow separated ranks behind every attached row. The panel model navigates; RANS measures — this is the maximum-accuracy step for the designs you would actually build. Only fine-mesh runs carry a calibrated verdict; coarse and medium are labelled screening only.">
             RANS re-rank</h3>
           <div id="rerank-block" hidden>
             <div class="action-row">
@@ -393,6 +425,12 @@
                 <option value="coarse">Coarse (screening)</option>
                 <option value="medium" selected>Medium</option>
                 <option value="fine">Fine (slow, definitive)</option>
+              </select>
+              <select id="rr-parallel" class="select-inline"
+                      title="How the queue spends the machine's cores — an explicit opt-in; the serial default reproduces the recorded baselines exactly. Parallel options solve several candidates at once (and/or several MPI ranks per solve) within the core budget; results are identical apart from the knife-edge band around the attachment-verdict lines (see the docs).">
+                <option value="1x1" selected>One solve at a time (serial)</option>
+                <option value="4x4">4 solves × 4 ranks (recommended)</option>
+                <option value="2x8">2 solves × 8 ranks</option>
               </select>
               <button id="btn-rerank" class="btn small">Verify shortlist</button>
               <button id="btn-rerank-cancel" class="btn small ghost" disabled>Cancel</button>
@@ -465,6 +503,15 @@
                title="Upper bound only — the run stops on its own as soon as the force history flattens, so a generous cap costs nothing when the solve behaves. The solver's own residual thresholds are a backstop that does not fire on a loaded high-lift case, so the force history is the criterion that actually ends a run. Fine meshes on heavily loaded sections can genuinely need many thousands of iterations; a run that hits this cap while still trending is reported as not converged.">
           <span class="f-label">Max iterations</span>
           <span class="f-wrap"><input id="rans-iters" type="number" step="100" min="100" max="20000" value="10000" style="width:70px"><i></i></span></label>
+        <label class="field inline"
+               title="MPI ranks for this solve — an explicit opt-in; serial is the reproducibility reference and rerunning it reproduces recorded baselines exactly. A parallel run solves the identical case on a decomposed mesh: a FIXED rank count is just as reproducible, but different rank counts follow slightly different iteration paths, which only matters inside the knife-edge band around the attachment-verdict lines (see the docs).">
+          <span class="f-label">Solver cores</span>
+          <span class="f-wrap"><select id="rans-ranks" class="select-inline">
+            <option value="1" selected>Serial (reference)</option>
+            <option value="4">4 ranks (~2.9× on fine)</option>
+            <option value="8">8 ranks (recommended, ~4.2×)</option>
+            <option value="16">16 ranks (~5.4×)</option>
+          </select><i></i></span></label>
         <button id="btn-rans-run" class="btn small primary" disabled>Verify with RANS</button>
         <button id="btn-rans-stop" class="btn small" disabled
                 title="Stop the solve gracefully: the solver writes its current velocity and pressure fields first, so the flow view works on the partial run. The verdict says 'stopped by user' and no k_g is suggested from a hand-stopped tail. Cancel, by contrast, kills the run and keeps nothing.">
@@ -476,10 +523,10 @@
       <div id="rans-stale" class="stale-note" hidden>configuration changed
         since this verification — the verdict below describes the earlier
         design; re-verify</div>
-      <div id="rans-status" class="note">idle — runs the OpenFOAM truth case
-        (simpleFoam + k-ω SST, moving ground) in Docker and compares the
-        result against the panel estimate. Optional — the design workflow
-        never requires it.</div>
+      <div id="rans-status" class="note">idle — runs the 2D RANS truth case
+        (simpleFoam + k-ω SST, moving ground) with OpenFOAM in Docker and
+        compares the result against the panel estimate. Optional — the
+        design workflow never requires it.</div>
       <div id="rans-charts" class="chart-pair rans-charts empty" style="margin-top:8px">
         <div id="rans-conv" class="chart-host"></div>
         <div id="rans-result"><div class="empty-note">No verification run yet.
@@ -492,11 +539,292 @@
           <div class="seg" role="group" aria-label="Flow field quantity">
             <button id="rans-flow-umag" class="seg-btn active">Velocity</button>
             <button id="rans-flow-cp" class="seg-btn">Pressure (Cp)</button>
+            <button id="rans-flow-anim" class="seg-btn"
+                    title="Particles traced through the converged steady velocity field — the same gridded field the static view renders, and a path visualization of the solved flow rather than a time-accurate simulation of it. Playback is slowed (real air crosses this frame in a fraction of a second); the active rate is stated below.">
+              Animated</button>
           </div>
+          <label class="field inline" id="rans-anim-speed-wrap" hidden>
+            <span class="f-label">Playback</span>
+            <span class="f-wrap"><select id="rans-anim-speed" class="select-inline">
+              <option value="250">1/250× real time</option>
+              <option value="100">1/100× real time</option>
+              <option value="50">1/50× real time</option>
+              <option value="20" selected>1/20× real time</option>
+              <option value="8">1/8× real time</option>
+            </select><i></i></span></label>
+          <label class="field inline" id="rans-anim-trail-wrap" hidden
+                 title="Trail rendering: Comet is short fading wisps; Long streaks hold the path several seconds; Persistent builds streaklines that linger, with the tail fading out gently.">
+            <span class="f-label">Trail</span>
+            <span class="f-wrap"><select id="rans-anim-trail" class="select-inline">
+              <option value="comet" selected>Comet</option>
+              <option value="long">Long streaks</option>
+              <option value="persistent">Persistent streaklines</option>
+            </select><i></i></span></label>
+          <label class="field inline" id="rans-anim-density-wrap" hidden
+                 title="How many particles ride the field. More particles read as denser flow and fuller streaklines; each frame costs proportionally more.">
+            <span class="f-label">Particles</span>
+            <span class="f-wrap"><select id="rans-anim-density" class="select-inline">
+              <option value="800">Sparse (800)</option>
+              <option value="2200" selected>Normal (2,200)</option>
+              <option value="5000">Dense (5,000)</option>
+              <option value="12000">Very dense (12,000)</option>
+            </select><i></i></span></label>
+          <label class="field inline" id="rans-anim-bg-wrap" hidden
+                 title="What the particles are drawn over: the velocity-magnitude field (same coloring as the static view), the pressure field (Cp, the static Cp view's diverging scale), or plain chrome so the particles carry the whole picture.">
+            <span class="f-label">Background</span>
+            <span class="f-wrap"><select id="rans-anim-bg" class="select-inline">
+              <option value="field" selected>Velocity field</option>
+              <option value="cp">Pressure (Cp)</option>
+              <option value="plain">Plain</option>
+            </select><i></i></span></label>
+          <label class="field inline"
+                 title="Contour colors. Auto follows the app theme: the studio's magma on dark, the Fluent-style rainbow on light.">
+            <span class="f-label">Colors</span>
+            <span class="f-wrap"><select id="rans-flow-cmap" class="select-inline">
+              <option value="auto" selected>Auto (theme)</option>
+              <option value="magma">Magma</option>
+              <option value="viridis">Viridis</option>
+              <option value="turbo">Rainbow (Fluent)</option>
+            </select><i></i></span></label>
+          <label class="field inline"
+                 title="Clamp the color scale's maximum (m/s for velocity; ± this value for Cp). Blank = automatic from the solved field — the same range control the manual contour dialog offers.">
+            <span class="f-label">Scale max</span>
+            <span class="f-wrap"><input id="rans-flow-vmax" type="number" step="1" min="0" placeholder="auto" style="width:64px"><i></i></span></label>
+          <label class="check" id="rans-flow-streams-wrap"
+                 title="Overlay streamlines on the static views.">
+            <input id="rans-flow-streams" type="checkbox" checked> streamlines</label>
+          <label class="field inline"
+                 title="Section: the working window around the installed profile. Full domain: the entire solve box — 6 chords ahead, 12 behind, 16 above, sized to eliminate tunnel confinement; the solve always uses the full box either way.">
+            <span class="f-label">View</span>
+            <span class="f-wrap"><select id="rans-flow-extent" class="select-inline">
+              <option value="section" selected>Section</option>
+              <option value="domain">Full domain</option>
+            </select><i></i></span></label>
           <span id="rans-flow-note" class="note">same view as the drawing:
             as driven, ground at the bottom, flow left to right</span>
         </div>
-        <img id="rans-flow-img" alt="RANS section flow field">
+        <div id="rans-flow-viewport" class="flow-viewport">
+          <img id="rans-flow-img" alt="RANS section flow field">
+          <div id="rans-flow-canvas" class="flow-anim" hidden>
+            <canvas data-role="bg"></canvas>
+            <canvas data-role="pt"></canvas>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div id="tab-fluent2d" class="tab-page" role="tabpanel">
+      <div class="tab-controls">
+        <button id="btn-fl2d-run" class="btn small primary" disabled>Run Fluent 2D</button>
+        <button id="btn-fl2d-cancel" class="btn small ghost" disabled>Cancel</button>
+        <span id="fl2d-note" class="note">checking the ANSYS toolchain…</span>
+      </div>
+      <details class="adv fl2d-adv" id="fl2d-settings">
+        <summary>ANSYS settings</summary>
+        <fieldset class="var-set">
+          <legend>Mesh</legend>
+          <div class="fields two-col">
+            <label class="field full"
+                   title="Mesh sizing on the profile. Default: the documented manual ANSYS workflow's numbers exactly — 0.1 mm edge sizing on the profile, 1 mm first inflation layer, 10 layers. Studio y+ 1: the first cell height is computed so the wall cell sits at y+ ≈ 1 at this operating point, with finer edge sizing and more layers — resolves the boundary layer directly instead of relying on wall functions; slower to mesh and solve. The four fields below override this recipe one value at a time; leave one blank to keep the recipe's own number, shown greyed in the box.">
+              <span class="f-label">Sizing recipe</span>
+              <span class="f-wrap"><select id="fl2d-sizing" class="select-inline">
+                <option value="default" selected>Default (0.1 mm profile sizing)</option>
+                <option value="studio-yplus1">Studio y+ 1 (resolved wall)</option>
+              </select><i></i></span></label>
+            <label class="field"
+                   title="Element edge length along the profile — what sets how finely the surface curvature is captured. Blank = the sizing recipe's value.">
+              <span class="f-label">Edge size</span>
+              <span class="f-wrap"><input id="fl2d-edge-mm" type="number"
+                step="0.05" min="0.001"><i>mm</i></span></label>
+            <label class="field"
+                   title="Height of the first inflation layer at the wall. Blank = the sizing recipe's value. A first layer more than a few times the y+ ≈ 1 height leaves the viscous sublayer to wall functions.">
+              <span class="f-label">First layer</span>
+              <span class="f-wrap"><input id="fl2d-first-mm" type="number"
+                step="0.05" min="0.001"><i>mm</i></span></label>
+            <label class="field"
+                   title="Number of inflation layers grown off the profile. 0 disables inflation entirely. Blank = the sizing recipe's value.">
+              <span class="f-label">Max layers</span>
+              <span class="f-wrap"><input id="fl2d-layers" type="number"
+                step="1" min="0" max="100"><i></i></span></label>
+            <label class="field"
+                   title="Growth ratio between consecutive inflation layers. Blank = the sizing recipe's value.">
+              <span class="f-label">Growth rate</span>
+              <span class="f-wrap"><input id="fl2d-growth" type="number"
+                step="0.05" min="1.01" max="3"><i></i></span></label>
+          </div>
+        </fieldset>
+        <fieldset class="var-set">
+          <legend>Domain</legend>
+          <div class="fields two-col">
+            <label class="field"
+                   title="Inlet distance ahead of the section, in multiples of the section's streamwise extent. Blank = the documented default (3).">
+              <span class="f-label">Lengths ahead</span>
+              <span class="f-wrap"><input id="fl2d-front-l" type="number"
+                step="0.5" min="0.5" max="20"><i>L</i></span></label>
+            <label class="field"
+                   title="Outlet distance behind the section, in multiples of the section's streamwise extent — the wake needs room to leave the box. Blank = the documented default (7).">
+              <span class="f-label">Lengths behind</span>
+              <span class="f-wrap"><input id="fl2d-back-l" type="number"
+                step="0.5" min="0.5" max="40"><i>L</i></span></label>
+            <label class="field full"
+                   title="Ceiling height above the road, in multiples of the stack height (profile top above the ground, ride height included). Too low confines the flow and inflates the load. Blank = the documented default (3).">
+              <span class="f-label">Stack heights above</span>
+              <span class="f-wrap"><input id="fl2d-top-h" type="number"
+                step="0.5" min="0.5" max="20"><i>H</i></span></label>
+          </div>
+        </fieldset>
+        <fieldset class="var-set">
+          <legend>Solve</legend>
+          <div class="fields two-col">
+            <label class="field"
+                   title="Under Default conventions the solver runs exactly this many iterations (the manual walkthrough runs 500) unless Fluent's own residual criteria end it sooner. Under Studio conventions this is an upper bound — the run stops on its own once the force history flattens.">
+              <span class="f-label">Iterations</span>
+              <span class="f-wrap"><input id="fl2d-iters" type="number" step="50"
+                min="50" max="20000" value="500"><i></i></span></label>
+            <label class="field"
+                   title="Parallel solver processes. Serial (1) is the reproducible baseline; more cores shorten the solve but each rank needs its own license-permitted slot.">
+              <span class="f-label">Solver cores</span>
+              <span class="f-wrap"><input id="fl2d-ranks" type="number" step="1"
+                min="1" max="32" value="1"><i></i></span></label>
+            <label class="field full"
+                   title="Default reproduces the documented manual ANSYS workflow for a like-for-like comparison: Fluent's default turbulence settings, its residual criteria allowed to end the run, and coefficients reported against Fluent's reference area of 1 m² (the raw lift_coef/drag_coef numbers the GUI shows). Studio conventions run the same case the way this app's verification does: k-ω SST with pinned inlet turbulence, the residual auto-stop disabled so the force-history drift verdict decides convergence, and results displayed chord-referenced and downforce-positive. Pick Default to match a manual run; pick Studio when the number feeds calibration or a design decision.">
+              <span class="f-label">Conventions</span>
+              <span class="f-wrap"><select id="fl2d-conventions" class="select-inline">
+                <option value="default" selected>Default</option>
+                <option value="studio">Studio conventions</option>
+              </select><i></i></span></label>
+          </div>
+        </fieldset>
+        <fieldset class="var-set">
+          <legend>Limits</legend>
+          <div class="fields two-col">
+            <label class="field"
+                   title="Wall-clock budget for the geometry stage. Exceeding it stops that stage rather than leaving a licensed process running. Blank = the documented default (300 s).">
+              <span class="f-label">SpaceClaim budget</span>
+              <span class="f-wrap"><input id="fl2d-sc-budget" type="number"
+                step="30" min="30" max="7200"><i>s</i></span></label>
+            <label class="field"
+                   title="Wall-clock budget for the meshing stage. Raise it for large domains or fine sizing. Blank = the documented default (900 s).">
+              <span class="f-label">Workbench budget</span>
+              <span class="f-wrap"><input id="fl2d-wb-budget" type="number"
+                step="60" min="60" max="43200"><i>s</i></span></label>
+          </div>
+        </fieldset>
+        <div class="fields two-col">
+          <label class="field"
+                 title="Named ANSYS settings saved on this machine. A preset stores every field in this panel, overrides included; selecting one fills them all. The settings a run used always travel with that run's result.">
+            <span class="f-label">Preset</span>
+            <span class="f-wrap"><select id="fl2d-preset" class="select-inline">
+              <option value="">— none —</option>
+            </select><i></i></span></label>
+          <label class="field" title="Name for saving the current settings as a preset, e.g. Parity run.">
+            <span class="f-label">Save as</span>
+            <span class="f-wrap"><input id="fl2d-preset-name" type="text"
+              maxlength="60" placeholder="Parity run"><i></i></span></label>
+        </div>
+        <div class="action-row">
+          <button id="fl2d-preset-save" class="btn tiny">Save preset</button>
+          <button id="fl2d-preset-del" class="btn tiny ghost">Delete preset</button>
+        </div>
+        <p class="group-note">A blank override takes the greyed value shown in
+        its box — the sizing recipe's own number for the mesh fields, the
+        documented default for the domain and the budgets. Overriding a value
+        never changes which recipe the run reports; the result states the
+        numbers actually used.</p>
+      </details>
+      <div class="progress" aria-hidden="true"><div id="fl2d-progress"></div></div>
+      <div id="fl2d-stale" class="stale-note" hidden>configuration changed
+        since this run — the numbers below describe the earlier design;
+        re-run</div>
+      <div id="fl2d-status" class="note">idle — replicates the documented
+        manual 2D Fluent workflow end to end: profile and domain drawn to DXF,
+        meshed by ANSYS Workbench and Mechanical (edge sizing and inflation
+        on the profile), then solved true-2D in Fluent double precision.
+        Needs a local ANSYS installation with Workbench and a licensed
+        Fluent; meshing alone takes several minutes.</div>
+      <div id="fl2d-charts" class="chart-pair rans-charts empty" style="margin-top:8px">
+        <div id="fl2d-conv" class="chart-host"></div>
+        <div id="fl2d-result"><div class="empty-note">No run yet. Set up a
+          section, then Run Fluent 2D — meshing in ANSYS Workbench takes
+          several minutes before the solve starts.</div></div>
+      </div>
+      <div id="fl2d-flow" style="margin-top:10px" hidden>
+        <div class="tab-controls">
+          <span class="f-label">Flow field</span>
+          <div class="seg" role="group" aria-label="Flow field quantity">
+            <button id="fl2d-flow-umag" class="seg-btn active">Velocity</button>
+            <button id="fl2d-flow-cp" class="seg-btn">Pressure (Cp)</button>
+            <button id="fl2d-flow-anim" class="seg-btn"
+                    title="Particles traced through the converged steady velocity field — a path visualization of the solved flow, not a time-accurate simulation of it. Playback is slowed (real air crosses this frame in a fraction of a second); the active rate is stated below.">
+              Animated</button>
+          </div>
+          <label class="field inline" id="fl2d-anim-speed-wrap" hidden>
+            <span class="f-label">Playback</span>
+            <span class="f-wrap"><select id="fl2d-anim-speed" class="select-inline">
+              <option value="250">1/250× real time</option>
+              <option value="100">1/100× real time</option>
+              <option value="50">1/50× real time</option>
+              <option value="20" selected>1/20× real time</option>
+              <option value="8">1/8× real time</option>
+            </select><i></i></span></label>
+          <label class="field inline" id="fl2d-anim-trail-wrap" hidden
+                 title="Trail rendering: Comet is short fading wisps; Long streaks hold the path several seconds; Persistent builds streaklines that linger, with the tail fading out gently.">
+            <span class="f-label">Trail</span>
+            <span class="f-wrap"><select id="fl2d-anim-trail" class="select-inline">
+              <option value="comet" selected>Comet</option>
+              <option value="long">Long streaks</option>
+              <option value="persistent">Persistent streaklines</option>
+            </select><i></i></span></label>
+          <label class="field inline" id="fl2d-anim-density-wrap" hidden
+                 title="How many particles ride the field. More particles read as denser flow and fuller streaklines; each frame costs proportionally more.">
+            <span class="f-label">Particles</span>
+            <span class="f-wrap"><select id="fl2d-anim-density" class="select-inline">
+              <option value="800">Sparse (800)</option>
+              <option value="2200" selected>Normal (2,200)</option>
+              <option value="5000">Dense (5,000)</option>
+              <option value="12000">Very dense (12,000)</option>
+            </select><i></i></span></label>
+          <label class="field inline" id="fl2d-anim-bg-wrap" hidden
+                 title="What the particles are drawn over: the velocity-magnitude field (same coloring as the static view), the pressure field (Cp, the static Cp view's diverging scale), or plain chrome so the particles carry the whole picture.">
+            <span class="f-label">Background</span>
+            <span class="f-wrap"><select id="fl2d-anim-bg" class="select-inline">
+              <option value="field" selected>Velocity field</option>
+              <option value="cp">Pressure (Cp)</option>
+              <option value="plain">Plain</option>
+            </select><i></i></span></label>
+          <label class="field inline"
+                 title="Contour colors. Auto follows the app theme: the studio's magma on dark, the Fluent-style rainbow on light.">
+            <span class="f-label">Colors</span>
+            <span class="f-wrap"><select id="fl2d-flow-cmap" class="select-inline">
+              <option value="auto" selected>Auto (theme)</option>
+              <option value="magma">Magma</option>
+              <option value="viridis">Viridis</option>
+              <option value="turbo">Rainbow (Fluent)</option>
+            </select><i></i></span></label>
+          <label class="field inline"
+                 title="Clamp the color scale's maximum (m/s for velocity; ± this value for Cp). Blank = automatic from the solved field — the same range control Fluent's own contour dialog offers.">
+            <span class="f-label">Scale max</span>
+            <span class="f-wrap"><input id="fl2d-flow-vmax" type="number" step="1" min="0" placeholder="auto" style="width:64px"><i></i></span></label>
+          <label class="check" id="fl2d-flow-streams-wrap"
+                 title="Overlay streamlines on the static views.">
+            <input id="fl2d-flow-streams" type="checkbox" checked> streamlines</label>
+          <label class="field inline"
+                 title="Section: the working window around the installed profile. Full domain: the whole box this run actually meshed — the documented manual ANSYS workflow's rectangle unless the ANSYS settings panel moved it; the solve always uses the full box either way.">
+            <span class="f-label">View</span>
+            <span class="f-wrap"><select id="fl2d-flow-extent" class="select-inline">
+              <option value="section" selected>Section</option>
+              <option value="domain">Full domain</option>
+            </select><i></i></span></label>
+          <span id="fl2d-flow-note" class="note">same view as the drawing:
+            as driven, ground at the bottom, flow left to right</span>
+        </div>
+        <div id="fl2d-flow-viewport" class="flow-viewport">
+          <img id="fl2d-flow-img" alt="Fluent 2D section flow field">
+          <div id="fl2d-flow-canvas" class="flow-anim" hidden>
+            <canvas data-role="bg"></canvas>
+            <canvas data-role="pt"></canvas>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -569,6 +897,29 @@
             </select><i></i></span></label>
           <button id="btn-export-cfd" class="btn primary">Generate case</button>
         </div>
+        <div class="export-card">
+          <h3>ANSYS 2D mesh bundle</h3>
+          <p>The documented manual 2D Fluent workflow, meshed entirely by
+             ANSYS tools:
+             the profile-and-domain DXF plus the true-2D mesh cut by
+             <b>Workbench and Mechanical</b> (FFF.msh — inlet, outlet,
+             ground, upper bound and profile named selections arrive
+             ready), with a README covering the solver setup step by step.
+             Needs a local ANSYS installation with Workbench; meshing
+             takes several minutes. A finished <b>Fluent 2D</b> run can
+             export its <i>solved</i> case from that tab.</p>
+          <label class="field inline"
+                 title="Default: the manual walkthrough's sizing exactly (0.1 mm profile edges, 1 mm first inflation layer, 10 layers). Studio y+ 1: first cell at y+ ≈ 1 for this operating point, resolving the boundary layer.">
+            <span class="f-label">Sizing</span>
+            <span class="f-wrap"><select id="exp-fl2d-sizing" class="select-inline">
+              <option value="default" selected>Default (0.1 mm profile sizing)</option>
+              <option value="studio-yplus1">Studio y+ 1 (resolved wall)</option>
+            </select><i></i></span></label>
+          <p class="group-note">Any overrides set in the <b>ANSYS settings</b>
+          panel on the Fluent 2D tab ride on top of the sizing picked here, so
+          this bundle is the mesh that tab would build.</p>
+          <button id="btn-export-fluent2d" class="btn primary">Mesh &amp; export</button>
+        </div>
       </div>
     </div>
   </section>
@@ -589,9 +940,9 @@
     and <code>G_real</code> is the realized share of the inviscid
     ground-effect gain: the gain is saturated at a cap (3× the free-air
     load) and choked near the road by <code>tanh((h/c)/0.045)</code>, so the
-    estimate stays bounded toward the ground. RANS cross-referencing
-    (2026-07, <code>docs/calibration</code>) validated the estimate on the
-    baseline section at h/c 0.086 and 0.429, measured it <b>optimistic below
+    estimate stays bounded toward the ground. The 2026-07 RANS
+    cross-referencing campaign validated the estimate on the baseline
+    section at h/c 0.086 and 0.429, measured it <b>optimistic below
     the choke onset</b> (−19% at h/c 0.071; a standing warning fires below
     h/c 0.08) and <b>conservative through the mid-height gain peak</b> (up
     to +67% at h/c 0.171 — the truth model's load peaks nearer h/c ≈ 0.17
@@ -631,9 +982,9 @@
     reduction — wings near the road shed much weaker tip vortices.
     Interference and support drag are not modeled.</p>
     <p class="note">This tool screens and optimizes starting geometry. Confirm
-    the shortlist with RANS — the <b>RANS verify</b> tab runs the OpenFOAM
-    truth case in Docker and suggests the calibrated k<sub>g</sub> — or with
-    tunnel data.</p>
+    the shortlist with RANS — the <b>RANS verify</b> tab runs the truth case
+    with OpenFOAM in Docker or ANSYS Fluent locally and suggests the
+    calibrated k<sub>g</sub> from a converged run — or with tunnel data.</p>
   </div>
   <form method="dialog"><button class="btn">Close</button></form>
 </dialog>
@@ -661,7 +1012,7 @@
   <div class="dialog-body">
     <p>The optimizer will tune sharp trailing edges you won't build. When the
     profiles are later prepared for the workshop, the flow — and the numbers
-    the search worked so hard for — will change.</p>
+    the search converged on — will change.</p>
     <p class="note">Enable &amp; optimize turns on TE prep with the defaults
     (thicken, 1.2&nbsp;mm) so the search runs on the as-built shapes. You can
     adjust the treatment under <b>Manufacturing</b> in the left panel.</p>
@@ -707,7 +1058,7 @@
   </div>
 </template>
 
-<script type="module" src="/static/js/shell.js?v=21"></script>
-<script type="module" src="/static/js/app.js?v=21"></script>
+<script type="module" src="/static/js/shell.js?v=26"></script>
+<script type="module" src="/static/js/app.js?v=28"></script>
 </body>
 </html>

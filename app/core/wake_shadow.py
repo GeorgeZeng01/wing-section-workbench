@@ -58,6 +58,19 @@ import numpy as np
 SHADOW_SEP = 0.50    # predicted top-side collapse below this (mid-gap of
                      # the measured classes, and half the freestream)
 SHADOW_WARN = 0.53   # penalty onset / caution band top
+# Knife-edge skirt around the SEP/WARN cutoffs. The cutoffs were calibrated
+# against RANS wall-shear labels, and near separation onset those labels
+# themselves move with the solver's iteration path: the 2026-07-25 cross-
+# rank study measured the separating element's reversed fraction spreading
+# 0.042 across 1..16 ranks (cfd_run.SEP_KNIFE_BAND is the wall-side band).
+# Mapped through the validation record's class geometry (attached-class
+# floor 0.533 at frac ~0.12 vs separated-class ceiling 0.459 at frac
+# ~0.22: ~0.74 shadow-units per frac-unit), that spread is ~0.03 in
+# shadow_min units. A shadow_min this close to the lines marks a
+# knife-edge candidate whichever side it computed on. The flag is
+# information for the designer; it does not change the status or any
+# penalty.
+SHADOW_KNIFE_BAND = 0.03
 ARC_LO = 0.15        # evaluated arc window on the upper side: past the
 ARC_HI = 0.92        # nose spill, ahead of the TE recompression
 
@@ -145,14 +158,16 @@ def stack_shadow(free_sol, ground_sol, r_gain: float) -> list[dict]:
     for k in range(n_elem):
         if k == 0:
             out.append({"shadow_min": None, "arc_at_min": None,
-                        "x_min": None, "y_min": None, "status": None})
+                        "x_min": None, "y_min": None, "status": None,
+                        "knife_edge": None})
             continue
         sel = free_sol.element_index == k
         sides = element_sides(free_sol.midpoints[sel], vt_eff[sel],
                               free_sol.panel_lengths[sel])
         if sides is None:
             out.append({"shadow_min": None, "arc_at_min": None,
-                        "x_min": None, "y_min": None, "status": None})
+                        "x_min": None, "y_min": None, "status": None,
+                        "knife_edge": None})
             continue
         up = sides["upper"]
         s, ue = up["s"], up["ue"]
@@ -160,7 +175,8 @@ def stack_shadow(free_sol, ground_sol, r_gain: float) -> list[dict]:
         m = (s >= ARC_LO * st) & (s <= ARC_HI * st)
         if not m.any():
             out.append({"shadow_min": None, "arc_at_min": None,
-                        "x_min": None, "y_min": None, "status": None})
+                        "x_min": None, "y_min": None, "status": None,
+                        "knife_edge": None})
             continue
         i_rel = int(np.argmin(ue[m]))
         i_abs = int(np.nonzero(m)[0][i_rel])
@@ -177,5 +193,7 @@ def stack_shadow(free_sol, ground_sol, r_gain: float) -> list[dict]:
             "x_min": round(float(mid_sel[i_panel, 0]), 5),
             "y_min": round(float(mid_sel[i_panel, 1]), 5),
             "status": status,
+            "knife_edge": bool(SHADOW_SEP - SHADOW_KNIFE_BAND <= v
+                               < SHADOW_WARN + SHADOW_KNIFE_BAND),
         })
     return out

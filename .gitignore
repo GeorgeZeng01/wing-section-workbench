@@ -22,9 +22,24 @@ xfoil/*.exe
 
 # local tooling config (kept on disk, not shared)
 .claude/
+.mcp.json
+
+# Fluent runtime droppings — pyfluent's watchdog writes these into the
+# CWD of the process that launched Fluent (the repo root when the app
+# server runs the in-app engine)
+watchdog_*_init
+pyfluent_watchdog_out_*.log
+pyfluent_watchdog_err_*.log
+pyfluent_watchdog.err
+# Fluent/Workbench session transcripts record absolute session paths and
+# license details — never publish one
+*.trn
+cleanup-fluent-*
+core.*
 
 # local editor / OS noise
 .vscode/
 Thumbs.db
 desktop.ini
 *.lnk
+

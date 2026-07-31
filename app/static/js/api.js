@@ -7,6 +7,25 @@ export class ApiError extends Error {
   }
 }
 
+/* A range violation arrives as the validator's LIST of error objects, one
+   per offending field — it has to read as a sentence naming the field, not
+   as a serialized array, because it is shown verbatim in a toast. */
+function detailOf(j, fallback) {
+  const d = j?.detail;
+  if (typeof d === "string") return d;
+  if (Array.isArray(d)) {
+    const lines = d
+      .map((e) => {
+        if (!e || !e.msg) return null;
+        const loc = Array.isArray(e.loc) ? e.loc[e.loc.length - 1] : null;
+        return loc != null ? `${loc}: ${e.msg}` : String(e.msg);
+      })
+      .filter(Boolean);
+    if (lines.length) return lines.join("; ");
+  }
+  return d == null ? fallback : JSON.stringify(d);
+}
+
 async function request(method, path, body) {
   const opts = { method, headers: {} };
   if (body !== undefined) {
@@ -17,8 +36,7 @@ async function request(method, path, body) {
   if (!res.ok) {
     let detail = res.statusText;
     try {
-      const j = await res.json();
-      detail = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+      detail = detailOf(await res.json(), res.statusText);
     } catch { /* keep statusText */ }
     throw new ApiError(detail, res.status);
   }
@@ -45,24 +63,46 @@ export const api = {
   presets: () => request("GET", "/api/presets"),
   rulePresets: () => request("GET", "/api/rule-presets"),
   rulePresetsSave: (presets) => request("PUT", "/api/rule-presets", { presets }),
+  ansysPresets: () => request("GET", "/api/ansys-presets"),
+  ansysPresetsSave: (presets) =>
+    request("PUT", "/api/ansys-presets", { presets }),
   session: () => request("GET", "/api/session"),
   sessionSave: (state) => request("POST", "/api/session", { state }),
   exportSave: (fmt, config, options = {}) =>
     request("POST", `/api/export/${fmt}/save`, { config, ...options }),
   exportCfd: (config, meshSize) =>
     request("POST", "/api/export/cfd/save", { config, mesh_size: meshSize }),
+  exportFluentMesh: (config, meshSize) =>
+    request("POST", "/api/export/fluent-mesh/save",
+            { config, mesh_size: meshSize }),
+  // overrides: the same nine ANSYS 2D knobs the run endpoint takes, so a
+  // bundle meshed for a hand check is the mesh the tab would build
+  exportFluent2dMesh: (config, sizing, overrides = {}) =>
+    request("POST", "/api/export/fluent2d-mesh/save",
+            { config, sizing, ...overrides }),
   exportReveal: (path) => request("POST", "/api/export/reveal", { path }),
   ransAvailability: () => request("GET", "/api/rans/availability"),
+  fluent2dAvailability: () => request("GET", "/api/fluent2d/availability"),
   ransCurrent: () => request("GET", "/api/rans/current"),
-  ransStart: (config, meshSize, maxIters) =>
+  // settings: the ANSYS 2D overrides (edge/first-layer/layers/growth,
+  // domain extents, stage budgets). Only the fluent2d engine accepts
+  // them; an absent key means "take the sizing recipe's value"
+  ransStart: (config, meshSize, maxIters, nRanks = 1,
+              engine = "openfoam", mesher = "fluent",
+              conventions = "default", settings = {}) =>
     request("POST", "/api/rans/start",
-            { config, mesh_size: meshSize, max_iters: maxIters }),
+            { config, mesh_size: meshSize, max_iters: maxIters,
+              n_ranks: nRanks, engine, mesher, conventions, ...settings }),
   ransStatus: (id) => request("GET", `/api/rans/${id}`),
   ransCancel: (id) => request("POST", `/api/rans/${id}/cancel`),
   ransStop: (id) => request("POST", `/api/rans/${id}/stop`),
-  ransQueueStart: (items, meshSize, maxIters = 10000) =>
+  ransExportFluent: (id) =>
+    request("POST", `/api/rans/${id}/export/fluent`),
+  ransQueueStart: (items, meshSize, maxIters = 10000, nRanks = 1,
+                   maxConcurrent = 1) =>
     request("POST", "/api/rans-queue/start",
-            { items, mesh_size: meshSize, max_iters: maxIters }),
+            { items, mesh_size: meshSize, max_iters: maxIters,
+              n_ranks: nRanks, max_concurrent: maxConcurrent }),
   ransQueueCurrent: () => request("GET", "/api/rans-queue/current"),
   ransQueueCancel: () => request("POST", "/api/rans-queue/cancel"),
 };
@@ -76,8 +116,7 @@ export async function downloadExport(fmt, config, options = {}) {
   if (!res.ok) {
     let detail = res.statusText;
     try {
-      const j = await res.json();
-      detail = typeof j.detail === "string" ? j.detail : JSON.stringify(j.detail);
+      detail = detailOf(await res.json(), res.statusText);
     } catch { /* keep statusText */ }
     throw new ApiError(detail, res.status);
   }

@@ -36,8 +36,9 @@ application window, then to the default browser.
 
 ## What it does
 
-- **Stack configuration** — 1 to 4 elements. Any of the 2,174 bundled UIUC
-  sections, 4-digit NACA codes, or uploaded Selig `.dat` files. Per-flap
+- **Stack configuration** — 1 to 4 elements. Any of the 2,174 UIUC sections
+  AeroSandbox ships (read at runtime from the installed package), 4-digit
+  NACA codes, or uploaded Selig `.dat` files. Per-flap
   chord ratio, deflection, and slot geometry set directly as **gap** and
   **overlap** (percent of chord — the classical high-lift parameters);
   placement is solved so the achieved values equal the requested ones.
@@ -76,6 +77,36 @@ application window, then to the default browser.
   **waist** (thinnest aft station) in mm — all measured on the exact
   contours the solver and exports use; the analysis, polars, optimizer and
   all exports use the treated shapes, so what you cut is what was analyzed.
+- **Rules** (optional) — a geometric rule envelope checked on the installed
+  wing: caps on installed length and height above the road, a ground-clearance
+  floor, and two per-element edge limits — a **leading-edge radius** floor and
+  a **trailing-edge thickness** floor, both measured on the as-built contour.
+  Nothing is hardcoded to a rulebook; every limit is entered by the user and
+  can be saved as a named preset (the preset library is machine-level, the
+  active envelope travels inside the project). Two built-in read-only presets
+  offer FSAE 2027 outboard/tip and centre-station numbers, each carrying a
+  note on where its figures come from — and the reminder that the source is a
+  **public-comment draft** (version 0.0, 21 July 2026) which states on its
+  face that it is not valid for competition. The LE radius is measured by
+  fitting the nose parabola (against the analytic 4-digit NACA radius the fit
+  under-reads by about 6 %, a bias taken deliberately in exchange for
+  panel-count stability — and the safe direction, since it flags compliant
+  noses rather than passing sharp ones; a measurement within 10 % of the floor
+  is labelled knife-edge); a nose too coarse or too folded to fit reads
+  **unknown**, never a pass. The radius applies to the frontmost element by
+  default — computed from the geometry, not assumed to be the main — or to
+  every element, because whether a shielded flap nose counts is an open
+  reading of the rule. A required radius above 5 % of an element's chord adds
+  an advisory that the rule is costing suction peak. Height caps can be
+  measured at a separate **rule ride height** (the rules measure aero limits
+  unladen, at the car's highest static height, while ground clearance is worst
+  case laden), and the clearance floor stays on the configured height. The
+  drawing shows the box as a dashed rectangle with violated edges in amber and
+  the overshoot in mm; edge verdicts show as badges on each element's card; the
+  optimizer treats all of it as hard legality — it refuses to start from a
+  violating design and never returns one. This is a 2D section tool: endplate
+  and vertical edge radii, plan-view keep-outs, span limits and mount rules
+  are real rules nothing here can decide, and the panel says so.
 - **Optimization** — differential evolution plus Nelder–Mead refinement over
   stack angle, flap deflections, slot gap/overlap, optionally flap chords,
   optionally **each element's airfoil**, chosen from the library's
@@ -122,7 +153,14 @@ application window, then to the default browser.
   that additionally carries per-element XYZ point files, Selig `.dat`
   contours (installed positions and unit-chord profiles), and a JSON
   manifest. Plus a ready-to-run **OpenFOAM 2D RANS case** — mesh, boundary
-  conditions, solver settings and a run script (see RANS handoff below).
+  conditions, solver settings and a run script (see RANS handoff below) —
+  and an **ANSYS 2D mesh bundle**: the section-plus-domain DXF and the
+  true-2D mesh cut by the ANSYS Workbench/Mechanical chain at export
+  time (`FFF.msh`, all six zones named), with a README carrying the
+  meshing and solve recipe, under `exports/fluent2d_mesh_<stamp>/`
+  (needs a licensed local ANSYS installation; the meshing chain takes a
+  few minutes). Two sizings: the manual walkthrough's 0.1 mm/1 mm
+  defaults or the studio's resolved y+ ≈ 1 wall.
   Both the installed frame (ground at y = 0) and the upright design frame.
   Every export is written to the project's `exports/` folder with a
   timestamped name, and a dialog shows exactly where it went with a
@@ -134,10 +172,12 @@ application window, then to the default browser.
 
 ## RANS handoff
 
-The estimates above screen and rank; OpenFOAM decides. **Export → OpenFOAM
-case** turns the current stack into a complete 2D RANS case under
-`exports/cfd_case_<stamp>/` (this implements the repository roadmap's mesh
-and case-template items):
+The estimates above screen and rank; RANS is the truth check — the
+in-app OpenFOAM engine for fast screening, ANSYS Fluent for absolute
+levels (the 2026-07 reference flip; see `DECISIONS.md`). **Export →
+OpenFOAM case** turns the current stack into a complete 2D RANS case
+under `exports/cfd_case_<stamp>/` (this implements the repository
+roadmap's mesh and case-template items):
 
 - gmsh mesh of the installed section in meters — unstructured triangles
   graded from the wing outward, quad boundary layers on the airfoil walls
@@ -175,7 +215,11 @@ the fully-turbulent turbulence treatment.
 
 ### In-app verification (Docker)
 
-The **RANS verify** tab runs the same case without leaving the app: it
+The **RANS verify** tab runs the same case without leaving the app on
+the in-app OpenFOAM engine — the fast screening engine described below.
+(ANSYS Fluent solves live in the neighboring **Fluent 2D** tab; per the
+2026-07 reference flip, Fluent owns absolute coefficient levels.) The
+OpenFOAM engine
 builds the identical mesh and case, runs it in a local Docker container
 (official ESI image, `opencfd/openfoam-run` — the same `run.sh`, so WSL and
 Docker results are interchangeable), shows live solver convergence, and
@@ -194,6 +238,104 @@ Working cases land under `app_data/rans/` (the newest few are kept) with
 full logs and a ParaView-openable `case.foam`. The 2D case's drag is
 profile-only, so it is compared against the stack's profile CD, not the
 induced-drag-bearing total.
+
+**Parallel solves are an explicit option, never the default.** The
+RANS verify tab's *Solver cores* select runs the single verify solve
+on N MPI ranks (`decomposePar`/`mpirun`/`reconstructPar` inside the
+same container; the measured knee and speedups live in `DECISIONS.md`),
+and the shortlist
+queue's parallel option solves several candidates at once within a core
+budget of half the machine's logical CPUs (`WSS_CORE_BUDGET` overrides).
+Serial remains the reference: it reproduces recorded baselines exactly,
+and a serial case carries no parallel artifacts — the same solver chain
+the app has always run. A fixed rank count is just as reproducible — but different
+rank counts follow slightly different iteration paths, so verdicts
+landing within the knife-edge band of the attachment lines (or a
+`shadow_min` inside the wake-shadow skirt) are labeled knife-edge:
+whichever side such a candidate computed on is rank-count luck, and the
+label — not a silent flip — is the designed behavior.
+
+### Fluent 2D (ANSYS)
+
+The **Fluent 2D** tab is the documented manual ANSYS workflow, run
+automatically: with a licensed
+local ANSYS installation it writes the section-plus-domain DXF, runs
+the SpaceClaim/Workbench/Mechanical chain to a true-2D mesh (named
+zones, profile edge sizing, first-layer inflation), and solves in 2D
+double-precision Fluent with the walkthrough's boundary conditions and
+report definitions. **Sizing** offers `default` (the walkthrough's
+0.1 mm profile edges, 1 mm first layer, 10 layers) or the studio's
+resolved y+ ≈ 1 wall;
+**Conventions** offers `default` (Fluent's own turbulence and
+residual settings, raw coefficients on the 2D reference area of 1 m²)
+or `studio` (SST k-ω with the OpenFOAM-matched inlet
+turbulence, the force-drift stopping doctrine, downforce-positive
+display) — the tooltip states the difference plainly. The result card
+headlines the chord-referenced downforce-positive coefficient with
+Fluent's own raw values alongside and the reference noted, flags
+runs Fluent's residual criteria stopped early, offers the same
+one-click `k_g` apply as the OpenFOAM tab, and feeds the same live
+convergence chart and the same flow views, animation included. This tab's own *Solver cores*
+field (any count from 1 to 32) sets Fluent's parallel processor count and is unrelated to the
+OpenFOAM engine's MPI/queue machinery above. A solver session holds an
+ANSYS license only while the run is live; cancel releases it. The
+previous 3D slab Fluent engine is no longer in the UI but remains
+API-reachable (`engine="fluent"`) as the documented revert path.
+
+**ANSYS settings.** Everything the chain runs on is reachable from one
+panel on this tab: the base mesh recipe (`default` or `studio-yplus1`)
+plus an individual override for each of its four numbers — profile edge
+size, first layer thickness, layer count and growth ratio — the domain
+proportions (section lengths ahead and behind, where L is the installed
+stack's streamwise extent rather than the reference chord, and stack
+heights above the ground plane), the iteration count, the solver core count, the
+conventions, and the per-stage budgets that decide how long the
+SpaceClaim and Workbench batch runs may take before they are killed.
+**An override left blank is not zero — it means "use the recipe"**, so
+the panel can be opened and closed without changing a run, and a recipe
+never changes its name because a knob under it moved: a `default` run
+with a hand-set edge size still reports sizing `default`, and the
+result card lists the mesh, domain and budget numbers the run actually
+resolved — marking the ones that were set by hand — beside whatever the
+panel happens to hold now, because the panel unlocks the moment a run
+ends. The mesh actually cut off the wall is reported too when it
+differs from the request: the inflation stack is capped to the slot and
+ground clearances it faces, and dropped entirely if Mechanical still
+fails. The overrides also ride on **Export → ANSYS 2D mesh bundle**, so
+a bundle meshed for a hand check is the mesh this tab would build.
+Named settings presets can be saved; like the rule-envelope presets,
+the preset library belongs to the machine (the licensed ANSYS
+installation lives there), while the values a run used travel with the
+run.
+
+**Flow views.** Both tabs run the same flow panel from one factory —
+one instance each, differing only in which job they follow and how
+their captions read — so a feature added to one is present on the
+other by construction: static velocity and Cp renders plus a particle
+**animation** advected through the solved field. On the Fluent 2D tab
+that animation traces a **converged steady** solution, which the
+caption states plainly: it is a path picture of the solved field, not
+a time-accurate simulation of the flow developing. The panel carries
+the contour-dialog controls a GUI would offer —
+theme-aware colors (light mode defaults to the Fluent-style rainbow,
+dark to the studio's magma; both selectable, with Viridis), a scale-max
+clamp (± symmetric on Cp), a streamlines toggle, a **View** extent
+(Section, or the whole solve box — the studio's 6 chords ahead, 12
+behind and 16 above on the OpenFOAM tab, the rectangle the run actually
+meshed on the Fluent 2D tab, which is the walkthrough's 3/7/3 box unless
+the ANSYS settings panel moved it), playback
+slowdowns to 1/250× real time, **trail styles** from short comets to
+persistent streaklines (the persistent tail fades out gently rather
+than accumulating at full ink), a **particle count** from sparse to
+very dense, and a **background** select — the velocity field, the Cp
+field on its diverging scale, or plain chrome. Ctrl+wheel zooms about the
+cursor (plain wheel scrolls the page), drag pans, double-click resets —
+and zooming is **level-of-detail**: past a coarseness threshold the
+animated view refetches just the visible window re-gridded at full
+resolution, so a full-domain view zooms into slot-gap detail without
+turning to mush. Saving a project stores the rendered static views, not
+the gridded velocity field the animation rides — a restored project
+shows the images it saved and asks for a re-run before it will animate.
 
 ## Prediction model
 
@@ -256,7 +398,9 @@ modeled.
 
 All raw inviscid values are reported next to every estimate. Treat the
 estimate as a screening and ranking number: confirm shortlisted designs with
-RANS (the repository's OpenFOAM pipeline) or tunnel data, and recalibrate
+RANS (the in-app OpenFOAM pipeline for fast screening; the Fluent
+workflow in `scripts/` is the reference of record for absolute levels)
+or tunnel data, and recalibrate
 the knobs against those results.
 
 The `k_g` curve was calibrated on the **two-element** baseline and is blind

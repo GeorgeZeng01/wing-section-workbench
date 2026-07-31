@@ -17,9 +17,16 @@ moved to foamRun/momentumTransport and cannot run these cases. Override
 with the WSS_OPENFOAM_IMAGE environment variable if a different ESI-layout
 image is preferred.
 
-One job at a time: simpleFoam is CPU-bound on every core it gets; queueing
-a second solve beside it helps nobody. start() raises RuntimeError while a
-job is active — the API turns that into a 409.
+One INTERACTIVE job at a time: the verify tab drives a single attended
+run, and start() keeps that UX by refusing a second concurrent start (the
+API turns that into a 409). The old justification here — "simpleFoam is
+CPU-bound on every core it gets" — was wrong: OpenFOAM's FV solvers have
+no threading, a solve occupies exactly one core per MPI rank. Within-solve
+parallelism is the opt-in n_ranks knob (decomposePar/mpirun in the
+generated run.sh); the shortlist queue can additionally run several solves
+at once through start_pooled() under core_budget(). Serial single-run
+remains the default everywhere, and the serial case is byte-identical to
+what this module always produced.
 
 Comparison semantics: the case's forceCoeffs is referenced to the main
 chord with liftDir (0 -1 0), so its Cl is the downforce-positive sectional
@@ -58,6 +65,43 @@ MAX_WALL_S = 4 * 3600         # hard stop — a fine mesh at full iterations
 # routine housekeeping (registered protectors guard live references; the
 # count guards recent history)
 KEEP_RUN_DIRS = 6
+
+# ---- opt-in parallelism ----
+# Ranks within a solve (cfd.build_case n_ranks -> decomposePar/mpirun in
+# run.sh) and, for the queue only, several solves at once. Serial is the
+# default on every path; parallel is chosen per run.
+MAX_RANKS = 32
+
+
+def core_budget() -> int:
+    """Cores the queue may schedule against (ranks x concurrent solves).
+
+    cpu_count() reports LOGICAL processors and SMT contributes ~nothing to
+    a memory-bandwidth-bound FV solve, so half the logical count is the
+    useful ceiling. Override with WSS_CORE_BUDGET for unusual machines."""
+    try:
+        v = int(os.environ.get("WSS_CORE_BUDGET", "0"))
+    except ValueError:
+        v = 0
+    return v if v > 0 else max(1, (os.cpu_count() or 8) // 2)
+
+
+# Attachment-verdict lines (reversed-face fraction of a wing patch) and the
+# knife-edge bands around them. Decomposition changes the solver's iteration
+# path — the same case solved at different rank counts settles on slightly
+# different reversed fractions near separation onset — so a fraction within
+# the band is REPORTED as knife-edge rather than trusted as a stable side
+# of the line: a verdict that would flip with core count marks a knife-edge
+# candidate, which is information, not noise. Widths from the measured
+# cross-rank spread on the wall-truth case at 1/4/8/16 ranks (2026-07-25,
+# DECISIONS.md): the separating element's fraction moved 0.217 -> 0.259
+# (spread 0.042) while attached elements held within 0.02 — separation
+# onset is where the path sensitivity lives, so the demotion line carries
+# the wide band and the attached line the narrow one.
+SEP_ATTACHED_MAX = 0.10
+SEP_PARTIAL_MAX = 0.20
+SEP_KNIFE_BAND_ATTACHED = 0.02   # around the 0.10 line
+SEP_KNIFE_BAND = 0.05            # around the 0.20 demotion line
 
 # Force-based convergence: residualControl alone under-serves this case —
 # heavily loaded fine meshes can iterate for thousands of steps with the
@@ -318,7 +362,7 @@ def suggested_k_g(cl_rans: float, c_free: float, c_ground: float,
 
 class RansJob:
     def __init__(self, config: dict, mesh_size: str = "coarse",
-                 n_iters: int = cfd.N_ITERS):
+                 n_iters: int = cfd.N_ITERS, n_ranks: int = 1):
         if mesh_size not in cfd.MESH_PRESETS:
             raise ValueError(
                 f"mesh_size must be one of {sorted(cfd.MESH_PRESETS)}")
@@ -329,6 +373,9 @@ class RansJob:
         self.n_iters = int(n_iters)
         if not (100 <= self.n_iters <= 20_000):
             raise ValueError("max_iters must be between 100 and 20000")
+        self.n_ranks = int(n_ranks)
+        if not (1 <= self.n_ranks <= MAX_RANKS):
+            raise ValueError(f"n_ranks must be between 1 and {MAX_RANKS}")
         self.state = "pending"   # pending | running | done | failed | cancelled
         self.phase: str | None = None
         self.error: str | None = None
@@ -500,7 +547,8 @@ class RansJob:
             (self.case_dir / "config.json").write_text(
                 json.dumps(self.config, indent=1), encoding="utf-8")
             mesh = cfd.build_case(self.cfg, self.case_dir,
-                                  self.mesh_size, self.n_iters)
+                                  self.mesh_size, self.n_iters,
+                                  self.n_ranks)
             with self._lock:
                 self.mesh = mesh
         except (ValueError, cfd.MeshError) as e:
@@ -787,19 +835,28 @@ class RansJob:
         # before those function objects existed
         wall = None
         wall_verdict = None
+        sep_knife_edge = None
         try:
             wall = foam_post.wall_report(self.case_dir)
         except Exception:
             wall = None
         if wall and wall.get("separation"):
             parts = []
+            sep_knife_edge = False
             for patch in sorted(wall["separation"]):
                 frac = wall["separation"][patch]["reversed_frac"]
-                state = ("attached" if frac <= 0.10
-                         else "partial separation" if frac <= 0.20
+                state = ("attached" if frac <= SEP_ATTACHED_MAX
+                         else "partial separation" if frac <= SEP_PARTIAL_MAX
                          else "separated")
+                # within the band of either line the side it landed on is
+                # rank-count luck, not a stable classification — say so
+                near = (abs(frac - SEP_ATTACHED_MAX)
+                        <= SEP_KNIFE_BAND_ATTACHED
+                        or abs(frac - SEP_PARTIAL_MAX) <= SEP_KNIFE_BAND)
+                sep_knife_edge = sep_knife_edge or near
                 parts.append(f"{patch.replace('wing_', '')} {state} "
-                             f"({frac * 100:.0f}% reversed)")
+                             f"({frac * 100:.0f}% reversed"
+                             f"{', knife-edge' if near else ''})")
             wall_verdict = ", ".join(parts)
 
         q = self.cfg.q_pa
@@ -831,6 +888,8 @@ class RansJob:
                 "cl_trend_note": trend_note,
                 "wall_report": wall,
                 "wall_verdict": wall_verdict,
+                "sep_knife_edge": sep_knife_edge,
+                "n_ranks": self.n_ranks,
                 "estimate_scope_note": (
                     "the estimate's k_g realization curve is calibrated on "
                     "the two-element baseline at moderate loading; on "
@@ -874,7 +933,8 @@ class RansJob:
                 "error": self.error,
                 "progress": round(progress, 3),
                 "iteration": self.iteration, "n_iters": self.n_iters,
-                "mesh_size": self.mesh_size,
+                "mesh_size": self.mesh_size, "n_ranks": self.n_ranks,
+                "engine": "openfoam",
                 "elapsed_s": round(elapsed, 1),
                 "latest": self.latest,
                 "history": list(self.history),
@@ -907,6 +967,47 @@ class RansJob:
 _jobs: dict[str, RansJob] = {}
 _jobs_lock = threading.Lock()
 
+# Non-job workloads that must own the solver slot exclusively — the Fluent
+# mesh export holds an ANSYS seat and gmsh state for minutes, and a job
+# started meanwhile would exit its live Meshing session mid-workflow. The
+# claim lives beside _jobs under _jobs_lock so start()/start_pooled() and
+# the claim itself decide against one consistent picture.
+_exclusive_claim: str | None = None
+
+
+def claim_exclusive(tag: str) -> None:
+    """Claim the solver slot for a non-job workload. The tag carries its
+    own article (e.g. "a Fluent mesh export") — refusal messages
+    interpolate it sentence-initially. Refused while any registered job
+    is pending/running or another claim is held; the caller must
+    release_exclusive() in a finally around the whole workload."""
+    global _exclusive_claim
+    with _jobs_lock:
+        if _exclusive_claim is not None:
+            raise RuntimeError(
+                f"{_exclusive_claim} is already running — wait for it "
+                f"to finish")
+        for j in _jobs.values():
+            if j.state in ("pending", "running"):
+                raise RuntimeError(
+                    "a RANS verification is already running — cancel it "
+                    "or wait for it to finish")
+        _exclusive_claim = tag
+
+
+def release_exclusive() -> None:
+    global _exclusive_claim
+    with _jobs_lock:
+        _exclusive_claim = None
+
+
+def exclusive_claim() -> str | None:
+    """The tag holding the solver slot, if any — the shortlist queue
+    checks it at start so an export-blocked queue answers an immediate
+    refusal instead of a started-then-failed first row."""
+    with _jobs_lock:
+        return _exclusive_claim
+
 
 def _pid_alive(pid: int) -> bool:
     """Is a process with this id still running on this machine?"""
@@ -935,7 +1036,8 @@ def _pid_alive(pid: int) -> bool:
 
 
 def _sweep_orphan_containers(active_names: set[str]) -> set[str]:
-    """Force-remove wss-rans-* containers whose owning server is gone.
+    """Force-remove wss-rans-* (and wedged wss-fluent-mesh-*) containers
+    whose owning server is gone.
 
     The one-job-at-a-time guard and the run-dir pruning are process-local;
     a server restart mid-solve would otherwise leave a full-CPU container
@@ -964,6 +1066,24 @@ def _sweep_orphan_containers(active_names: set[str]) -> set[str]:
                 live_others.add(name)
                 continue
             _docker(["rm", "-f", name], 30)
+        # the gmsh->Fluent bridge containers (scripts/fluent_workflow)
+        # carry their owner pid in the NAME, not a label:
+        # wss-fluent-mesh-<pid>-<ts>. --rm cleans up the normal case;
+        # sweep only the wedged ones whose owner is gone. Any live owner
+        # is left alone — including this process, whose own conversion
+        # may be in flight on a job thread and is not in active_names.
+        r = _docker(["ps", "--filter", "name=wss-fluent-mesh-",
+                     "--format", "{{.Names}}"], 15)
+        if r.returncode == 0:
+            for name in (ln.strip() for ln in r.stdout.splitlines()):
+                if not name.startswith("wss-fluent-mesh-"):
+                    continue
+                try:
+                    owner = int(name.split("-")[3])
+                except (IndexError, ValueError):
+                    owner = 0
+                if not owner or not _pid_alive(owner):
+                    _docker(["rm", "-f", name], 30)
     except Exception:
         pass   # sweeping is best-effort; docker may simply be down
     return live_others
@@ -976,8 +1096,16 @@ def _reap_at_exit() -> None:
         active = [j for j in _jobs.values()
                   if j.state in ("pending", "running")]
     for j in active:
-        j.cancel()
-        j._kill_container(15)
+        try:
+            j.cancel()
+            # FluentJob duck-types the registry surface but has no docker
+            # container to kill; one wedged job must not abort the reap
+            # of the jobs after it
+            kill = getattr(j, "_kill_container", None)
+            if kill is not None:
+                kill(15)
+        except Exception:
+            pass
 
 
 atexit.register(_reap_at_exit)
@@ -1028,9 +1156,42 @@ def _prune_run_dirs(active: set[Path],
 
 
 def start(config: dict, mesh_size: str = "coarse",
-          n_iters: int = cfd.N_ITERS) -> str:
-    job = RansJob(config, mesh_size, n_iters)   # validates eagerly
+          n_iters: int = cfd.N_ITERS, n_ranks: int = 1,
+          engine: str = "openfoam", mesher: str = "fluent",
+          conventions: str = "default",
+          settings: dict | None = None) -> str:
+    """Start one interactive verification. engine="openfoam" (default)
+    is the Docker screening engine; engine="fluent" runs a licensed
+    local ANSYS Fluent on the 3D slab (the documented revert path),
+    meshed natively by Fluent Meshing (mesher="fluent", the default) or
+    by the studio's gmsh for an identical-mesh cross-check
+    (mesher="gmsh"); engine="fluent2d" runs the true-2D ANSYS workflow
+    (Workbench-meshed — see fluent2d_run), where mesh_size is a SIZING
+    mode ("default" | "studio-yplus1") and conventions picks the solver
+    doctrine ("default" | "studio"). mesher applies to the Fluent slab
+    engine only; conventions and settings — the 2D panel's mesh, domain
+    and stage-budget overrides, resolved by the job constructor — to the
+    2D engine only. All engines share this registry, so the
+    one-at-a-time guard spans them."""
+    if engine not in ("openfoam", "fluent", "fluent2d"):
+        raise ValueError(
+            "engine must be 'openfoam', 'fluent' or 'fluent2d'")
+    if engine == "fluent":
+        from . import fluent_run
+        job = fluent_run.FluentJob(config, mesh_size, n_iters,
+                                   n_ranks, mesher)   # validates eagerly
+    elif engine == "fluent2d":
+        from . import fluent2d_run
+        job = fluent2d_run.Fluent2DJob(config, mesh_size, n_iters,
+                                       n_ranks, conventions,
+                                       settings)   # validates eagerly
+    else:
+        job = RansJob(config, mesh_size, n_iters,
+                      n_ranks)   # validates eagerly
     with _jobs_lock:
+        if _exclusive_claim is not None:
+            raise RuntimeError(
+                f"{_exclusive_claim} is running — wait for it to finish")
         for j in _jobs.values():
             if j.state in ("pending", "running"):
                 raise RuntimeError(
@@ -1064,6 +1225,48 @@ def start(config: dict, mesh_size: str = "coarse",
     threading.Thread(target=job.run, name=f"rans-{job.id}",
                      daemon=True).start()
     return job.id
+
+
+def start_pooled(config: dict, mesh_size: str = "coarse",
+                 n_iters: int = cfd.N_ITERS, n_ranks: int = 1,
+                 conventions: str = "default") -> str:
+    """Queue-owned start: registers and launches a job WITHOUT the
+    interactive one-at-a-time guard. The caller (the shortlist queue) owns
+    admission — how many pooled jobs run at once, within core_budget() —
+    and runs batch_housekeep() once per batch instead of per start.
+    start() still refuses while pooled jobs are active, so the verify tab
+    cannot land a second workload on top of a running queue. conventions
+    is accepted for signature parity with start(); the queue solves
+    OpenFOAM only, where it does not apply."""
+    job = RansJob(config, mesh_size, n_iters, n_ranks)
+    with _jobs_lock:
+        if _exclusive_claim is not None:
+            raise RuntimeError(
+                f"{_exclusive_claim} is running — wait for it to finish")
+        done_ids = [k for k, j in _jobs.items()
+                    if j.state in ("done", "failed", "cancelled")]
+        for k in done_ids[:-4]:
+            _jobs.pop(k, None)
+        _jobs[job.id] = job
+    threading.Thread(target=job.run, name=f"rans-{job.id}",
+                     daemon=True).start()
+    return job.id
+
+
+def batch_housekeep() -> None:
+    """The orphan sweep + run-dir prune start() performs, once per queue
+    batch. Raises RuntimeError when another app instance's solver container
+    is live — the queue fails eagerly instead of colliding with it."""
+    with _jobs_lock:
+        active_names = {j._container for j in _jobs.values()}
+        active_dirs = {j.case_dir.resolve() for j in _jobs.values()}
+    live_others = _sweep_orphan_containers(active_names)
+    if live_others:
+        raise RuntimeError(
+            "a RANS verification started by another app window or "
+            "instance is still running — cancel it there or wait for "
+            "it to finish")
+    _prune_run_dirs(active_dirs, live_others)
 
 
 def get(job_id: str) -> RansJob | None:

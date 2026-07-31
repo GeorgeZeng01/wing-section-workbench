@@ -84,7 +84,11 @@ def screen(re: float, ncrit: float = 9.0, cl_ref: float = 1.5,
     # carries ~1e-15 float noise, so a section at exactly the user's bound
     # (e.g. 7.0 % typed against a 7.000000000000001 value) would be dropped
     _te = 1e-6
-    out = [r for r in rows
+    # copies with the private helper stripped: _thickness_exact exists only
+    # for this boundary compare, and handing out the cached dicts would let
+    # a caller mutate the cache through the returned rows
+    out = [{k: v for k, v in r.items() if k != "_thickness_exact"}
+           for r in rows
            if thickness_pct_min - _te <= r.get("_thickness_exact",
                                                 r["thickness_pct"])
            <= thickness_pct_max + _te

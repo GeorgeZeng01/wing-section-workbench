@@ -1489,6 +1489,941 @@ there. The check script exits nonzero the day the thresholds stop
 separating the record, and `test_wake_shadow.py` pins the same classes
 in the offline suite.
 
+## Parallel solves, opt-in (2026-07-25)
+
+The runner's one-job mutex was justified in code by "simpleFoam is
+CPU-bound on every core it gets" — which is false. OpenFOAM's finite-
+volume solvers have no threading: every solve was one process on one
+core, and the mutex was protecting capacity nothing used. This round
+added the two axes that were actually available — MPI ranks within a
+solve, and concurrent independent solves in the shortlist queue — as
+**explicit opt-ins**. Serial single-run stays the default on every path,
+and the serial case carries no parallel artifacts — no MPI invocation,
+no decomposeParDict, the same solver chain as always (pinned by test; the
+only later serial-script edit is the rerun-reset list gaining the
+animated-flow cache file, which touches cleanup, not the solve) — so
+recorded baselines stay reproducible without qualification and nothing
+changes for a user who never touches the new controls.
+
+**Mechanics.** `n_ranks > 1` writes a scotch `decomposeParDict` beside
+the case and swaps run.sh's solve step for `decomposePar -force` /
+`mpirun --allow-run-as-root --oversubscribe -np N simpleFoam -parallel`
+/ `reconstructPar -latestTime`, then removes the processor directories —
+the reconstructed case is laid out exactly like a serial one, so the
+flow view, the wall report, results.txt and a later manual WSL rerun all
+work unchanged. potentialFoam stays serial, *before* decomposition, so
+every rank count starts from the identical initial field. The force and
+y+ function objects write merged `postProcessing/` from the master rank
+throughout, which is why the convergence poller and the writeNow force
+stop needed no changes — both were verified against a live 4-rank
+container run, including a mid-solve stop flip propagating through the
+bind mount. scotch is deterministic for a fixed mesh and rank count: the
+same case at the same N reproduces exactly; only *across* rank counts
+does the iteration path legitimately differ.
+
+**The queue schedules against a core budget.** `start_pooled()`
+registers solver jobs without the interactive one-at-a-time guard (which
+still covers the verify tab — a tab start refuses while a queue runs,
+and vice versa), and the queue keeps up to `max_concurrent` solves of
+`n_ranks` each in flight. Admission requires ranks × concurrent ≤
+`core_budget()` — half the logical CPU count, because SMT contributes
+approximately nothing to a memory-bandwidth-bound FV solve
+(`WSS_CORE_BUDGET` overrides). At the default 1×1 the scheduler's
+observable behavior is the old sequential queue exactly; crash
+reconciliation, ranking and prune protection are pinned by the existing
+suite.
+
+**Rank-count drift is reported, not suppressed.** 2D RANS in this app is
+a comparator — no endplates, infinite span, no wheel wake — so a
+decomposition perturbing converged forces by a fraction of a percent
+cannot disturb an ordering that already tolerates 30–40 % magnitude
+error. The one place it can bite is separation onset, where steady RANS
+holds attachment past the point a real flap lets go and the optimizer
+deliberately pushes toward the line. Rather than demanding verdict
+stability across rank counts, the verdict lines grew **knife-edge
+bands**: a reversed-face fraction within ±0.02 of the 0.10 attached
+line or ±0.05 of the 0.20 demotion line is labeled `knife-edge` in the
+wall verdict (and `sep_knife_edge` in the result), and a wake-shadow
+`shadow_min` within ±0.03 of the 0.50/0.53 cutoffs carries a
+`knife_edge` flag. A verdict that would flip with core count is a
+knife-edge candidate — that is information about the design, not noise
+to eliminate. The widths are the measured spread below with margin: the
+separating element moved 0.042 across 1→16 ranks while attached
+elements held within 0.02, so the demotion line (where the unstable
+physics lives) carries the wide band; the shadow skirt is that same
+spread mapped through the validation record's class geometry
+(attached-class floor 0.533 at frac ≈ 0.12 against separated-class
+ceiling 0.459 at frac ≈ 0.22 → ~0.74 shadow-units per frac-unit →
+0.042 × 0.74 ≈ 0.03).
+
+**Measured scaling (wall-truth case 1c4bf2d726c3, fine, 111,501 cells,
+one mesh shared by every run; all four ran the identical 11,000
+iterations to a flat force history, so wall-clock ratios are pure
+per-iteration ratios).**
+
+| ranks | wall-clock | s/iter | speedup | parallel efficiency |
+|------:|-----------:|-------:|--------:|--------------------:|
+|     1 |   60.2 min | 0.3269 |   1.00× | 100 % |
+|     4 |   20.9 min | 0.1125 |   2.91× |  73 % |
+|     8 |   14.5 min | 0.0771 |   4.24× |  53 % |
+|    16 |   11.5 min | 0.0605 |   5.40× |  34 % |
+
+Marginal speedup per added rank: 0.64 (1→4), 0.33 (4→8), 0.15 (8→16) —
+**the knee is 8 ranks** for a single attended solve (4.2× for half the
+machine; the next doubling buys 1.16× for the other half), and **4
+ranks is the throughput-per-core maximum** (73 % efficiency), which is
+why the queue's recommended allocation is 4 solves × 4 ranks. Memory
+bandwidth, not core count, is the ceiling — as expected on a desktop
+part.
+
+**Result spread across rank counts (same case, same mesh, same
+iteration count).** Cl 8.3597 / 8.3925 / 8.4174 / 8.4286 at 1/4/8/16
+ranks — a 0.069 spread (0.82 % of serial), monotone with rank count in
+this study (not established as causal); Cd spread 0.0019 (1.4 %); the
+tail limit-cycle std held at ~0.02 Cl on every run. In force terms the
+spread is **7.5 N on a 903 N section — fifteen times the ~0.5 N
+path-luck margin of the recorded regression baselines**, so parallel
+results are NOT comparable to serial baselines at regression tolerance:
+re-baseline under the rank count you standardize on (a fixed rank count
+reproduces exactly), and compare like with like. As a comparator the
+ordering is untouched — 0.8 % cannot reorder designs the model already
+ranks through a 30–40 % magnitude tolerance. The verdict-bearing
+fractions: the separating element read 0.217 / 0.239 / 0.250 / 0.259
+(spread 0.042, "separated" at every rank count — no flip, and the
+serial value sat inside the knife-edge band and was labeled so), while
+the attached elements held within 0.02 of their serial values.
+
+**Queue sweep headline.** A representative shortlist — four medium-mesh
+candidates (e3 deflection 24/27/30/33° on the wall-truth stack),
+max_iters 10000 — measured **85.8 min under the sequential serial
+behavior and 15.9 min at 4 solves × 4 ranks: 5.4× end to end**. Every
+row force-converged in both arms and the measured ranking came out
+identical (d33 > d30 > d24 > d27). Per-row Cl agreed within 0.25 % on
+three rows; the hottest flap (d33) read 4.4 % apart between arms —
+medium-mesh screening scatter plus a path-dependent force-stop point on
+the most limit-cycling candidate, consistent with the recorded
+medium-mesh caveats — without moving its rank. The 4×4 allocation
+follows from the scaling table: 4 ranks is the last near-full-fare
+point (73 %), and four such solves fill the 16-core budget.
+
+## Fluent second opinion via MCP (2026-07-29)
+
+A licensed ANSYS Fluent (2026 R1 on this machine) is now drivable from
+agent sessions through `scripts/fluent_mcp.py` — a Model Context Protocol
+server over ansys-fluent-core's gRPC session. Design decisions, in order
+of consequence:
+
+**The slab solves in Fluent 3D, not true 2D.** App meshes arrive through
+`foamMeshToFluent` (run in the same ESI container as the RANS tab) with
+the `frontAndBack` empty patches retyped to symmetry — so Fluent solves
+the IDENTICAL one-cell mesh the OpenFOAM referee solves, and
+apples-to-apples cross-solver comparisons need no mesh caveat. True-2D
+Workbench meshes load through the same tools with `dimension=2`.
+
+**The documented manual GUI recipe is reproduced, with two deliberate
+corrections, both surfaced in the tool output.** The walkthrough's
+defaults leave Fluent's reference area at 1 m², so its
+"coefficients" are not chord-normalized; the setup tool sets reference area/length explicitly
+(chord × depth / chord) and reports them. And lift is reported
+downforce-positive (force vector (0,−1,0)) to match the studio's Cl.
+Everything else follows the walkthrough: velocity inlet, 0 Pa outlet,
+no-slip profile, shear-free ceiling, moving ground at the inlet speed,
+hybrid initialization, SST k-ω (set explicitly rather than trusted as
+the default), constant-property air at the studio's ρ/μ.
+
+**Verdict honesty carries over.** `solve()` returns tail statistics and
+the three-window drift measure beside every coefficient — a
+still-trending tail is labeled a bound, never a result — and every setup
+step reports applied-or-failed so a partially configured case cannot
+pass silently (the failure list caught two real 26.1 API quirks during
+bring-up: `depth` is a 2D-only reference value, and converted patches
+must be retyped to wall before their momentum settings exist).
+
+**Fluent's own convergence criteria are disabled by the setup tool —
+measured, not assumed.** On the bridge case Fluent's default residual
+thresholds (1e-3) declared "solution is converged" at iteration 277
+while the lift history was still trending at ~15× the studio's drift
+bar — the exact failure mode the app's verdict honesty exists to
+prevent. The recipe turns per-equation convergence checks off; the
+iteration budget and the force-history drift own convergence, same
+doctrine as the OpenFOAM runner.
+
+**Converged cross-solver datum (identical mesh, both referees flat).**
+The coarse two-element case, one mesh: OpenFOAM (serial, 8000
+iterations, drift 0.0004) settles into its recorded limit cycle at
+**Cl 2.488 ± 0.132, Cd 0.2181**; Fluent (4 processes, the full 4000
+iterations, dead-flat history) lands at **Cl 2.230, Cd 0.1985 — −10.4 %
+and −9.0 %** against OpenFOAM. Two honest observations ride with the
+numbers: the codes disagree about the *unsteadiness* itself (OpenFOAM
+sustains a ±5 % limit cycle where Fluent's steady solver damps flat),
+and the Fluent side ran its 26.1 default discretization rather than
+schemes pinned to OpenFOAM's (`tui()` can pin them; a scheme-matched
+A/B is the natural next probe). A ~10 % cross-code gap on a separating
+high-lift case is ordinary solver scatter — and is precisely why the
+comparator doctrine (orderings, not magnitudes) governs both referees.
+OpenFOAM remains the calibration referee; Fluent is an independent
+cross-check, and no studio verdict, calibration constant or queue
+behavior depends on it. Both solves plus a JSON-RPC round-trip through
+the registered MCP endpoint are the bring-up record; a session checks
+out the ANSYS license at `launch` and releases it at `shutdown`/server
+exit.
+
+## Fluent workflow equivalence, and the reference flip (2026-07-29)
+
+The manual GUI chain (CAD → DXF → Workbench → Discovery → Mechanical
+mesh → Fluent) is now fully automated: `run_case` takes a
+walkthrough-style DXF unmodified (the domain rectangle, when drawn, is
+used verbatim), meshes it with the same gmsh machinery the OpenFOAM
+cases use, and solves with the recipe — every stage configurable per
+run (geometry source, mesh mode/sizings/domain multipliers, physics,
+conventions, budget, processors; the spec schema lives in `run_case`'s
+docstring). The equivalence campaign below is the measured
+manual-vs-automated record on the calibration two-element section
+(15 m/s, h30). **Reference flip, recorded as the designer's judgment:
+absolute coefficient levels now follow Fluent — OpenFOAM levels have
+read inaccurate against trusted references — superseding the "OpenFOAM
+remains the calibration referee" framing of the entry above. The
+in-app OpenFOAM pipeline keeps its screening/ranking role (orderings,
+wake-shadow, queue demotion), which never depended on absolute
+levels.**
+
+Four runs, one section (Cl downforce-positive and chord-referenced
+throughout; the manual row's raw output converted for comparison):
+
+| run | mesh | process | Cl | Cd | vs B |
+|---|---|---|---:|---:|---:|
+| B automated, studio | app fine 95.1k, y+≈1 | 6000 it, drift 0.0034 | **2.2678** | 0.1926 | — |
+| C manual parity | walkthrough 85.6k, 1 mm walls | stopped at **397** it, drift 0.0095 | 2.776 | 0.2687 | +22.4 % |
+| D walkthrough mesh, studio process | walkthrough 85.6k | 4000 it, drift 0.0 | 2.7630 | 0.2690 | +21.8 % |
+| A OpenFOAM (datum) | app fine 95.1k | 11000 it, converged | 3.6287 | 0.2187 | +60.0 % |
+
+**What the manual workflow actually produces, measured.** Its raw
+number for this section is `lift_coef = −0.04463`: +y convention on a
+downforce section, referenced to Fluent's default 1 m² — meaningless
+until someone hand-applies a 62.2× area factor and a sign flip
+(1/(L × 0.1 L) with L = 0.401 m, the DXF-route slab reference — the
+app-route 0.35 × 0.035 m² reference would be 81.6× and does not apply
+to the walkthrough-mesh rows here). And
+its "500 iterations" never happened: Fluent's default residual
+criteria stopped the run at 397 with the force history still trending
+(drift 0.0095, above the 0.006 bar) — the manual workflow's stopping
+point is a hidden criterion nobody chose. On this case the
+truncated value landed ~0.5 % from the converged one (C vs D) — path
+luck, not process: the drift number says it was still moving.
+
+**Mesh, not solver, carries the recipe difference.** Same solver, same
+process, walkthrough mesh vs studio mesh (D vs B): +21.8 % Cl /
++39.7 % Cd. The walkthrough's 1 mm first layer puts a separating
+flap's boundary layer on wall functions exactly where they are
+weakest; the studio's resolved-wall mode is the better-practice
+default, and the walkthrough mode remains available
+(`mesh_mode="walkthrough"`) whenever matching legacy numbers matters.
+Cross-code, same mesh (A vs B): +60 % — recorded as a
+datum under the reference flip above; separation-dominated 2D RANS is
+where codes diverge hardest, and it is why orderings, not magnitudes,
+remain the decision currency.
+
+**Not worse than manual, by axis:** identical meshing available on
+demand (walkthrough mode reproduces the recipe; D equals what an
+unhurried manual run would converge to); strictly better wall physics
+available by default (resolved mode); coefficients arrive normalized
+and signed instead of raw; convergence is verdicted instead of implied;
+provenance (every sizing number, zone map, drift, iteration count) is
+returned rather than remembered; a run is a JSON spec instead of a
+GUI session — reproducible and diffable; and the whole chain runs
+unattended in minutes of machine time instead of an hour of clicking.
+The GUI's remaining advantages (visual mesh inspection, interactive
+contours) are covered by the returned mesh statistics plus
+`write_case_data` (ParaView/Fluent-openable) and `contour_png`.
+
+**Walkthrough audit — every instruction, its default, its knob.** The
+domain the solver uses always follows the walkthrough (what looks
+smaller in the app is the *view* window — the flow panel's View select
+now offers "Full domain" to see the whole box). The table as a whole —
+the defaults column as well as the knob names — records the 3D-slab
+route (`scripts/fluent_workflow.py` mesh spec); the true-2D chain that
+is now the default reaches the same instructions through `write_dxf_2d`
+and `mesh_sizing`, whose knobs are named in the ANSYS settings
+subsection below, and where the two routes' defaults diverge the
+true-2D number is given in the row:
+
+| walkthrough instruction | automated default | knob |
+|---|---|---|
+| front ≥ 3× profile length | 3.0 × L | `mesh.front_l` |
+| back 5–10× length behind | 7.0 × L (mid-band) | `mesh.back_l` |
+| top ≥ 3× profile height above | 3.0 × H | `mesh.top_h` |
+| ground at the rectangle bottom; without ground, mirror the top below | DXF rectangle used verbatim when drawn; else `ground_y` (app sections: y = 0) or 3×H mirrored below | `mesh.ground_y` / the rectangle itself |
+| export DXF, splines NOT as polylines | SPLINE entities read natively (plus polylines/arcs/lines) | `mesh.scale` for units |
+| named selections (inlet/outlet/upper bound/ground/profile) | inlet / outlet / top / ground / profile_e{i} (true-2D chain: inlet / outlet / upper_bound / ground / profile) | zone-name args on setup |
+| profile edge sizing "0.1 mm" — the walkthrough's own meters example says 0.001 m = 1 mm, contradicting itself | 1 mm (the worked example's number); true-2D sizing `default`: the literal 0.1 mm | `mesh.edge_size_m` (1e-4 for the literal 0.1 mm) |
+| inflation: first layer 1 mm | 1 mm (slab walkthrough mode; true-2D sizing `default`: the same 1 mm) | `mesh.first_layer_m` |
+| maximum 10 layers | 10 (slab walkthrough mode; true-2D sizing `default`: the same 10, capped to the clearances the stack faces) | `mesh.n_layers` |
+| growth (unspecified; Mechanical's default is 1.2) | 1.2 | `mesh.growth` |
+| double precision | double | `launch.precision` |
+| velocity inlet at the desired speed | `physics.velocity_ms` | same |
+| pressure outlet at 0 Pa | 0 Pa | fixed (recipe) |
+| profile: stationary no-slip wall | yes | fixed (recipe) |
+| upper bound: specified shear = 0 | yes | slip-zone args |
+| no ground → bottom same as top | shear-free bottom | `physics.moving_ground=false` |
+| moving ground: no-slip moving wall, direction (1, 0), speed = inlet | yes | `physics.moving_ground` |
+| reference values computed from the inlet | `walkthrough`: literal (area stays 1 m²); studio: explicit chord-referenced — the documented correction | `conventions` |
+| lift + drag coefficient reports on the profile, named | `lift_coef` / `drag_coef`, exact names | `physics.downforce_positive` |
+| hybrid initialization | yes | `solve` (initialize) |
+| 500 iterations | `walkthrough` parity honors the number (Fluent's own criteria may stop earlier — measured at 397); studio: budget + drift verdict | `solve.iterations` |
+| probe coefficients; contours for visuals | returned in the result + `contour_png` + the in-app flow views | view-settings row |
+
+**In-app engine.** The verify tab gained an Engine select: the same
+one-click workflow can now solve through Fluent
+(`app/core/fluent_run.py` — a FluentJob mirroring the OpenFOAM job's
+surface, driven through the proven session helpers, solving in chunks
+with the studio's drift criterion deciding convergence). Both engines
+share the one-job-at-a-time registry, so they cannot collide; the
+"Solver cores" knob means MPI ranks on one engine and processor count
+on the other; a Fluent run holds the ANSYS license only while solving
+and writes `case.cas.h5` beside the run. The flow view and animation
+work on both engines: a Fluent run exports its solved cell-centre
+field (`export_ascii`, pressure converted to the kinematic convention)
+and writes it as OpenFOAM-format C/U/p files in a time directory, so
+foam_post renders a Fluent run through the exact pipeline the OpenFOAM
+engine uses — one rendering path, no divergence. Wall-shear attachment
+verdicts stay OpenFOAM-engine features for now — the result says so
+rather than leaving the panel blank silently.
+
+## Flow-view polish round (2026-07-29, designer feedback)
+
+Four reported deficiencies, each fixed with the mechanism stated:
+
+**Fluent views failing on first click** was an ordering bug, not flake:
+the job reported "done" before its flow-field export had written the
+field files, so the UI's immediate fetch 422'd and only a later retry
+worked. "done" is now deferred until the export lands (pinned by a
+state-at-export test), so the first click always finds the files.
+
+**Full-domain zoom turning to mush** was a fixed-grid problem: 320
+samples across an 18.5-chord box leaves nothing near the wing. The
+animated view now refetches **level-of-detail windows**: once the
+visible region is a fraction of the base field and the grid reads
+coarse on screen, the client requests just that box re-gridded at full
+resolution (`/flowfield?x0..y1`, clamped server-side to the solved
+cloud, uncached), and swaps it under the unchanged view transform.
+Zooming from the whole domain into a slot gap stays sharp; zooming back
+out restores the base field.
+
+**Trail rendering** gained presets — comet (the original short wisps),
+long streaks, and persistent streaklines — switchable live (fade rate,
+lifetime, opacity ramp per preset). Playback also extends to 1/250×
+real time, and the scroll-hijack fix (Ctrl+wheel zooms, plain wheel
+scrolls) covers both flow views.
+
+**Light-mode rendering** (from the same feedback batch): figure chrome
+and the animation canvas are theme-aware, with the light theme
+defaulting to the turbo rainbow Fluent users read natively; colormap,
+scale clamp, streamlines and view extent are per-request settings on
+both engines' renders.
+
+## ANSYS-native meshing becomes the Fluent default (2026-07-29/30)
+
+**The question that prompted it:** is the meshing for the Fluent runs
+done outside of ANSYS? It was — entirely. The studio's gmsh cut the
+cells, then `gmshToFoam`/`foamMeshToFluent` (OpenFOAM utilities in the
+Docker container) converted them; nothing ANSYS touched the mesh until
+the solver read it. ANSYS does provide its own meshing for Fluent:
+**Fluent Meshing** (the watertight geometry workflow), part of the same
+install, driveable headlessly through pyfluent's meshing mode. (The
+manual walkthrough's mesher — Workbench/Mechanical — also exists but
+has no headless Python route, so it is not an automation candidate.)
+
+**The native route now shipped, and made the default** for every Fluent
+path (in-app engine, `mesh_from_dxf`, `mesh_from_app_config`,
+`run_case`): the studio writes the fluid slab's boundary as a
+watertight multi-solid ASCII STL — box faces, the two z-planes with the
+profile tunnels cut out, one wall solid per tunnel — and Fluent
+Meshing's watertight workflow cuts every cell the solver sees. Solid
+NAMES drive Fluent's boundary-type inference (inlet / outlet auto-type,
+`symmetry-front/back` become the slab's symmetry planes, the rest
+walls), so no fragile Update-Boundaries scripting is load-bearing.
+The writer self-verifies: it refuses to emit a surface whose every
+edge is not shared by exactly two facets, or whose divergence-theorem
+volume misses box-minus-tunnels.
+
+Three findings from the live bring-up on 2026 R1, each now encoded:
+STL enters the workflow as a MESH-format import (`FileFormat "Mesh"`,
+`MeshFileName` — the CAD route refuses it), and the import DOES
+preserve multi-solid names as zones. The meshing kernel works in
+MILLIMETERS (`MeshUnit "m"` scales the model exactly; every size handed
+to the workflow is converted m→mm — the first attempt passed SI meters
+and asked for a 2.45-micron surface size over a 6 m domain). And the
+z-plane tessellation must be quality-bounded: a first-cut ear-clip
+triangulation put aspect-1e5 slivers on the 5.6 m planes and TGrid's
+import culled ~87% of them as degenerate, leaving free faces the
+surface remesher could not recover — so the planes are tessellated by
+gmsh as a GEOMETRY step (graded from the polyline spacing to the far
+size; hole boundaries transfinite so the profile polylines are never
+split; box-face strips follow the plane's edge subdivision, keeping
+the closed surface exactly conformal). gmsh here is geometry-file
+preparation — the same role SolidWorks plays in the manual chain —
+while ANSYS cuts every cell.
+
+Sizing is never duplicated: both meshers resolve their numbers from one
+source (`fluent_workflow.resolve_sizes` for the DXF route,
+`cfd.section_geometry` for app configs — the same geometry `build_case`
+meshes), with the preset's thickness cap converted to an explicit
+prism-layer count through the geometric series. Optional refinements
+(scoped wall sizing, boundary layers) degrade with the failure RECORDED
+in the mesh provenance rather than silently.
+
+**What the flip trades away, and why it is still the default:** the
+gmsh route's whole point was an identical mesh under both solvers, and
+that remains exactly one select away (Mesher: "Studio gmsh"), labeled
+as the identical-mesh cross-check. The native route pays a real cell
+tax — a 3D fill of a thin slab is isotropic where the extruded 2D mesh
+was one cell thick — in exchange for an all-ANSYS chain with **no
+Docker dependency at all**, which is what the workflow owner asked for.
+The UI states that the native cell count is not the studio preset's.
+
+**Measured (2026 R1, the coarse two-element calibration section, 4
+processors).** The full native chain: STL 26.5k facets (self-checked
+conformal), import 0.09 min with every zone named and typed, surface
+mesh 0.18 min, share topology 0.06 min, volume fill 0.61 min —
+**651,119 cells**, min orthogonal quality 0.09, ~3 minutes of meshing
+wall time end to end, written and read back into the solver with the
+zones arriving exactly as the setup expects (11/11 recipe steps
+applied, none failed). That is ~31× the gmsh coarse preset's 21,005
+cells — the honest quasi-2D tax: the wing band carries ~dz/wall ≈ 14
+spanwise cells that the extruded mesh never paid for.
+
+**The proximity-scoping lesson that got it there** (two full meshing
+runs of evidence): with the workflow's usual face-scoped proximity, the
+two symmetry planes of a thin slab SEE EACH OTHER across dz, and
+CellsPerGap=8 blankets the entire 35 m² domain at dz/8 ≈ 4.4 mm —
+**17.8M cells and ~35 minutes of meshing**, identical with curvature
+adaptation on or off (17.782M vs 17.846M — the second run falsified
+the initial curvature theory). Scoping proximity to EDGES keeps the
+protection the knob exists for — hole-boundary edges still resolve the
+slot gap and the ride-height gap — while featureless plane interiors
+stop demanding cells: same geometry, same knob values, 651k cells and
+a 27× faster mesh. Hardwired in mesh_native, with the story in its
+docstring.
+
+The solver leg on the written native mesh: launch 17 s, zones arrive
+typed (velocity-inlet/pressure-outlet/symmetry by name; wings, top,
+ground as walls), the studio recipe applies 11/11, and a 300-iteration
+sanity solve runs with physical-scale coefficients — which also settles
+the units chain (the kernel's mm scaling stays internal; the written
+mesh reads back in meters, so coefficients, the flow-field export and
+the app's views stay dimensionally right). 300 iterations is a
+deliberate plumbing check, not a result: the history is mid-transient
+(drift ~1.1) exactly as a loaded case should be at that depth. The
+open follow-up is a converged native-vs-gmsh comparison at matched
+drift (the in-app engine will do it — a fine-grade run on the 651k
+native mesh is roughly an hour-class solve at 4–8 cores), to place the
+native mesh's absolute levels against the equivalence campaign's
+Fluent reference.
+
+**ANSYS export for finished Fluent runs:** `write_case_data` now
+honors absolute path stems, so the engine writes `case.cas.h5` +
+`case.dat.h5` into the RUN directory (the old call landed them in the
+transient session dir under `app_data/fluent/` — the result note
+claimed "beside the run" and was wrong until now; regression-pinned).
+A finished Fluent run offers **Export case for ANSYS**: copies
+case+data+config plus a conventions README (downforce-positive,
+chord-referenced, residual auto-stop disabled, slab depth) into
+`exports/fluent_case_<stamp>/` with the same mkdir-claim collision
+guard and reveal flow as the OpenFOAM case export.
+
+**Animated flow view, same round:** particle **density** is a live
+control (800–12,000; pool reallocated on the fly), and the **backdrop**
+is selectable — velocity field (unchanged default), **Cp** on the
+static views' diverging scale (the field rides along in the same
+`/flowfield` payload and every level-of-detail window, so the two views
+cannot disagree), or plain chrome. The persistent trail preset dropped
+the third-party product name from its label and now fades its tail
+(erase alpha 0.0035 → 0.006, base stroke alpha 0.5 → 0.4): streaklines
+still linger, but a minute-old stroke no longer sits at near-full ink.
+
+**First real use of the native engine surfaced four defects, all
+fixed the same night.** A phantom "0 cells" rode two bugs stacked: the
+meshing transcript parser missed 2026 R1's actual completion line
+("N cells were created"), and the status line coerced the resulting
+null to 0 — patterns fixed, a solver-side `mesh/size-info` fallback
+added, and the UI no longer renders a null count. "Feels stagnant" was
+real pacing, not perception: the first solve chunk was 250 iterations,
+which on a 651k-cell native mesh at the serial default is an hour of
+radio silence before the first chart point — the first chunk is now 60
+iterations and big meshes (>400k cells) continue in 100-iteration
+chunks. "Cancel isn't working" was also real: the flag was only polled
+between stages/chunks, so a blocking native-mesh or long solve chunk
+ignored it for many minutes — cancel now HARD-KILLS the live Fluent
+session (the blocked gRPC call raises within seconds, the runner
+converts the exception to 'cancelled' when the flag is set, and the
+license is released; pinned by a blocked-solve kill test). And the
+ANSYS case export gained its Export-tab home: **ANSYS Fluent case**
+meshes natively at export time and writes slab.stl + native.msh.h5
+(zones pre-typed) + a recipe README + config.json under
+`exports/fluent_mesh_*` — the session's scratch swept, the license
+held only while it meshes; the RANS tab's post-run export remains the
+one carrying solved case+data.
+
+## Adversarial attack round on the Fluent integration (2026-07-30)
+
+**The whole uncommitted Fluent round was attacked before it could land.**
+Twelve independent review dimensions (the new engine, the MCP scripts,
+the server diff, the core diffs, the frontend diff, the new tests, the
+docs, an end-to-end physics/units trace, a hunt for code still assuming
+OpenFOAM is the only engine, and two latent-bug sweeps of older core)
+produced 72 raw findings; triage merged duplicates to 52 and per-file
+adversarial verification confirmed 51 — exactly one claim did not
+survive scrutiny. All 51 were fixed the same day. The ones that changed
+behavior, and the decisions inside them:
+
+**The critical one: a licensed Fluent session leaked on every raise
+after launch.** The runner released the session only through the handle
+its inner pipeline *returned* — any exception between license checkout
+and that return (a corrupt bridge mesh, a diverged AMG solve, a gRPC
+fault) marked the job failed and left a headless Fluent process holding
+an ANSYS seat until the next job or server exit, despite the module
+contract saying the license is held only while a job runs. Cleanup now
+fires on the raise path itself, with the caller's idempotent shutdown
+kept as backstop, and the two missing failure-mode tests (mesher raise,
+uncancelled solve raise) pin license release alongside job failure.
+
+**Fluent's early stop now clears the same bar as OpenFOAM's.** The
+chunk loop had been stopping on Cl drift alone, as early as 1,100
+iterations — no Cd gate, windows a third of the doctrine's size, no
+persistence. The review demonstrated a slow climb plus a mesh-scale
+oscillation that the Fluent stop would call converged ~4.7 % below the
+settled value while the OpenFOAM stop correctly kept solving. The
+option of leaving the reference engine looser than the screening engine
+was rejected as indefensible; the stop now requires the Cl *and* Cd
+drift bars, three full post-transient windows, and the criterion
+holding on two consecutive chunk boundaries, and the result carries
+`cd_drift` so the verdict can be audited.
+
+**All in-process Fluent activity is now mutually exclusive by
+construction.** The mesh export's refuse-if-verifying guard was
+one-directional and check-then-act: a verify starting mid-export would
+`exit()` the export's live Fluent Meshing session (both engines share
+the MCP module's globals). An exclusive claim now lives beside the job
+registry — the export takes it, both start paths and the queue respect
+it — and the MCP layer itself gained a session-lifecycle lock that
+*refuses* to kill a live session it does not own rather than assuming
+the previous owner is gone. The orphan sweep also learned to reap
+wedged gmsh-bridge containers (owner pid rides in the container name;
+a live owner, this process included, is always left alone).
+
+**Studio conventions now pin inlet turbulence on both engines.** The
+trace found OpenFOAM solving at 1 % inlet intensity while Fluent ran
+its 5 % default — a silent cross-engine inconsistency in exactly the
+comparison the identical-mesh route exists for. Under `studio`
+conventions Fluent now mirrors the OpenFOAM inlet (1 %, viscosity
+ratio 10); `walkthrough` keeps Fluent's defaults, because reproducing the
+manual walkthrough is that mode's entire purpose.
+
+**No wall-clock policing of individual chunks.** A wedged Fluent
+session used to leave a job "running" forever. The rejected fix was a
+per-chunk timeout — a 651k-cell native mesh legitimately spends an hour
+per chunk, and any bar tight enough to catch wedges would kill honest
+solves. Instead: cancel already hard-kills the live session (and after
+the leak fix, the resulting raise releases everything), plus a 12-hour
+absolute backstop checked at chunk boundaries with an honest failure
+message.
+
+Other confirmed-and-fixed findings worth one line each: `run_case`
+session reuse concatenated the previous case's force history into the
+new run's verdicts (histories now purged on reuse); DXF spline
+flattening used a drawing-unit tolerance that faceted meter-unit
+profiles (now a 25 µm physical sagitta, unit-invariant); the flow-field
+window accepted aspect ratios that allocated multi-GB grids under the
+render lock (pixel budget now bounded); the flat-file export save had
+the same claim-by-probe race its sibling directory exports were already
+hardened against (O_EXCL claim now); the registry test was running the
+real Docker orphan sweep (it could force-remove a genuine container);
+and the wake-shadow knife-edge label that the docs promised was
+computed, exported, and never rendered — it renders now.
+
+**User-facing copy was brought level with the two-engine reality in
+the same round.** Every tooltip, dialog, status line, and exported
+report that still described the RANS tab as OpenFOAM-only was reworded;
+repo-internal citations (`DECISIONS.md`, `docs/calibration/...`) were
+removed from copy a student running the packaged app cannot follow —
+the candid substance stays, the dead reference goes. The validation
+suite grew by roughly forty regression checks across the round — every
+fixed behavior is pinned by a test that fails on the pre-fix code —
+and stands at 747 checks across 20 suites.
+
+## The 2D flip: the manual ANSYS walkthrough becomes the Fluent default (2026-07-30)
+
+**The slab default was measured and found indefensible.** The in-app
+Fluent engine's native route meshes a thin 3D extrusion of the section
+— Fluent Meshing's watertight workflow on a studio STL slab — and on
+the single-element bring-up case that produced **3.35 million cells for
+a problem with no third dimension**. A 3D volume mesher cannot know the
+depth is fake: it grades cells in z exactly as carefully as in x and y,
+so the slab carries on the order of 14–50 spanwise divisions of pure
+redundancy, every one of them solved every iteration. The documented
+manual ANSYS workflow — a true-2D Workbench chain run by hand for every
+design — meshes the same section in **119,410 cells**, and the
+automated replica of that chain (spike-verified on this machine, ANSYS
+2026 R1) completes the whole SpaceClaim → Workbench → Mechanical
+meshing pass in about 5.5 minutes. A 28× cell count for zero physics is
+not a default; it is a bug with a license fee.
+
+**The decision: replicate the documented manual 2D workflow faithfully,
+as the default, with every meshing step done by ANSYS's own tools.** The
+new chain writes a DXF of the profile(s) plus the domain rectangle the
+walkthrough draws by hand (front boundary 3 profile-lengths ahead,
+outlet 7 behind, ceiling 3 stack-heights above the ground plane, ground
+at y = 0), imports it
+into a Workbench "Fluid Flow (Fluent)" system pinned to 2D analysis,
+fills the fluid region in SpaceClaim (profile interiors stay unfilled),
+and meshes in Mechanical with the walkthrough's exact settings: named
+selections `inlet`/`outlet`/`upper_bound`/`ground`/`profile`/`fluid`,
+0.1 mm edge sizing on the profile edges, and inflation from the profile
+boundary by the first-layer-thickness method — first height 1 mm,
+maximum 10 layers, growth 1.2. Fluent then runs 2D double precision
+with the walkthrough's boundary conditions (velocity inlet at the configured
+speed, 0 Pa pressure outlet, no-slip stationary profile, zero-shear
+ceiling, ground moving in x at the inlet speed), reference values set
+explicitly from the inlet with the 2D defaults of area 1 m² and length
+1 m so they are deterministic, `lift_coef`/`drag_coef` report
+definitions on the profile zone with Fluent's default force vectors,
+hybrid initialization, 500 iterations, residual criteria left at
+Fluent's defaults. That is the walkthrough, number for number.
+
+**The batch chain is quirk-hardened, and the guard style is
+distrust-by-default.** Automating Workbench and SpaceClaim headless
+surfaced a dozen behaviors that would silently corrupt a naive script:
+the 2D analysis type must be pinned on the geometry properties *before*
+the file is attached or the import is 3D; a headless DXF import lands
+its curves on a datum plane rather than the root part's curve list;
+filling the region yields the fluid face *and* one face per profile
+island, which must be deleted by area ranking; the named-selection
+creator ignores the requested name (everything is born "Group1" and
+renamed after, checking a rename call that reports failure by return
+value instead of raising); edges are classified into zones by measured
+vertex coordinates against the domain bounding box, with closed-spline
+profile edges recognized by their zero-vertex signature; and the mesh
+lands at a fixed project-relative path because no export API exists.
+The governing quirk shaped the whole error-handling design: **both
+batch runners exit 0 even when the script inside them failed**, and a
+failed Mechanical pass still emits a default mesh file that exists and
+parses. So no stage is ever judged by exit code or file presence —
+every stage writes its own result JSON, and the mesh is accepted only
+after the `.msh` itself is parsed and found to declare 2D, a sane cell
+count, and all six zone names. Timeouts kill the stage's process tree,
+and each stage has its own budget (SpaceClaim 300 s, Workbench 900 s).
+
+**Walkthrough numbers are the defaults, studio improvements are
+options.** The walkthrough's numbers above are what sizing `default`
+and conventions `default` produce, because parity with the manual
+workflow is the point: a student can reproduce any in-app result by
+hand, step for step. The studio's improvements are opt-in, never
+silently applied. Sizing
+`studio-yplus1` replaces the 1 mm first layer with the y+ ≈ 1 height
+the app already computes for OpenFOAM, chord-proportional edge sizing
+(0.2 % of chord), and the fine preset's layer schedule. Conventions
+`studio` pins SST k-ω with the studio inlet turbulence (1 % intensity,
+viscosity ratio 10), disables Fluent's residual auto-stop in favor of
+the three-window force-drift verdict (with the run's iteration count as
+a cap rather than a script), and presents downforce-positive. Under
+`default` conventions the run goes exactly the requested iterations unless
+Fluent's own residual criteria end it early — and when that happens
+the result says so (`residual_stop`) instead of letting a
+default-criteria stop masquerade as a force-converged one.
+
+**One conversion bridges the two worlds honestly.** The `default`
+convention reports Fluent's raw coefficients against the 2D reference area
+of 1 m² per meter of depth, lift-positive-up; the studio is
+chord-referenced and downforce-positive. Both are shown:
+`cl_chord = -cl_raw / chord` (and `cd_chord = cd_raw / chord`), with a
+note stating the reference so neither number can be mistaken for the
+other. The `k_g` suggestion is always computed from the chord-referenced
+downforce-positive value, whichever conventions ran the solve.
+
+**The UI splits.** The 2D chain gets its own **Fluent 2D** tab beside
+RANS verify — sizing, iterations, cores, conventions, live convergence,
+flow view, `k_g` apply — and the RANS verify tab returns to
+OpenFOAM-only, dropping its engine and mesher selects. Two engines
+sharing one tab's controls made every label a conditional; two tabs
+make each one honest. The Export tab's ANSYS card becomes the 2D
+bundle: DXF + the ANSYS-meshed `FFF.msh` + a README carrying the
+meshing and solve recipe.
+
+**The revert path stays live.** The 3D slab engine was not deleted or
+degraded: `fluent_run.py`, its MCP meshing tools, and its tests are all
+intact, and `cfd_run.start(engine="fluent")` still dispatches to it —
+it just has no UI control anymore. Restoring it to the interface is a
+frontend-only change (re-add the engine/mesher selects the RANS tab
+carried before this round and pass `engine="fluent"` through the
+existing start call); nothing server- or core-side needs to move. It
+remains the right tool if a genuinely 3D question ever appears, and the
+identical-mesh gmsh cross-check route rides with it.
+
+**The live bring-up bought three more rules the code now enforces.**
+An end-to-end run on the real installs failed twice before it
+succeeded, and each failure became a fence. First: both ANSYS script
+hosts run IronPython 2.7, where a single non-ASCII byte in a generated
+script is a compile error that `SendCommand` swallows silently — the
+run then dies minutes later on the default-mesh guard with no visible
+cause (two em dashes in template comments cost a full meshing round
+each). The template filler now refuses to emit any non-ASCII script,
+and the suite pins all three templates pure ASCII. Second: v261's 2D
+mesher crashes outright ("software execution error") when the
+walkthrough's inflation stack is asked to grow from multi-element
+profile loops — opposing 26 mm fronts in a 5.25 mm slot gap. The chain now caps the
+layer stack against the clearances it actually faces (0.4 x the slot
+gap per side, matching the studio's own boundary-layer share; 0.9 x
+the ground clearance, which keeps the spike-proven single-element
+walkthrough stack uncapped), and when Mechanical still returns an
+empty mesh it retries once without inflation and records the degradation in the
+result — a usable mesh with an honest caveat instead of an opaque
+failure. The no-inflation fallback is less of a loss than it sounds:
+at 0.1 mm edge sizing the first cell centroid sits near y+ 2, finer
+than the walkthrough's intended 1 mm first layer. Third: the domain ceiling
+follows the walkthrough's measured reading — three stack heights above
+the ground plane, ride height included — after the bbox-only reading
+was caught tightening vertical confinement by exactly 3x the ride
+height on the parity path. The verified end state: a two-element stack
+meshes to ~52k true-2D cells in ~5 minutes and solves with live
+convergence, honest verdicts, flow export and the solved case written
+— against 3.35M cells and an unfinishable solve the slab default
+produced the same morning.
+
+## Section-level rule checks, and one flow view for both engines (2026-07-30)
+
+**Only rules a 2D section can actually decide are implemented.** The
+envelope already checked the box (length, height, ground clearance);
+this round adds the two edge rules a section carries in its own
+geometry — a leading-edge radius floor and a trailing-edge thickness
+floor — and stops there. Deliberately left out, and named as such in
+the UI: endplate and vertical edge radii (the vertical-edge figure in
+T.7.1.4 applies to surfaces a section drawing does not contain), the
+plan-view keep-outs and span limits, mount frangibility and the
+stiffness load case. Every one of them is a real rule; none of them is
+decidable from a section. Options considered: (a) a full rules
+checklist with a user-entered number per rule — rejected, a green tick
+on a limit the section cannot see is worse than no check at all,
+because it reads as clearance; (b) check nothing and leave rules to
+the entrant's own paperwork — rejected, the two edge limits *are*
+section-computable and the optimizer was already free to design a
+knife-edged nose; (c) check what the geometry decides, and print the
+list of what it cannot (chosen).
+
+**The leading-edge radius is measured by fitting the nose parabola —
+and the first version of that fit was accurate against the wrong
+yardstick.** Near the nose the surface follows `y² = 2rx`, so
+`le_radius()` least-squares fits x against y over the first 2 % of
+chord using both surfaces; the quadratic coefficient is 1/(2r). A
+constant and a linear term absorb the offset between the frontmost
+contour *point* and the true vertex (they differ by up to a panel, and
+on a cambered section the vertex sits off the axis), and 1/(x+ε)²
+weighting anchors the fit where the parabola is valid rather than at
+the far end of the window where paneling artifacts live.
+Finite-difference curvature was rejected outright: on a repaneled
+spline it differentiates the panel spacing as much as the shape.
+
+The instructive part is what the first implementation got wrong. It
+carried a |y|³ term to model the square-root nose, which bought a
+headline accuracy of 0.4–0.7 % against the analytic 4-digit NACA
+radius `1.1019·t²` — and that number was meaningless, because a NACA
+4-digit nose is precisely the shape the basis was built to fit. Over a
+2 % window the |y|³ column is near-collinear with y² (measured
+condition numbers 10⁷–10⁸), so on any *other* nose the quadratic
+coefficient — the one that IS the curvature — was essentially
+unconstrained, and `lstsq` reported nothing. The consequence was not
+academic: sweeping panel counts from 60 to 200, sd7034 read 3.9 mm to
+11.9 mm and s6063 swung 6.6×, so the pass/fail verdict against a 5 mm
+floor alternated with a knob the user changes for solver resolution.
+The single stability check in the suite passed throughout, because it
+tested naca0012 alone.
+
+Dropping the |y|³ column fixes it: panel-count spread over 45–200
+panels a side now sits at ~1–9 % across the library (worst measured:
+e603 at 9.3 %), at the cost of a systematic −5.8 % bias against the
+analytic NACA radius, near-constant from 0006 to 0024. That trade was
+taken deliberately. A stable measurement with a known bias is usable;
+an unbiased one that moves 6× with an unrelated setting is not. The
+bias direction is also the safe one — the fit under-reads, so it flags
+compliant noses rather than passing sharp ones.
+
+Two honesty mechanisms follow from those numbers. Legality is measured
+at a **fixed** 120 panels a side (`RULE_CHECK_PANELS`) regardless of
+what the solver or the optimizer's search is running, because whether
+a design is legal cannot depend on a speed setting — the optimizer
+searches 3–4 element stacks at 45–50 panels, where the nose fit
+degrades to "unmeasured" on much of the library and preferentially on
+the sharp noses the rule exists to catch. And a measurement within
+10 % of the floor (`LE_RADIUS_BAND`, sized from the −5.8 % bias plus
+the ~9 % scatter) is labelled **knife-edge**: the verdict still stands,
+but the design is told the measurement cannot decide it, the same
+doctrine the RANS attachment lines already carry. A nose that cannot
+support the fit at all — too few points, a contour that folds back, a
+recovered radius above half a chord — returns None and the verdict is
+**unknown**, never a pass and never a violation. Measurement is on the
+as-built contour (`effective_spec`, exactly as the manufacturing
+report does), so what is judged is what will be cut.
+
+**Which elements the radius applies to is exposed, not decided.** The
+frontmost element is the default scope because the usual FSAE stack
+puts one nose in front of a nose cone and shields the flaps behind it
+— but whether a shielded flap leading edge is a "forward-facing edge
+someone could contact" is an open reading of T.7.1.4, and it is not
+this tool's reading to make. So `le_radius_scope` is a two-value
+control ("Frontmost element" / "Every element") with the interpretation
+spelled out in its tooltip, and an entrant who scrutineers the strict way
+sets it to every element. What is *not* left to the user: which
+element is frontmost. It is computed from the installed geometry
+(smallest x extent), never assumed to be the main — a large negative
+overlap or a nose-down stack angle can genuinely put a flap in front.
+
+**The radius cost is an advisory, never a violation.** A required nose
+radius above 5 % of an element's chord swallows the suction peak, so
+that element's card carries a "nose cost" badge and the warning list
+says the rule is being paid for out of section quality. The rule still
+stands and the design still passes; the point is that the optimizer
+gets blamed for a downforce number the rulebook chose. Alternative
+considered: scaling it into the objective as a penalty — rejected,
+that would trade legality against performance, which is exactly the
+trade the hard-constraint decision refuses.
+
+**T.7.1.5 gives no number, so the trailing-edge floor is the user's,
+and the app says so.** The rules require that edges a person may touch
+not be sharp, without a dimension. The check therefore ships with no
+default value and its warning names the user as the source of the
+limit ("the rules give no number for a non-forward-facing edge, so
+this limit is yours"). Because the floor is measured on the as-built
+contour, the manufacturing TE thickness is what has to meet it — the
+two settings are wired to the same number rather than arguing about
+it. Alternative considered: inventing a defensible default (3 mm, say)
+— rejected, a number with no source in the rulebook would be quoted
+back at scrutineering as if it had one.
+
+**The box has two load cases, and the code now honors both.** T.7.3.1
+measures aero limits with the wheels straight and no driver in the car
+— the car's highest static ride height — while ground clearance is
+worst case laden and dynamic. The top and the bottom of the same box
+therefore belong to different conditions. `measure_ride_height_mm`
+re-evaluates the height caps with the stack rigidly translated to the
+entered unladen height (the stack's own height above its lowest point
+is a property of the geometry, so the translation is exact), while the
+clearance floor stays on the configured ride height; the verdict
+reports `measured_at_ride_height_mm` and the warning says which height
+the cap was judged at. Options considered: (a) one ride height for
+every limit — rejected, that is the status quo and it silently checks
+the height cap in the wrong load case; (b) sweep a ride-height range
+and check the envelope across it — deferred, it multiplies the check
+by a range the rules do not ask for; (c) two heights, one per limit
+family (chosen).
+
+**The built-in presets quote a draft, and the centre station's length
+is deliberately blank.** Two envelopes ship read-only: an outboard/tip
+station (625 mm length, 250 mm height per T.7.7.1.c, 5 mm nose radius)
+and a centre station (500 mm height per T.7.7.1.b, same radius, **no
+length**). The 625 mm is a rules constant rather than a guess — nothing
+may sit more than 700 mm ahead of the front tires (T.7.5.a) and a
+75 mm keep-out runs forward of the tire outer diameter in side
+elevation (V.1.1.c), so 700 − 75 = 625 mm of chordwise room is left
+whatever tire the car runs. The centre station has no such constant:
+the 700 mm is measured from the fronts of the tires, so how much chord
+the centre section gets depends on where that car's nose sits relative
+to the front axle. Blank is the honest value, and each built-in
+carries a note in the panel saying exactly that. The built-ins sit in
+their own group in the preset select, cannot be overwritten or
+deleted (the machine-level preset library stays the user's), and every
+surface that quotes them — the group label, the panel note, the report's
+"Rule source" row — states that the source is the FSAE 2027
+**public-comment draft** (version 0.0, 21 July 2026), a document that
+says on its face it is not valid for competition and whose numbers will
+move before V1. Alternative considered: shipping the draft numbers as
+plain defaults in the fields — rejected, an unlabelled number is
+indistinguishable from a rule, and this one is not one yet.
+
+**The animated flow view on the Fluent 2D tab was a frontend gap, and
+the fix was one factory rather than a second copy.** Nothing in the
+field pipeline was engine-specific: `/api/rans/{id}/flow` and its
+`/flowfield` sibling read the finished job's case directory, and a
+Fluent 2D run exports its solved field in the same form the OpenFOAM
+runs write — so the Fluent tab was already serving static velocity and
+Cp renders through the identical endpoints while its Animated button
+simply did not exist. The panel behind it is not small: request
+sequencing against stale responses, objectURL lifecycle, the
+level-of-detail refetch, animation mount/teardown across tab switches,
+theme re-ink, and the restored-project cache path. Options considered:
+(a) copy the RANS panel under an `fl2d-` prefix — rejected, two copies
+of that much stateful code diverge inside one round, and the LOD and
+teardown paths are exactly where a divergence would leak a rAF loop or
+megabytes of field arrays; (b) one shared panel instance reparented
+between tabs — rejected, each tab owns a different job, image cache and
+animation mount, and reparenting would make leaving a tab destroy the
+other tab's state; (c) `makeFlowView(cfg)` (chosen) — one factory, one
+instance per tab, differing only in DOM id prefix, owning tab, the
+re-run verb in its "not saved with the project" message, and the
+caption's wording. That last difference is the honest one: the
+OpenFOAM caption says particles ride the solved field, the Fluent 2D
+caption says they are traced through a **converged steady** field — a
+path picture, not a time-accurate simulation of the flow developing.
+Both captions state the playback slowdown, because real air crosses
+the frame in a fraction of a second. Known limit: the animation reads
+the live run's gridded velocity field, which is not saved into a
+project file (the static renders are), so a restored project offers
+the static views and asks for a re-run to animate.
+
+## The ANSYS settings panel (2026-07-30)
+
+**Every number the Fluent 2D tab's runs use is now a control, and the
+recipe label still means what it says.** The Fluent 2D tab previously exposed
+four knobs — sizing, iterations, solver cores, conventions — while the
+rest of the chain lived as literals: the domain rectangle's 3 L ahead,
+7 L behind and 3 H above were hardcoded in the DXF writer, and the
+per-stage batch budgets (SpaceClaim 300 s, Workbench 900 s) were module
+constants. That is stated plainly because it was a real gap: the
+walkthrough audit table above lists `front_l` / `back_l` / `top_h` as
+knobs, and on the true-2D route they were not knobs at all until this
+round. The panel now carries the base mesh recipe (`default` — the
+walkthrough's 0.1 mm edges, 1 mm first layer, 10 layers, growth 1.2 —
+or `studio-yplus1`), a per-knob override beside each of those four
+values (`edge_size_mm`, `first_layer_mm`, `n_layers`, `growth`), the
+three domain proportions (`front_l` / `back_l` / `top_h`, multipliers on
+the installed stack's streamwise extent and its height above the ground,
+not on the reference chord), iteration count, solver cores, conventions
+(`default` or `studio`), and the two stage budgets (`sc_budget_s`,
+`wb_budget_s`). The same nine overrides ride on the Export tab's ANSYS
+2D mesh bundle, which drives the identical `write_dxf_2d` + `run_chain`
+path: a bundle meshed for a hand check has to be the mesh the tab would
+build, or the check is of a different mesh.
+
+**A blank override means "use the recipe", not "use zero".** Any
+override left empty falls back to the sizing recipe's value for the
+mesh knobs, or to the documented default for the domain proportions and
+budgets — so the panel can be opened, read and closed without changing
+a run. Overrides never relabel the recipe: a `default` run with a
+0.3 mm edge size still reports sizing `default`, and the result carries
+the values actually used rather than the recipe's nominal ones, because
+a label that silently drifts from the numbers is exactly the provenance
+failure the whole verdict doctrine exists to prevent. Carrying them is
+not enough on its own: the panel unlocks the instant a run finishes, so
+the card **states** its own resolved mesh, domain and budget numbers and
+marks the ones that were set by hand, and it reports the layer stack the
+mesher actually cut when the clearance cap or the no-inflation retry
+moved it. Otherwise a coarse, tightly confined screening run and a
+recipe-parity run render identically, which is the same provenance
+failure one step further downstream. A result saved before this surface
+existed carries no settings at all and says so rather than implying the
+recipe's numbers. Ranges are
+enforced in the core as well as at the API boundary (the core is
+reachable from scripts that never touch the server), and every bound is
+a physical or licensing one: growth strictly above 1.0 and at most 3.0,
+layers capped at 100, iterations 50–20000, cores 1–32, and stage
+budgets floored high enough (30 s SpaceClaim, 60 s Workbench) that an
+honest stage cannot be killed mid-mesh by a typo.
+
+**Presets are machine-level, exactly like the rule-envelope presets.**
+A named settings preset is a habit of the workstation the licensed
+ANSYS installation sits on, not a property of the wing being designed,
+so it lives in the app's local data rather than inside a project file —
+the same split, and for the same reason, as the rule presets: the
+active values travel with the run, the library stays with the machine.
+
 ## Known limitations
 
 Documented, not fixed. The custom-airfoil registry lives in server memory

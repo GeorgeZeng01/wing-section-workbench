@@ -46,7 +46,7 @@ def main():
     check("recorded flagged winner triggers the signature advisory",
           len(w) == 1 and "workable floor" in w[0], f"({len(w)})")
     check("advisory cites the record and the fix",
-          w and "docs/calibration" in w[0] and "overlap" in w[0])
+          w and "Fine-mesh truth runs on record" in w[0] and "overlap" in w[0])
 
     # the record's key subtlety: the CLEAN -14% winners share the same
     # slot corner (gap 0.80, overlap ~0) — the advisory must fire on them

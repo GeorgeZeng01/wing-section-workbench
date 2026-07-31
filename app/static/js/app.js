@@ -3,6 +3,7 @@
 import { api, downloadExport } from "./api.js";
 import { lineChart, airfoilPreview } from "./charts.js";
 import { Viewport, SERIES } from "./viewport.js";
+import { mountFlowAnim } from "./flowanim.js";
 
 const $ = (id) => document.getElementById(id);
 const NU = 1.5e-5;
@@ -59,6 +60,7 @@ const state = {
   screenSort: { key: "CL_max", dir: -1 },
   screenShowLowConf: false,
   rulePresets: [],            // machine-level rule-envelope library
+  ansysPresets: [],           // machine-level ANSYS 2D settings library
   ransRerank: null,           // last RANS re-rank rows (session-persisted)
   rerankPoll: null,
   optResult: null,            // terminal optimizer status (session-persisted, trimmed)
@@ -133,7 +135,7 @@ function safeFlow(o) {
 
 // any job that owns server-side compute right now
 function jobsRunning() {
-  return !!(state.optJob || state.ransJob || state.queueActive);
+  return !!(state.optJob || state.ransJob || state.queueActive || fl2dJob);
 }
 
 /* unsaved-work indicator: the Save button carries a dot whenever the
@@ -183,16 +185,20 @@ function writeConfigToForm() {
   const env = state.config.rule_envelope;
   $("rules-on").checked = !!env;
   $("rules-body").hidden = !env;
+  // another project's provenance may not survive into this one
+  ruleDraftLast = env ? ruleDraftSource(env)?.name ?? null : null;
   if (env) {
-    $("rule-len").value = env.max_length_mm ?? "";
-    $("rule-height").value = env.max_height_mm ?? "";
-    $("rule-clear").value = env.min_ground_clearance_mm ?? "";
-    $("rule-xoff").value = env.x_offset_mm ?? 0;
-    $("rule-preset").value = env.preset_name ?? "";
+    fillRulesForm(env);
+    setRulePreset(env.preset_name ?? "");
   }
   syncVpRulesToggle();
   buildElementCards();
   updateTargetC();
+  // every path that REPLACES the configuration (project open, preset load,
+  // pin restore, optimizer apply) funnels through here without passing
+  // onConfigChanged — the resolved-wall placeholders are derived from the
+  // operating point, so they would otherwise describe the previous design
+  syncAnsysPlaceholders();
 }
 
 /* the viewport's Rules checkbox draws the envelope box — meaningless while
@@ -291,6 +297,86 @@ function bindManufacturing() {
 
 /* ---------------- rules envelope ---------------- */
 
+/* every field that is a LIMIT: x_offset_mm anchors the drawn box,
+   le_radius_scope only qualifies the radius limit and measure_ride_height_mm
+   only says which load case the height caps are read in, so none of those on
+   its own is a rule set worth saving — an envelope holding nothing but a
+   rule ride height can never produce a violation */
+const RULE_LIMIT_KEYS = ["max_length_mm", "max_height_mm",
+                         "min_ground_clearance_mm", "min_le_radius_mm",
+                         "min_te_thickness_mm"];
+
+/* Built-in envelopes taken from the FSAE 2027 rules PUBLIC-COMMENT DRAFT
+   (version 0.0, 21 July 2026), which states on its face that it is not valid
+   for competition — the numbers will move before V1. They live outside the
+   user's preset library and cannot be overwritten or deleted, so the offered
+   numbers stay traceable to a document. Only section-computable limits are
+   here: endplate edge radii, plan-view keep-outs, span limits and mount rules
+   are real rules a 2D section cannot decide. */
+const BUILTIN_RULE_PRESETS = [
+  {
+    name: "FSAE 2027 draft - outboard/tip station",
+    envelope: {
+      max_length_mm: 625, max_height_mm: 250,
+      min_le_radius_mm: 5.0, le_radius_scope: "frontmost",
+    },
+    note: "Outboard/tip station, FSAE 2027 draft. Height is capped at 250 mm "
+        + "forward of the front axle centreline and outboard of the front "
+        + "tires (T.7.7.1.c). The 625 mm length is a rules constant, not a "
+        + "guess: nothing may sit more than 700 mm ahead of the front tires "
+        + "(T.7.5.a) and a 75 mm keep-out runs forward of the tire outer "
+        + "diameter in side view (V.1.1.c), so 700 − 75 = 625 mm of chordwise "
+        + "room is left whatever tire you run. The 5 mm nose radius is the "
+        + "horizontal-edge figure from T.7.1.4.",
+  },
+  {
+    name: "FSAE 2027 draft - centre station",
+    envelope: {
+      max_height_mm: 500,
+      min_le_radius_mm: 5.0, le_radius_scope: "frontmost",
+    },
+    note: "Centre station, FSAE 2027 draft. Height is capped at 500 mm "
+        + "outside the rear aero zone (T.7.7.1.b). Length is deliberately "
+        + "left blank: the 700 mm forward limit (T.7.5.a) is measured from "
+        + "the fronts of the front tires, not from the nose, so how much "
+        + "chord the centre section gets depends on where your nose sits "
+        + "relative to the front axle — measure it on your car and enter it. "
+        + "The 5 mm nose radius is the horizontal-edge figure from T.7.1.4.",
+  },
+];
+
+/* name match is case-insensitive, matching the server's duplicate check —
+   else "fsae 2027 draft - centre station" would shadow a built-in */
+function builtinRulePreset(name) {
+  const key = String(name || "").trim().toLowerCase();
+  return key ? BUILTIN_RULE_PRESETS.find(
+    (p) => p.name.toLowerCase() === key) || null : null;
+}
+
+/* A hand edit clears the preset selection, but the numbers on screen are
+   still the draft's until they are replaced — and the report is where a
+   number gets quoted from, so the caveat has to survive the edit. Provenance
+   rides in preset_name (the envelope's only display-only string; the schema
+   is strict, so no new key may be invented) with this marker appended. */
+const RULE_DRAFT_MARK = " (edited)";
+
+/* the built-in the last applied envelope came from — turning Rules off
+   deletes the envelope while the numbers stay in the form, and the caveat
+   must not be what the toggle drops */
+let ruleDraftLast = null;
+
+/* Which built-in draft an envelope's numbers came from, if any: the preset
+   itself, an edited copy of it, or a user preset saved from one. */
+function ruleDraftSource(env) {
+  const name = String(env?.preset_name || "");
+  const marked = (n) => (n.endsWith(RULE_DRAFT_MARK)
+    ? builtinRulePreset(n.slice(0, -RULE_DRAFT_MARK.length)) : null);
+  const direct = builtinRulePreset(name) || marked(name);
+  if (direct) return direct;
+  const own = state.rulePresets.find((p) => p.name === name);
+  return own ? marked(String(own.envelope?.preset_name || "")) : null;
+}
+
 function readRulesForm() {
   const num = (id) => {
     const v = parseFloat($(id).value);
@@ -301,10 +387,62 @@ function readRulesForm() {
     max_height_mm: num("rule-height"),
     min_ground_clearance_mm: num("rule-clear"),
     x_offset_mm: num("rule-xoff") ?? 0,
+    min_le_radius_mm: num("rule-le-radius"),
+    le_radius_scope: $("rule-le-scope").value,
+    min_te_thickness_mm: num("rule-te-thick"),
+    measure_ride_height_mm: num("rule-measure-height"),
   };
   const preset = $("rule-preset").value;
-  if (preset) env.preset_name = preset;
+  if (preset) {
+    env.preset_name = preset;
+  } else {
+    // no selection: keep the draft the previous envelope's numbers came from
+    const src = ruleDraftSource(state.config.rule_envelope)
+      || (ruleDraftLast ? builtinRulePreset(ruleDraftLast) : null);
+    if (src) env.preset_name = src.name + RULE_DRAFT_MARK;
+  }
+  ruleDraftLast = ruleDraftSource(env)?.name ?? null;
   return env;
+}
+
+/* one writer for the envelope fields: a preset that leaves a limit out has to
+   CLEAR that field, not inherit whatever was typed before it */
+function fillRulesForm(env) {
+  $("rule-len").value = env.max_length_mm ?? "";
+  $("rule-height").value = env.max_height_mm ?? "";
+  $("rule-clear").value = env.min_ground_clearance_mm ?? "";
+  $("rule-xoff").value = env.x_offset_mm ?? 0;
+  $("rule-le-radius").value = env.min_le_radius_mm ?? "";
+  $("rule-le-scope").value = env.le_radius_scope || "frontmost";
+  $("rule-te-thick").value = env.min_te_thickness_mm ?? "";
+  $("rule-measure-height").value = env.measure_ride_height_mm ?? "";
+}
+
+/* a built-in preset's note says where its numbers come from — the centre
+   station's blank length is a fact about how the rule is measured, not an
+   omission, and the user has to see that before trusting the preset */
+function renderRulePresetNote() {
+  const sel = builtinRulePreset($("rule-preset").value);
+  // an edited or re-saved copy still shows the sourcing, marked as derived:
+  // the numbers may have moved away from the ones the note describes
+  const p = sel || ruleDraftSource(state.config.rule_envelope);
+  const n = $("rule-preset-note");
+  n.textContent = !p ? ""
+    : sel ? p.note
+      : `Derived from a built-in draft preset — these limits may have been `
+        + `edited since. ${p.note}`;
+  n.hidden = !p;
+}
+
+/* one writer for the selection: assigning .value fires no change event, so
+   the note and the Save/Delete buttons would otherwise describe a preset
+   that is no longer selected. A name with no matching option (an edited
+   copy's marker) selects "— none —". */
+function setRulePreset(name) {
+  const sel = $("rule-preset");
+  sel.value = [...sel.options].some((o) => o.value === name) ? name : "";
+  renderRulePresetNote();
+  syncRulePresetButtons();
 }
 
 function bindRules() {
@@ -318,26 +456,33 @@ function bindRules() {
     syncVpRulesToggle();
     onConfigChanged();
   });
-  for (const id of ["rule-len", "rule-height", "rule-clear", "rule-xoff"]) {
+  for (const id of ["rule-len", "rule-height", "rule-clear", "rule-xoff",
+                    "rule-le-radius", "rule-le-scope", "rule-te-thick",
+                    "rule-measure-height"]) {
     $(id).addEventListener("input", () => {
       if (!$("rules-on").checked) return;
-      $("rule-preset").value = "";   // hand edits leave the preset behind
+      // hand edits leave the preset behind, but not where its numbers came
+      // from — readRulesForm carries that over from the applied envelope
+      $("rule-preset").value = "";
       state.config.rule_envelope = readRulesForm();
+      setRulePreset("");
       onConfigChanged();
     });
   }
   $("rule-preset").addEventListener("change", () => {
     const name = $("rule-preset").value;
-    const p = state.rulePresets.find((x) => x.name === name);
+    const builtin = builtinRulePreset(name);
+    const p = builtin || state.rulePresets.find((x) => x.name === name);
     if (p) {
-      $("rule-len").value = p.envelope.max_length_mm ?? "";
-      $("rule-height").value = p.envelope.max_height_mm ?? "";
-      $("rule-clear").value = p.envelope.min_ground_clearance_mm ?? "";
-      $("rule-xoff").value = p.envelope.x_offset_mm ?? 0;
-      $("rule-preset-name").value = name;
+      fillRulesForm(p.envelope);
+      // a built-in name may not be saved over, so don't pre-load it into the
+      // Save as field — the user names their own copy
+      $("rule-preset-name").value = builtin ? "" : name;
     }
+    // the note reads the applied envelope, so apply first
+    if ($("rules-on").checked) state.config.rule_envelope = readRulesForm();
+    renderRulePresetNote();
     if (!$("rules-on").checked) return;
-    state.config.rule_envelope = readRulesForm();
     onConfigChanged();
   });
   $("rule-preset-save").addEventListener("click", saveRulePreset);
@@ -350,15 +495,22 @@ function bindRules() {
 /* boundary states disable with the reason instead of toasting on click */
 function syncRulePresetButtons() {
   const name = ($("rule-preset-name").value || "").trim();
-  $("rule-preset-save").disabled = !name;
-  $("rule-preset-save").title = name
-    ? "Save the current limits as a named preset"
-    : "Give the preset a name first (the Save as field).";
+  const clash = !!builtinRulePreset(name);
+  $("rule-preset-save").disabled = !name || clash;
+  $("rule-preset-save").title = clash
+    ? "That name belongs to a built-in draft preset — those stay as the "
+      + "document wrote them. Save your version under a different name."
+    : name
+      ? "Save the current limits as a named preset"
+      : "Give the preset a name first (the Save as field).";
   const sel = $("rule-preset").value;
-  $("rule-preset-del").disabled = !sel;
-  $("rule-preset-del").title = sel
-    ? `Delete the "${sel}" preset from this machine`
-    : "Select a preset to delete.";
+  const isBuiltin = !!builtinRulePreset(sel);
+  $("rule-preset-del").disabled = !sel || isBuiltin;
+  $("rule-preset-del").title = isBuiltin
+    ? "Built-in draft presets can't be deleted."
+    : sel
+      ? `Delete the "${sel}" preset from this machine`
+      : "Select a preset to delete.";
 }
 
 function renderRulePresetOptions() {
@@ -369,13 +521,38 @@ function renderRulePresetOptions() {
   none.value = "";
   none.textContent = "— none —";
   sel.appendChild(none);
-  for (const p of state.rulePresets) {
+  const group = (label) => {
+    const g = document.createElement("optgroup");
+    g.label = label;
+    sel.appendChild(g);
+    return g;
+  };
+  // built-ins in their own group: the user's library is theirs, these are
+  // quotations from a draft document and are labelled as such
+  const gb = group("Built in — FSAE 2027 draft (not valid for competition)");
+  for (const p of BUILTIN_RULE_PRESETS) {
     const o = document.createElement("option");
     o.value = p.name;
-    o.textContent = p.name;     // textContent: preset names are user data
-    sel.appendChild(o);
+    o.textContent = p.name;
+    gb.appendChild(o);
   }
-  sel.value = state.rulePresets.some((p) => p.name === cur) ? cur : "";
+  // a library entry carrying a built-in's name (written by an older build or
+  // copied between machines) would emit the same option value twice, and the
+  // built-in always wins the lookup — so it would load numbers other than the
+  // ones saved under that name, and could not be deleted. Never offer it.
+  const own = state.rulePresets.filter((p) => !builtinRulePreset(p.name));
+  if (own.length) {
+    const gu = group("Saved on this machine");
+    for (const p of own) {
+      const o = document.createElement("option");
+      o.value = p.name;
+      o.textContent = p.name;   // textContent: preset names are user data
+      gu.appendChild(o);
+    }
+  }
+  sel.value = (builtinRulePreset(cur)
+               || own.some((p) => p.name === cur)) ? cur : "";
+  renderRulePresetNote();
   syncRulePresetButtons();
 }
 
@@ -392,10 +569,21 @@ async function loadRulePresets() {
 async function saveRulePreset() {
   const name = ($("rule-preset-name").value || "").trim();
   if (!name) { toast("Give the preset a name first."); return; }
+  if (builtinRulePreset(name)) {
+    toast(`"${name}" is a built-in draft preset — save your version under a `
+          + `different name.`);
+    return;
+  }
   const env = readRulesForm();
+  // a preset's identity is its own name; the only thing worth keeping out of
+  // preset_name is which built-in draft the numbers came from, so a copy
+  // still carries the draft caveat into the report
+  const src = ruleDraftSource(env);
   delete env.preset_name;
-  if (env.max_length_mm == null && env.max_height_mm == null
-      && env.min_ground_clearance_mm == null) {
+  if (src) env.preset_name = src.name + RULE_DRAFT_MARK;
+  // any one limit makes a rule set: an envelope of nothing but an edge rule
+  // (a nose radius, a trailing-edge floor) is a perfectly real preset
+  if (!RULE_LIMIT_KEYS.some((k) => env[k] != null)) {
     toast("Enter at least one rule limit before saving.");
     return;
   }
@@ -409,7 +597,7 @@ async function saveRulePreset() {
     await api.rulePresetsSave(presets);
     state.rulePresets = presets;
     renderRulePresetOptions();
-    $("rule-preset").value = name;
+    setRulePreset(name);
     if ($("rules-on").checked) {
       state.config.rule_envelope = readRulesForm();
       onConfigChanged();
@@ -423,6 +611,10 @@ async function saveRulePreset() {
 async function deleteRulePreset() {
   const name = $("rule-preset").value;
   if (!name) { toast("Select a preset to delete."); return; }
+  if (builtinRulePreset(name)) {
+    toast("Built-in draft presets can't be deleted.");
+    return;
+  }
   const presets = state.rulePresets.filter((p) => p.name !== name);
   try {
     await api.rulePresetsSave(presets);
@@ -501,10 +693,11 @@ function elementCard(e, i) {
 function updateCardBadges(card, i) {
   const badges = card.querySelector(".el-badges");
   badges.innerHTML = "";
-  const add = (txt, cls = "") => {
+  const add = (txt, cls = "", title = "") => {
     const b = document.createElement("span");
     b.className = `badge ${cls}`;
     b.textContent = txt;
+    if (title) b.title = title;
     badges.appendChild(b);
   };
   add(`Re ${fmtRe(elementRe(i))}`);
@@ -521,6 +714,30 @@ function updateCardBadges(card, i) {
     if (ge.mfg.min_aft_thickness_mm != null) {
       add(`waist ${ge.mfg.min_aft_thickness_mm} mm`,
           ge.mfg.waist_ok ? "" : "crit");
+    }
+  }
+  // per-element rule verdicts: a missing key means the check does not reach
+  // this element (radius scope "frontmost"), which is not a pass to show
+  const ru = ge?.rules;
+  if (ru) {
+    if ("le_radius_ok" in ru) {
+      // an unmeasurable nose is unknown, not compliant — amber, never green
+      add(ru.le_radius_mm == null
+            ? "LE radius ?" : `LE radius ${ru.le_radius_mm} mm`,
+          ru.le_radius_ok === false ? "crit"
+            : ru.le_radius_ok == null ? "warn" : "");
+    }
+    // advisory, not a violation: the rule is met, the section pays for it.
+    // The badge is always on screen while the prose is only in the analysis
+    // warnings, so it carries its own explanation
+    if (ru.radius_cost_flag) {
+      add("nose cost", "warn",
+          "Advisory, not a violation: the required leading-edge radius is "
+          + "more than 5% of this element's chord, so meeting it costs "
+          + "suction peak and stall margin on this element.");
+    }
+    if (ru.te_thickness_mm != null) {
+      add(`TE rule ${ru.te_thickness_mm} mm`, ru.te_ok ? "" : "crit");
     }
   }
 }
@@ -675,6 +892,8 @@ function resultsSnapshot() {
     rans: state.ransResult,
     rans_stale: !!state.ransResult && state.ransRev != null
                 && configRevision > state.ransRev,
+    fl2d: fl2dResult,
+    fl2d_stale: !!fl2dResult && fl2dRev != null && configRevision > fl2dRev,
     sweep: state.lastSweep,
     sweep_stale: !!state.lastSweep && !$("map-stale").hidden,
     // the full library screen is ~500 KB of JSON — persist the top slice
@@ -767,6 +986,9 @@ function onConfigChanged() {
   // analysis overlays (CP marker) describe the previous geometry — clear
   // them until the next analyze completes
   if (viewport.xcp != null) viewport.setCp(null);
+  // the y+ ~ 1 recipe is derived from the operating point — what a blank
+  // ANSYS override would inherit moves with the configuration
+  syncAnsysPlaceholders();
   updateTargetC();
   scheduleGeometry();
   schedulePolarSync();
@@ -843,6 +1065,7 @@ function applyGeoValidity() {
   setBtn($("btn-sweep"));
   document.querySelectorAll("[data-export]").forEach(setBtn);
   setBtn($("btn-export-cfd"));
+  setBtn($("btn-export-fluent2d"));
   setBtn($("btn-report"));
   // the optimizer start button additionally answers to its own job state —
   // including the launch window before state.optJob is assigned
@@ -913,6 +1136,17 @@ function markStale() {
     if (kg) {
       kg.disabled = true;
       kg.title = "Calibrated on an earlier configuration — re-verify first.";
+    }
+  }
+  // same contract for a Fluent 2D result: it describes the design it solved
+  if (fl2dResult && fl2dRev != null && configRevision > fl2dRev) {
+    $("fl2d-stale").textContent = "configuration changed since this run — " +
+      "the numbers below describe the earlier design; re-run";
+    $("fl2d-stale").hidden = false;
+    const kg2 = document.getElementById("btn-fl2d-apply-kg");
+    if (kg2) {
+      kg2.disabled = true;
+      kg2.title = "Calibrated on an earlier configuration — re-run first.";
     }
   }
   // operating maps were swept for the previous configuration
@@ -1027,9 +1261,14 @@ function renderResults(res) {
       `${e.shadow_status !== "ok" ? " warn" : ""}" ` +
       `title="wake-shadow: the stream over this element's upper side ` +
       `bottoms at ${fmtN(e.shadow_min, 2)}·V∞ (measured separation line ` +
-      `0.50, caution band to 0.53)">wake-shadow ${fmtN(e.shadow_min, 2)}` +
+      `0.50, caution band to 0.53)` +
+      (e.shadow_knife_edge ? ` — knife-edge: within ±0.03 of the ` +
+        `cutoffs, so which side of the line it lands on is ` +
+        `calibration-band luck` : ``) +
+      `">wake-shadow ${fmtN(e.shadow_min, 2)}` +
       (e.shadow_status === "collapse" ? " — collapse"
         : e.shadow_status === "warn" ? " — gray band" : "") +
+      (e.shadow_knife_edge ? " · knife-edge" : "") +
       `</span></div>`;
     // the element label + loading % on one clean line; the detailed
     // coefficients on a muted subline below so nothing wraps mid-metric
@@ -1050,7 +1289,9 @@ function renderResults(res) {
   w.innerHTML = "";
   for (const msg of res.warnings || []) {
     const d = document.createElement("div");
-    const crit = /separation|intersect|choke/.test(msg);
+    // a rule violation is not a soft note — the part is not legal as drawn,
+    // while the radius-cost and unmeasurable-nose lines are advisories
+    const crit = /separation|intersect|choke/.test(msg) || msg.startsWith("Rule '");
     d.className = "warning-item" + (crit ? " crit" : "");
     d.textContent = msg;
     w.appendChild(d);
@@ -1074,9 +1315,7 @@ function resetWorkspaceResults() {
   state.screenRows = null;
   state.screenMeta = null;
   state.ransRerank = null;
-  ransFlowId = null;
-  ransFlowCache = null;
-  if (ransFlowUrl) { URL.revokeObjectURL(ransFlowUrl); ransFlowUrl = null; }
+  ransFlow.reset();   // id, cached images, objectURL and the animation
   // results panel
   $("results-body").hidden = true;
   $("results-empty").hidden = false;
@@ -1116,6 +1355,23 @@ function resetWorkspaceResults() {
   $("rans-stale").hidden = true;
   $("rans-progress").style.width = "0%";
   $("rans-progress").classList.remove("done");
+  // Fluent 2D
+  fl2dResult = null;
+  fl2dRev = null;
+  fl2dCEst = null;
+  fl2dLast = null;
+  fl2dAdoptedLive = false;
+  fl2dFlow.reset();   // id, cached images, objectURL and the animation
+  $("fl2d-conv").innerHTML = "";
+  $("fl2d-charts").classList.add("empty");
+  $("fl2d-result").innerHTML =
+    '<div class="empty-note">No run yet. Set up a section, then Run ' +
+    'Fluent 2D — meshing in ANSYS Workbench takes several minutes before ' +
+    'the solve starts.</div>';
+  $("fl2d-flow").hidden = true;
+  $("fl2d-stale").hidden = true;
+  $("fl2d-progress").style.width = "0%";
+  $("fl2d-progress").classList.remove("done");
   // maps
   $("map-downforce").innerHTML = "";
   $("map-ld").innerHTML = "";
@@ -1285,7 +1541,13 @@ document.querySelectorAll(".tab").forEach((t) => {
     if (t.dataset.tab === "polars") renderPolars();
     if (t.dataset.tab === "screener") prefillScreener();
     if (t.dataset.tab === "rans") refreshRansAvailability();
+    if (t.dataset.tab === "fluent2d") refreshFl2dAvailability();
     if (t.dataset.tab === "optimizer") reattachOptimizer();
+    // a flow animation owns a rAF loop, a resize observer and megabytes of
+    // field arrays, none of which a merely hidden panel releases — leaving
+    // the tab destroys the mount, returning rebuilds it
+    FLOW_VIEWS.forEach(v =>
+      v.tab === t.dataset.tab ? v.resume() : v.suspend());
   });
 });
 $("btn-goto-optimize").addEventListener("click", () => {
@@ -1304,6 +1566,7 @@ window.addEventListener("wss-themechange", () => {
   if (!active) return;
   if (active.dataset.tab === "polars") renderPolars();
   if (active.dataset.tab === "optimizer") reattachOptimizer();
+  if (active.dataset.tab === "fluent2d" && fl2dLast) renderFl2d(fl2dLast);
 });
 
 /* ---------------- polars tab ---------------- */
@@ -1887,9 +2150,14 @@ async function startRerank() {
   }
   busy($("btn-rerank"), true);
   try {
-    await api.ransQueueStart(items, $("rr-mesh").value);
+    // "MCxRANKS" -> concurrent solves x MPI ranks per solve; the serial
+    // default 1x1 reproduces the old sequential queue exactly
+    const [mc, ranks] = ($("rr-parallel").value || "1x1")
+      .split("x").map((v) => parseInt(v, 10) || 1);
+    await api.ransQueueStart(items, $("rr-mesh").value, 10000, ranks, mc);
     $("btn-rerank-cancel").disabled = false;
     $("rr-mesh").disabled = true;
+    $("rr-parallel").disabled = true;
     state.queueActive = true;
     updateSolverButtons();
     pollRerank();
@@ -1908,6 +2176,7 @@ function pollRerank() {
     busy($("btn-rerank"), false);
     $("btn-rerank-cancel").disabled = true;
     $("rr-mesh").disabled = false;
+    $("rr-parallel").disabled = false;
     state.queueActive = false;
     updateSolverButtons();
     if (msg) toast(msg);
@@ -2679,19 +2948,44 @@ async function checkRansAvailable() {
   return ransAvail;
 }
 
-/* the single verify run and the re-rank queue share one solver — reflect
-   the mutex on both start buttons instead of letting a click 409 */
+/* the single verify run, the re-rank queue and the Fluent 2D tab share one
+   solver registry — reflect the mutex on every start button instead of
+   letting a click 409 */
+
+/* a live run discovered in the registry but owned by the OTHER engine's
+   tab: rediscovery deliberately never adopts across engines (Cancel would
+   kill a job under its own tab), yet the start buttons must still show
+   the busy solver ("fluent2d" | "rans" | null). Each tab's availability
+   probe overwrites this from what the registry actually holds. */
+let solverForeignBusy = null;
+
+function foreignBusyTitle() {
+  return solverForeignBusy === "fluent2d"
+    ? "A Fluent 2D run started in another window or session is using the " +
+      "solver — the Fluent 2D tab re-attaches to it."
+    : "A solver run started in another window or session is using the " +
+      "solver — the RANS verify tab re-attaches to it.";
+}
+
 function updateSolverButtons() {
   const runBtn = $("btn-rans-run");
   if (state.queueActive) {
     runBtn.disabled = true;
     runBtn.title = "The optimizer's re-rank queue is using the solver — " +
                    "wait for it or cancel it from the Optimizer tab.";
+  } else if (fl2dJob) {
+    runBtn.disabled = true;
+    runBtn.title = "A Fluent 2D run is using the solver — wait for it or " +
+                   "cancel it in the Fluent 2D tab.";
+  } else if (solverForeignBusy) {
+    runBtn.disabled = true;
+    runBtn.title = foreignBusyTitle();
   } else if (ransAvail?.available && !state.ransJob) {
     runBtn.disabled = false;
     runBtn.title = "";
   }
   gateRerank();
+  gateFl2dRun();
 }
 
 /* Verify-shortlist gating: needs candidates, Docker, and a free solver */
@@ -2714,10 +3008,22 @@ async function gateRerank() {
                 "cancel it in the RANS verify tab.";
     return;
   }
+  if (fl2dJob) {
+    btn.disabled = true;
+    btn.title = "A Fluent 2D run is using the solver — wait for it or " +
+                "cancel it in the Fluent 2D tab.";
+    return;
+  }
+  if (solverForeignBusy) {
+    btn.disabled = true;
+    btn.title = foreignBusyTitle();
+    return;
+  }
   const a = await checkRansAvailable();
   // the world may have moved while the probe ran — never enable against
   // stale pre-await state
-  if (btn.classList.contains("busy") || state.queueActive || state.ransJob) {
+  if (btn.classList.contains("busy") || state.queueActive || state.ransJob
+      || fl2dJob || solverForeignBusy) {
     return;
   }
   if (!a.available) {
@@ -2728,10 +3034,11 @@ async function gateRerank() {
     return;
   }
   btn.disabled = false;
-  btn.title = "Runs the shortlist through the 2D RANS truth case, one at a " +
-              "time, then re-ranks on the measured numbers — by drag among " +
-              "the designs that hit the target, or by downforce in " +
-              "maximum-downforce mode.";
+  btn.title = "Runs the shortlist through the 2D RANS truth case — one at " +
+              "a time by default, or several solves at once with a " +
+              "parallel option — then re-ranks on the measured numbers: " +
+              "by drag among the designs that hit the target, or by " +
+              "downforce in maximum-downforce mode.";
 }
 
 async function refreshRansAvailability() {
@@ -2764,24 +3071,35 @@ async function refreshRansAvailability() {
     try {
       const cur = await api.ransCurrent();
       const queueOwned = !!queue?.rows?.some((r) => r.job_id === cur.job_id);
-      if (cur.job_id && !queueOwned
-          && ["pending", "running"].includes(cur.state)) {
+      // the Fluent 2D tab's jobs live in the same registry — adopting one
+      // here would let this tab's Cancel kill it under that tab, so probe
+      // the engine before claiming anything
+      const s = cur.job_id && !queueOwned
+        ? await api.ransStatus(cur.job_id) : null;
+      const fl2dOwned = s?.engine === "fluent2d";
+      // a live Fluent 2D run is not adopted here, but the Run button must
+      // still reflect the busy solver instead of 409ing on click
+      solverForeignBusy = fl2dOwned
+        && ["pending", "running"].includes(s.state) ? "fluent2d" : null;
+      if (s && !fl2dOwned && ["pending", "running"].includes(cur.state)) {
         state.ransJob = cur.job_id;
         $("btn-rans-run").disabled = true;
         $("btn-rans-cancel").disabled = false;
         $("rans-stale").hidden = true;
-        $("rans-flow").hidden = true;
+        // hiding the panel does not stop the animation's rAF loop, and the
+        // saved images predate this run
+        ransFlow.reset();
         $("rans-result").innerHTML =
           '<div class="empty-note">Re-attached to a running verification…</div>';
         pollRans();
-      } else if (cur.job_id && !queueOwned && cur.state === "done"
+      } else if (s && !fl2dOwned && cur.state === "done"
                  && state.ransResult?.id !== cur.job_id) {
-        const s = await api.ransStatus(cur.job_id);
         state.ransResult = s;
         state.ransRev = null;   // solved before this page session
         renderRans(s);
         renderRansResult(s, { provenance: "reattached" });
-        showRansFlow(s.id);
+        ransFlow.reset();   // saved images predate the run being adopted
+        ransFlow.show(s.id);
       } else if (cur.job_id && queueOwned && cur.state === "done"
                  && !state.ransResult) {
         $("rans-status").textContent = "idle — the last solver run belonged " +
@@ -2790,8 +3108,14 @@ async function refreshRansAvailability() {
       }
     } catch { /* rediscovery is best-effort */ }
   }
+  await checkRansAvailable();
+  applyRansAvailabilityNote();
+}
+
+/* the OpenFOAM truth case runs in a container — this tab needs Docker */
+function applyRansAvailabilityNote() {
   const note = $("rans-note");
-  const a = await checkRansAvailable();
+  const a = ransAvail || { available: false };
   if (a.available) {
     note.textContent = a.image_present
       ? `Docker ${a.docker} ready · ${a.image}`
@@ -2826,7 +3150,7 @@ async function startRansVerify() {
   // click-time single-flight: the mutex is otherwise only on button.disabled,
   // which two near-simultaneous triggers (a click plus Enter) can both pass
   // before the async ransStart lands and the server 409s
-  if (state.ransJob || state.queueActive) {
+  if (state.ransJob || state.queueActive || fl2dJob || solverForeignBusy) {
     toast("The solver is already busy — wait for the current run or the " +
           "re-rank queue to finish.", "info");
     return;
@@ -2836,7 +3160,9 @@ async function startRansVerify() {
   try {
     const { job_id } = await api.ransStart(
       state.config, $("rans-mesh").value,
-      Number.isFinite(iters) ? Math.min(Math.max(iters, 100), 20000) : 10000);
+      Number.isFinite(iters) ? Math.min(Math.max(iters, 100), 20000) : 10000,
+      parseInt($("rans-ranks").value, 10) || 1,
+      "openfoam");
     state.ransJob = job_id;
     // the target line must describe the config THIS run solves, not
     // whatever the form says later — snapshot the estimate at start
@@ -2847,11 +3173,13 @@ async function startRansVerify() {
     $("btn-rans-cancel").disabled = false;
     $("rans-mesh").disabled = true;   // snapshotted at start — lock mid-run
     $("rans-iters").disabled = true;
+    $("rans-ranks").disabled = true;
     $("rans-stale").hidden = true;
     $("rans-conv").innerHTML = "";   // previous run's chart is not this run
     $("rans-charts").classList.add("empty");   // until this run's history draws
-    $("rans-flow").hidden = true;
-    ransFlowCache = null;
+    // hiding the panel does not stop the animation's rAF loop, and the
+    // saved images predate this run
+    ransFlow.reset();
     $("rans-result").innerHTML =
       '<div class="empty-note">Verification running…</div>';
     updateSolverButtons();
@@ -2862,6 +3190,7 @@ async function startRansVerify() {
     // the button (it was disabled to close the double-start window)
     $("rans-mesh").disabled = false;
     $("rans-iters").disabled = false;
+    $("rans-ranks").disabled = false;
     updateSolverButtons();
   }
 }
@@ -2876,9 +3205,10 @@ function pollRans() {
       renderRans(s);
       // graceful stop is meaningful only while the solver iterates and no
       // writeNow is already pending (progress pins at 0.97 once one is)
-      $("btn-rans-stop").disabled = !(state.ransJob && s.state === "running"
-                                      && s.iteration > 0
-                                      && s.progress < 0.97);
+      const stopBtn = $("btn-rans-stop");
+      stopBtn.disabled = !(state.ransJob && s.state === "running"
+                           && s.iteration > 0
+                           && s.progress < 0.97);
       if (["done", "failed", "cancelled"].includes(s.state)) {
         clearInterval(state.ransPoll);
         state.ransJob = null;
@@ -2887,9 +3217,10 @@ function pollRans() {
         $("btn-rans-stop").disabled = true;
         $("rans-mesh").disabled = false;
         $("rans-iters").disabled = false;
+        $("rans-ranks").disabled = false;
         updateSolverButtons();
         if (s.state === "failed") {
-          toast("RANS verification failed — details in the RANS tab.", "err");
+          toast("RANS verification failed — details in the RANS verify tab.", "err");
           $("rans-result").innerHTML = "";
           const d = document.createElement("div");
           d.className = "warning-item crit";
@@ -2911,7 +3242,7 @@ function pollRans() {
             && configRevision !== state.ransRev;
           renderRansResult(s, { provenance: edited ? "edited" : "fresh" });
           if (edited) $("rans-stale").hidden = false;
-          showRansFlow(s.id);
+          ransFlow.show(s.id);
           markDirty();
           persistSession();
         }
@@ -2930,6 +3261,7 @@ function pollRans() {
       $("btn-rans-stop").disabled = true;
       $("rans-mesh").disabled = false;
       $("rans-iters").disabled = false;
+      $("rans-ranks").disabled = false;
       updateSolverButtons();
       toast(`Lost the RANS job: ${e.message} — reopen this tab to ` +
             `re-attach if it is still running.`);
@@ -2942,7 +3274,10 @@ function renderRans(s) {
   $("rans-progress").style.width = pct + "%";
   $("rans-progress").classList.toggle("done", s.state === "done");
   const bits = [s.state === "running" ? (s.phase || "running") : s.state];
-  if (s.mesh && Number.isFinite(+s.mesh.n_cells)) {
+  // n_cells can legitimately be null (count not parsed yet) — +null
+  // coerces to 0 and a phantom "0 cells" reads as a stuck mesher
+  if (s.mesh && s.mesh.n_cells != null
+      && Number.isFinite(+s.mesh.n_cells) && +s.mesh.n_cells > 0) {
     bits.push(`${(+s.mesh.n_cells).toLocaleString()} cells`);
   }
   if (s.iteration) bits.push(`iteration ${s.iteration} / ${s.n_iters}`);
@@ -3031,6 +3366,12 @@ function renderRansResult(s, { provenance = "fresh" } = {}) {
     w.textContent = `Estimate scope: ${r.estimate_scope_note}`;
     host.appendChild(w);
   }
+  if (r.engine_note) {
+    const w = document.createElement("div");
+    w.className = "warning-item";
+    w.textContent = r.engine_note;
+    host.appendChild(w);
+  }
   if (r.user_stopped) {
     const w = document.createElement("div");
     w.className = "warning-item";
@@ -3086,9 +3427,9 @@ function renderRansResult(s, { provenance = "fresh" } = {}) {
   if (r.suggested_k_g != null) {
     const d = document.createElement("div");
     d.className = "kv";
-    d.innerHTML = `<span title="Pinning the ground-gain factor to this value
-      makes the studio estimate reproduce the RANS sectional load at this
-      operating point.">suggested k<sub>g</sub></span>
+    d.innerHTML = `<span title="Pinning the ground-gain factor to this ` +
+      `value makes the studio estimate reproduce the RANS sectional load ` +
+      `at this operating point.">suggested k<sub>g</sub></span>
       <b>${esc(r.suggested_k_g)}
       <button id="btn-rans-apply-kg" class="btn tiny">Apply</button></b>`;
     host.appendChild(d);
@@ -3114,71 +3455,1214 @@ function renderRansResult(s, { provenance = "fresh" } = {}) {
   note.style.marginTop = "6px";
   note.innerHTML = `2D section truth check: RANS Cd is profile drag only —
     induced drag is a 3D effect and is compared in the studio's totals, not
-    here. Case retained at <code>${esc(r.case_dir)}</code> (fields, logs,
-    ParaView-openable <code>case.foam</code>).`;
+    here. Case retained at <code>${esc(r.case_dir)}</code>
+    (fields, logs, ParaView-openable <code>case.foam</code>).`;
   host.appendChild(note);
 }
 
 /* flow-field view: the solved section rendered server-side from the final
-   OpenFOAM fields, in the same as-driven orientation as the drawing */
-let ransFlowId = null;
-let ransFlowUrl = null;   // objectURL of the currently shown image
-let ransFlowSeq = 0;
-let ransFlowCache = null; // {umag?, cp?} dataURLs restored from a project file
+   fields, in the same as-driven orientation as the drawing.
 
-async function showRansFlow(jobId, field = "umag") {
-  ransFlowId = jobId;
-  const seq = ++ransFlowSeq;
-  $("rans-flow").hidden = false;
-  $("rans-flow-umag").classList.toggle("active", field === "umag");
-  $("rans-flow-cp").classList.toggle("active", field === "cp");
-  const img = $("rans-flow-img");
-  const note = $("rans-flow-note");
-  // a restored workspace carries the rendered images, not a live job
-  if (!jobId && ransFlowCache) {
-    if (ransFlowCache[field]) {
-      img.src = ransFlowCache[field];
-      img.style.opacity = "";
-      note.textContent = "restored from the project file — same view as " +
-        "the drawing: as driven, ground at the bottom, flow left to right";
-    } else {
-      note.textContent = "this field was not saved with the project — " +
-        "re-verify to render it";
-    }
-    return;
+   ONE factory drives both engines' panels. /api/rans/{id}/flow and its
+   flowfield sibling read the finished job's case directory, not whatever
+   engine filled it, and a Fluent 2D run writes its solved field out in
+   the same OpenFOAM form — so the two panels differ in their id prefix
+   and the wording of their captions, nothing else. Each instance owns
+   its own job id, image cache, request sequence and animation mount. */
+const FLOW_VIEWS = [];
+
+/* Both engines solve a STEADY field and both animations trace paths through
+   it — neither steps a flow forward in time, and a run stopped by hand is a
+   partial field, not a moment in one. One string, so the two captions cannot
+   drift apart on how honest they are. */
+const FLOW_ANIM_LEAD = "particles traced through the converged steady field, "
+                     + "a path picture rather than a time-accurate simulation";
+
+function makeFlowView(cfg) {
+  const el = (part) => $(`${cfg.prefix}-${part}`);
+  const view = {
+    tab: cfg.tab,
+    id: null,        // the live job behind the panel; null when restored
+    field: "umag",   // which view is currently shown
+    url: null,       // objectURL of the currently shown image
+    cache: null,     // {umag?, cp?} dataURLs restored from a project file
+    anim: null,      // {ctrl, jobId, styleKey, bg, detail} — the animation
+                     // and the detail window (if any) it is sampling
+  };
+  let seq = 0, lodSeq = 0;
+  // assigned by the static zoom/pan block below; a zoom belongs to the
+  // picture it was made on, so anything that swaps the picture clears it
+  let resetTransform = () => {};
+
+  /* the contour-dialog knobs (theme, colormap, range clamp, streamlines)
+     as fetch params — the same settings the manual GUI offers */
+  function settings() {
+    const theme = document.documentElement.dataset.theme === "light"
+      ? "light" : "dark";
+    const cmap = el("flow-cmap").value || "auto";
+    const vmaxRaw = parseFloat(el("flow-vmax").value);
+    const vmax = Number.isFinite(vmaxRaw) && vmaxRaw > 0 ? vmaxRaw : null;
+    return { theme, cmap, vmax,
+             streamlines: el("flow-streams").checked,
+             extent: el("flow-extent").value || "section" };
   }
-  note.textContent = "rendering the flow field…";
-  img.style.opacity = "0.4";
-  // fetched (not img.src) so a failure can show the server's actual reason
-  try {
-    const res = await fetch(`/api/rans/${jobId}/flow?field=${field}`);
-    if (seq !== ransFlowSeq) return;   // a newer request owns the panel
-    if (!res.ok) {
-      let detail = res.statusText;
-      try { detail = (await res.json()).detail || detail; } catch {}
-      note.textContent = `flow field unavailable: ${detail}`;
-      img.style.opacity = "";
+
+  function query(field) {
+    const s = settings();
+    let q = `&theme=${s.theme}&cmap=${s.cmap}` +
+            `&streamlines=${s.streamlines}&extent=${s.extent}`;
+    if (s.vmax != null) {
+      q += `&vmax=${s.vmax}`;
+      if (field === "cp") q += `&vmin=${-s.vmax}`;   // symmetric clamp
+    }
+    return q;
+  }
+
+  function teardownAnim() {
+    if (view.anim?.ctrl) view.anim.ctrl.destroy();
+    view.anim = null;
+  }
+
+  /* the caption states what the particles are and how far playback is
+     slowed — cfg.animLead carries the engine's own honest phrasing */
+  const animNote = () =>
+    `${cfg.animLead} — playback 1/${el("anim-speed").value}× real ` +
+    `time · Ctrl+wheel zooms, drag pans, double-click resets`;
+
+  /* level-of-detail: once the visible window is a fraction of the base
+     field AND the grid is visibly coarse on screen, refetch just that
+     window at full grid resolution — zooming never runs out of pixels */
+  async function lod(v) {
+    if (!view.anim) return;
+    // a settle scheduled by the last gesture still fires after a switch to a
+    // static view — refining (and re-captioning) a hidden animation is waste
+    if (!el("flow-anim").classList.contains("active")) return;
+    const { ctrl, jobId } = view.anim;
+    if (!jobId) return;
+    const base = ctrl.baseData;
+    const [bx0, by0, bx1, by1] = v.bbox;
+    const dpr = window.devicePixelRatio || 1;
+    // pxPerCell arrives measured on the ACTIVE grid, and a detail window is
+    // finer than the base at the same zoom — judging coarseness on it would
+    // revert every window on the settle right after it was installed. Rescale
+    // to the base grid, and keep a window (4) below the level that earns one
+    // (7) so refine and revert cannot alternate on consecutive settles.
+    const win = view.anim.detail;
+    const perBase = win
+      ? v.pxPerCell * (win.nx / (win.x1 - win.x0))
+                    * ((base.x1 - base.x0) / base.nx)
+      : v.pxPerCell;
+    const needDetail =
+      perBase > (win ? 4 : 7) * dpr
+      && (bx1 - bx0) < (base.x1 - base.x0) * 0.8;
+    const mySeq = ++lodSeq;
+    if (!needDetail) {
+      if (!ctrl.isBaseField()) { ctrl.setField(base); view.anim.detail = null; }
       return;
     }
-    const url = URL.createObjectURL(await res.blob());
-    if (ransFlowUrl) URL.revokeObjectURL(ransFlowUrl);
-    ransFlowUrl = url;
-    img.src = url;
-    img.style.opacity = "";
-    note.textContent = "same view as the drawing: as driven, ground at " +
-      "the bottom, flow left to right";
-  } catch (e) {
-    if (seq === ransFlowSeq) {
-      note.textContent = `flow field unavailable: ${e.message}`;
-      img.style.opacity = "";
+    // the installed window still covers the view at full sharpness: panning
+    // inside it needs nothing, and only a deeper zoom or a pan past its edge
+    // asks for a new one
+    if (win && v.pxPerCell <= 7 * dpr
+        && bx0 >= win.x0 && bx1 <= win.x1
+        && by0 >= win.y0 && by1 <= win.y1) return;
+    const mx = (bx1 - bx0) * 0.25, my = (by1 - by0) * 0.25;
+    let q = `x0=${(bx0 - mx).toFixed(5)}&y0=${(by0 - my).toFixed(5)}` +
+            `&x1=${(bx1 + mx).toFixed(5)}&y1=${(by1 + my).toFixed(5)}`;
+    // a Cp backdrop needs the Cp field in every detail window too
+    if (view.anim.bg === "cp") q += "&fields=umag,cp";
+    const note = el("flow-note");
+    note.textContent = animNote() + " · refining the zoomed view…";
+    try {
+      const res = await fetch(`/api/rans/${jobId}/flowfield?${q}`);
+      if (mySeq !== lodSeq || view.anim?.ctrl !== ctrl) return;
+      if (res.ok) {
+        // the body is MBs of arrays — a newer window can land while it
+        // parses, and a stale detail field must not clobber it
+        const data = await res.json();
+        if (mySeq !== lodSeq || view.anim?.ctrl !== ctrl) return;
+        ctrl.setField(data);
+        view.anim.detail = data;   // what pxPerCell now measures
+      }
+    } catch { /* keep the coarse field — zooming still works */ }
+    if (mySeq === lodSeq && view.anim?.ctrl === ctrl) {
+      note.textContent = animNote();
     }
+  }
+
+  async function showAnim(jobId) {
+    const mySeq = ++seq;
+    const note = el("flow-note");
+    const host = el("flow-canvas");
+    // nothing to play: leave the static raster and every animation control
+    // where they are, so no chrome implies a playable view
+    if (!jobId) {
+      note.textContent = "the animation reads the live run's velocity " +
+        `field, which is not saved with a project — ${cfg.rerun} to animate`;
+      return;
+    }
+    el("flow-img").style.display = "none";
+    host.hidden = false;
+    el("anim-speed-wrap").hidden = false;
+    // streamlines are a static-view overlay — the animation ignores them
+    el("flow-streams-wrap").hidden = true;
+    el("anim-trail-wrap").hidden = false;
+    el("anim-density-wrap").hidden = false;
+    el("anim-bg-wrap").hidden = false;
+    const s = settings();
+    const bg = el("anim-bg").value || "field";
+    const styleKey = `${s.theme}|${s.cmap}|${s.vmax}|${s.extent}|${bg}`;
+    if (view.anim && view.anim.jobId === jobId
+        && view.anim.styleKey === styleKey) {
+      view.anim.ctrl.start();
+      note.textContent = animNote();
+      return;
+    }
+    teardownAnim();
+    note.textContent = "extracting the velocity field…";
+    try {
+      const fields = bg === "cp" ? "&fields=umag,cp" : "";
+      const res = await fetch(
+        `/api/rans/${jobId}/flowfield?extent=${s.extent}${fields}`);
+      if (mySeq !== seq) return;   // a newer request owns the panel
+      if (!res.ok) {
+        let detail = res.statusText;
+        try { detail = (await res.json()).detail || detail; } catch {}
+        note.textContent = `animation unavailable: ${detail}`;
+        return;
+      }
+      const data = await res.json();
+      if (mySeq !== seq) return;
+      const ctrl = mountFlowAnim(host, data, {
+        slowdown: +el("anim-speed").value,
+        theme: s.theme,
+        cmap: s.cmap === "auto" ? null : s.cmap,
+        vmax: s.vmax,
+        trail: el("anim-trail").value,
+        density: +el("anim-density").value,
+        background: bg,
+        onViewSettled: lod,
+      });
+      view.anim = { ctrl, jobId, styleKey, bg, detail: null };
+      ctrl.start();
+      note.textContent = animNote();
+    } catch (e) {
+      if (mySeq === seq) {
+        note.textContent = `animation unavailable: ${e.message}`;
+      }
+    }
+  }
+
+  async function show(jobId, field = "umag") {
+    // a re-render of the same picture (theme, view settings) keeps the zoom;
+    // a different run or a different quantity does not
+    if (jobId !== view.id || field !== view.field) resetTransform();
+    view.id = jobId;
+    view.field = field;
+    el("flow").hidden = false;
+    el("flow-umag").classList.toggle("active", field === "umag");
+    el("flow-cp").classList.toggle("active", field === "cp");
+    el("flow-anim").classList.toggle("active", field === "anim");
+    if (view.anim && view.anim.jobId !== jobId) teardownAnim();
+    if (field === "anim") {
+      return showAnim(jobId);
+    }
+    view.anim?.ctrl.stop();
+    el("flow-canvas").hidden = true;
+    el("anim-speed-wrap").hidden = true;
+    el("anim-trail-wrap").hidden = true;
+    el("anim-density-wrap").hidden = true;
+    el("anim-bg-wrap").hidden = true;
+    el("flow-streams-wrap").hidden = false;
+    const mySeq = ++seq;
+    const img = el("flow-img");
+    img.style.display = "";
+    const note = el("flow-note");
+    // a restored workspace carries the rendered images, not a live job
+    if (!jobId && view.cache) {
+      if (view.cache[field]) {
+        img.src = view.cache[field];
+        img.style.opacity = "";
+        note.textContent = "restored from the project file — same view as " +
+          "the drawing: as driven, ground at the bottom, flow left to right";
+      } else {
+        // nothing may stay on screen under the field button just activated
+        img.removeAttribute("src");
+        img.style.opacity = "";
+        resetTransform();
+        note.textContent = "this field was not saved with the project — " +
+          `${cfg.rerun} to render it`;
+      }
+      return;
+    }
+    note.textContent = "rendering the flow field…";
+    img.style.opacity = "0.4";
+    // fetched (not img.src) so a failure can show the server's actual reason
+    try {
+      const res = await fetch(
+        `/api/rans/${jobId}/flow?field=${field}${query(field)}`);
+      if (mySeq !== seq) return;   // a newer request owns the panel
+      if (!res.ok) {
+        let detail = res.statusText;
+        try { detail = (await res.json()).detail || detail; } catch {}
+        note.textContent = `flow field unavailable: ${detail}`;
+        img.style.opacity = "";
+        return;
+      }
+      // the body still has to stream — a newer field can be requested,
+      // land and paint while it does, and must not be clobbered here
+      const blob = await res.blob();
+      if (mySeq !== seq) return;
+      const url = URL.createObjectURL(blob);
+      if (view.url) URL.revokeObjectURL(view.url);
+      view.url = url;
+      img.src = url;
+      img.style.opacity = "";
+      note.textContent = "same view as the drawing: as driven, ground at " +
+        "the bottom, flow left to right · Ctrl+wheel zooms, drag pans, " +
+        "double-click resets";
+    } catch (e) {
+      if (mySeq === seq) {
+        note.textContent = `flow field unavailable: ${e.message}`;
+        img.style.opacity = "";
+      }
+    }
+  }
+
+  const onActiveTab = () =>
+    document.querySelector(".tab.active")?.dataset.tab === cfg.tab;
+  let deferred = false;   // a settings change landed while the tab was away
+
+  /* view-settings changes re-render whichever view is showing (the
+     animation remounts with the new style; the static views refetch) */
+  function refresh() {
+    // captured images bake in the view settings — drop the capture cache so
+    // the next save re-grabs under the new settings, but only when a live
+    // job rendered this panel (view.id): a restored project's images are
+    // the only copy, and its result snapshot's id cannot be refetched
+    if (view.cache && view.id) {
+      view.cache = null;
+    }
+    if (el("flow").hidden || !(view.id || view.cache)) return;
+    // an unlaid-out panel measures zero — the animation would mount into a
+    // canvas of no size, so a hidden tab re-renders when it comes back
+    if (!onActiveTab()) { deferred = true; return; }
+    const field = el("flow-anim").classList.contains("active")
+      ? "anim" : view.field;
+    show(view.id, field);
+  }
+
+  /* one workspace's results — dropping them drops the panel, and the
+     animation holds a rAF loop, observers and the field arrays that a
+     merely hidden panel would keep alive */
+  function reset() {
+    view.id = null;
+    view.cache = null;
+    if (view.url) { URL.revokeObjectURL(view.url); view.url = null; }
+    teardownAnim();
+    resetTransform();
+    el("flow").hidden = true;
+  }
+
+  el("flow-umag").addEventListener("click", () =>
+    (view.id || view.cache) && show(view.id, "umag"));
+  el("flow-cp").addEventListener("click", () =>
+    (view.id || view.cache) && show(view.id, "cp"));
+  el("flow-anim").addEventListener("click", () =>
+    (view.id || view.cache) && show(view.id, "anim"));
+  el("anim-speed").addEventListener("change", () => {
+    view.anim?.ctrl.setSlowdown(+el("anim-speed").value);
+    if (view.anim) el("flow-note").textContent = animNote();
+  });
+  el("anim-trail").addEventListener("change", () => {
+    view.anim?.ctrl.setTrail(el("anim-trail").value);
+  });
+  el("anim-density").addEventListener("change", () => {
+    view.anim?.ctrl.setDensity(+el("anim-density").value);
+  });
+  // the backdrop changes what the fetch must carry (Cp) — remount
+  el("anim-bg").addEventListener("change", refresh);
+  el("flow-cmap").addEventListener("change", refresh);
+  el("flow-vmax").addEventListener("change", refresh);
+  el("flow-streams").addEventListener("change", refresh);
+  el("flow-extent").addEventListener("change", refresh);
+  // the rendered raster and the animation's chrome both bake the theme
+  // in — the animation re-inks by remounting under the new styleKey
+  window.addEventListener("wss-themechange", refresh);
+
+  /* static-image zoom/pan: CSS transform on the raster (the animated view
+     draws its own transform and handles these gestures itself) */
+  {
+    const vp = el("flow-viewport"), img = el("flow-img");
+    let s = 1, tx = 0, ty = 0, drag = null;
+    const apply = () => {
+      img.style.transform =
+        s === 1 ? "" : `translate(${tx}px,${ty}px) scale(${s})`;
+      // capture touch gestures only while zoomed — at s === 1 a finger drag
+      // must keep scrolling the page (same contract as the wheel handler)
+      vp.style.touchAction = s === 1 ? "" : "none";
+    };
+    resetTransform = () => { s = 1; tx = 0; ty = 0; apply(); };
+    const imgMode = () => el("flow-canvas").hidden && img.src;
+    vp.addEventListener("wheel", (e) => {
+      if (!imgMode()) return;
+      // plain wheel keeps scrolling the page; zoom is Ctrl+wheel so the
+      // panel never traps the scroll position
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      const r = vp.getBoundingClientRect();
+      const ns = Math.min(Math.max(s * Math.exp(-e.deltaY * 0.0016), 1), 12);
+      const f = ns / s;
+      tx = (e.clientX - r.left) - ((e.clientX - r.left) - tx) * f;
+      ty = (e.clientY - r.top) - ((e.clientY - r.top) - ty) * f;
+      s = ns;
+      if (s === 1) { tx = 0; ty = 0; }
+      apply();
+    }, { passive: false });
+    vp.addEventListener("pointerdown", (e) => {
+      if (!imgMode() || s === 1) return;
+      drag = { x: e.clientX, y: e.clientY };
+      vp.setPointerCapture?.(e.pointerId);
+    });
+    vp.addEventListener("pointermove", (e) => {
+      if (!drag) return;
+      tx += e.clientX - drag.x;
+      ty += e.clientY - drag.y;
+      drag = { x: e.clientX, y: e.clientY };
+      apply();
+    });
+    const end = () => { drag = null; };
+    vp.addEventListener("pointerup", end);
+    vp.addEventListener("pointercancel", end);
+    vp.addEventListener("dblclick", () => {
+      if (!imgMode()) return;
+      s = 1; tx = 0; ty = 0; apply();
+    });
+  }
+
+  Object.assign(view, {
+    query, show, refresh, reset,
+    // leaving the tab destroys the mount: hiding a panel does not stop
+    // its rAF loop, release its observer or free the field arrays. The
+    // sequence bump discards a fetch still in flight — it would otherwise
+    // mount into a display:none host, which measures zero, and start the
+    // very loop this releases; resume() then does a real mount instead.
+    suspend() { seq++; teardownAnim(); },
+    // returning rebuilds the animation from the same fetch that first
+    // drew it, and picks up any settings change made while away
+    resume() {
+      if (el("flow").hidden || !(view.id || view.cache)) return;
+      const anim = el("flow-anim").classList.contains("active");
+      if (!anim && !deferred) return;
+      deferred = false;
+      show(view.id, anim ? "anim" : view.field);
+    },
+  });
+  FLOW_VIEWS.push(view);
+  return view;
+}
+
+const ransFlow = makeFlowView({
+  prefix: "rans", tab: "rans", rerun: "re-verify",
+  animLead: FLOW_ANIM_LEAD,
+});
+
+/* ---------------- Fluent 2D tab ---------------- */
+
+/* The documented manual 2D workflow, automated end to end: profile+domain
+   DXF, ANSYS Workbench/Mechanical mesh, true-2D Fluent solve. State lives in
+   its own variables — the server registry serializes the actual runs, but
+   this tab's job and the RANS verify poll must never cross-wire. */
+let fl2dJob = null;
+let fl2dPoll = null;
+let fl2dAvail = null;
+let fl2dCEst = null;          // panel estimate snapshotted at start
+let fl2dRev = null;           // configRevision when the run started
+let fl2dResult = null;        // terminal status of the last finished run
+let fl2dLast = null;          // last rendered snapshot (theme re-ink)
+let fl2dConventions = null;   // conventions of the run being polled
+let fl2dAdoptedLive = false;  // run adopted mid-flight — start rev unknown
+
+/* ---- the ANSYS settings panel ----
+   One table for the override fields: the request key the server
+   range-checks, the control that carries it, and how the value parses.
+   Readers, writers, the run lock and the preset round-trip all walk this
+   list, so a new knob cannot land in one of them and miss another.
+   BLANK means "inherit" everywhere — never zero, never the placeholder. */
+const FL2D_OVERRIDES = [
+  ["edge_size_mm", "fl2d-edge-mm", "float"],
+  ["first_layer_mm", "fl2d-first-mm", "float"],
+  ["n_layers", "fl2d-layers", "int"],
+  ["growth", "fl2d-growth", "float"],
+  ["front_l", "fl2d-front-l", "float"],
+  ["back_l", "fl2d-back-l", "float"],
+  ["top_h", "fl2d-top-h", "float"],
+  ["sc_budget_s", "fl2d-sc-budget", "float"],
+  ["wb_budget_s", "fl2d-wb-budget", "float"],
+];
+/* the base recipe plus every override — what a preset stores and what a
+   run is started from */
+const FL2D_SETTING_IDS = ["fl2d-sizing", "fl2d-conventions", "fl2d-iters",
+                          "fl2d-ranks",
+                          ...FL2D_OVERRIDES.map(([, id]) => id)];
+const FL2D_CONTROLS = [...FL2D_SETTING_IDS, "fl2d-preset", "fl2d-preset-name",
+                       "fl2d-preset-save", "fl2d-preset-del"];
+function fl2dLockControls(on) {
+  for (const id of FL2D_CONTROLS) $(id).disabled = on;
+  // the preset buttons carry their own disabled-with-a-reason state, which
+  // has to be re-derived in BOTH directions: locking must replace the
+  // "name it first" reason with the run holding the settings, unlocking
+  // must restore it rather than enabling them unconditionally
+  syncAnsysPresetButtons();
+}
+
+/* what the chain falls back to when a domain or budget box is left blank —
+   the documented rectangle and the per-stage wall budgets */
+const FL2D_FALLBACKS = { front_l: 3, back_l: 7, top_h: 3,
+                         sc_budget_s: 300, wb_budget_s: 900 };
+
+/* The four mesh controls a sizing recipe resolves to, for DISPLAY only:
+   they fill the blank boxes' placeholders so the panel states the numbers
+   a run would inherit. "default" is the documented manual workflow's fixed
+   sizing; "studio-yplus1" derives the wall spacing from the operating point
+   the way the mesher does (y+ = 1 off the flat-plate correlation, edge size
+   at the fine preset's wall fraction). The run resolves its own values
+   server-side — nothing computed here is ever sent. */
+function fl2dRecipe(mode, cfg) {
+  if (mode !== "studio-yplus1") {
+    return { edge_size_mm: 0.1, first_layer_mm: 1, n_layers: 10, growth: 1.2 };
+  }
+  const chordM = (cfg.chord_mm || 0) / 1000;
+  const nu = cfg.nu || NU;
+  const re = (cfg.speed_ms * chordM) / nu;
+  const uTau = cfg.speed_ms * Math.sqrt(0.5 * 0.058 * Math.pow(re, -0.2));
+  return { edge_size_mm: 0.002 * chordM * 1000,
+           first_layer_mm: (2 * nu / uTau) * 1000,   // y+ = 1
+           n_layers: 30, growth: 1.2 };
+}
+
+/* a placeholder is a number the user may retype, so show it at the
+   precision it is used at — and never show NaN for a config that has no
+   usable operating point yet */
+const fl2dNum = (v) =>
+  Number.isFinite(v) ? String(+(+v).toPrecision(4)) : "recipe value";
+
+/* blank means "inherit", which is only readable if the box says WHAT it
+   would inherit — re-run whenever the recipe or the operating point moves */
+function syncAnsysPlaceholders() {
+  if (!$("fl2d-sizing")) return;
+  const src = { ...fl2dRecipe($("fl2d-sizing").value, state.config),
+                ...FL2D_FALLBACKS };
+  for (const [key, id] of FL2D_OVERRIDES) {
+    $(id).placeholder = fl2dNum(src[key]);
   }
 }
 
-$("rans-flow-umag").addEventListener("click", () =>
-  (ransFlowId || ransFlowCache) && showRansFlow(ransFlowId, "umag"));
-$("rans-flow-cp").addEventListener("click", () =>
-  (ransFlowId || ransFlowCache) && showRansFlow(ransFlowId, "cp"));
+/* the label the tooltips and the panel use, for naming the box a message
+   is about — never the request key, which is not on screen */
+const fl2dLabel = (id) =>
+  $(id).closest(".field")?.querySelector(".f-label")?.textContent || id;
+
+/* the overrides actually typed — a blank box is left OUT of the request so
+   the chain resolves it against the recipe instead of freezing a number.
+   NULL means the panel is unreadable and nothing may be started from it: a
+   value the browser cannot parse (a decimal comma, a stray character)
+   reports .value === "" and would read as blank, and a truncated or
+   dropped number is not recoverable once a licensed multi-minute run has
+   meshed on it. Say which box instead. */
+function readAnsysOverrides() {
+  const out = {};
+  for (const [key, id, kind] of FL2D_OVERRIDES) {
+    const el = $(id);
+    if (el.validity?.badInput) {
+      toast(`${fl2dLabel(id)}: that is not a number — clear the box to ` +
+            `use the recipe's own value.`);
+      return null;
+    }
+    const raw = (el.value || "").trim();
+    if (!raw) continue;
+    const v = Number(raw);   // Number, not parseFloat: "0.05abc" is an error
+    if (!Number.isFinite(v)) {
+      toast(`${fl2dLabel(id)}: that is not a number.`);
+      return null;
+    }
+    if (kind === "int" && !Number.isInteger(v)) {
+      toast(`${fl2dLabel(id)}: must be a whole number.`);
+      return null;
+    }
+    out[key] = v;
+  }
+  return out;
+}
+
+const clampInt = (v, lo, hi, fb) =>
+  Number.isFinite(v) ? Math.min(Math.max(v, lo), hi) : fb;
+
+/* the two integer controls that always carry a value: an unparseable box
+   also reads "" here, which would silently start the run on the fallback
+   instead of the number on screen — null says so rather than substituting */
+function readAnsysInt(id, lo, hi, fb) {
+  const el = $(id);
+  if (el.validity?.badInput) return null;
+  const raw = (el.value || "").trim();
+  if (!raw) return fb;
+  const v = Number(raw);
+  return Number.isFinite(v) ? clampInt(Math.round(v), lo, hi, fb) : null;
+}
+
+/* the whole panel as the settings object the preset endpoint stores: the
+   base recipe plus every override, an untouched one explicitly null. Null
+   for an unreadable panel — a preset that quietly dropped the box it could
+   not parse would hand the same wrong mesh back on every later load. */
+function readAnsysSettings() {
+  const over = readAnsysOverrides();
+  const n_iters = readAnsysInt("fl2d-iters", 50, 20000, 500);
+  const n_ranks = readAnsysInt("fl2d-ranks", 1, 32, 1);
+  if (!over || n_iters == null || n_ranks == null) {
+    if (over) toast("Iterations and solver cores must be whole numbers.");
+    return null;
+  }
+  const s = {
+    sizing: $("fl2d-sizing").value === "studio-yplus1"
+      ? "studio-yplus1" : "default",
+    conventions: $("fl2d-conventions").value === "studio"
+      ? "studio" : "default",
+    n_iters, n_ranks,
+  };
+  for (const [key] of FL2D_OVERRIDES) s[key] = null;
+  return Object.assign(s, over);
+}
+
+/* one writer for the panel: a preset that leaves an override null has to
+   CLEAR that box, not inherit whatever was typed before it */
+function fillAnsysSettings(s) {
+  $("fl2d-sizing").value = s?.sizing === "studio-yplus1"
+    ? "studio-yplus1" : "default";
+  $("fl2d-conventions").value = s?.conventions === "studio"
+    ? "studio" : "default";
+  $("fl2d-iters").value = s?.n_iters ?? 500;
+  $("fl2d-ranks").value = s?.n_ranks ?? 1;
+  for (const [key, id] of FL2D_OVERRIDES) $(id).value = s?.[key] ?? "";
+  syncAnsysPlaceholders();
+}
+
+/* one writer for the selection: assigning .value fires no change event, so
+   the Save/Delete buttons would otherwise describe a preset that is no
+   longer selected */
+function setAnsysPreset(name) {
+  const sel = $("fl2d-preset");
+  sel.value = [...sel.options].some((o) => o.value === name) ? name : "";
+  syncAnsysPresetButtons();
+}
+
+/* boundary states disable with the reason instead of toasting on click */
+function syncAnsysPresetButtons() {
+  const running = !!fl2dJob;
+  const name = ($("fl2d-preset-name").value || "").trim();
+  $("fl2d-preset-save").disabled = running || !name;
+  $("fl2d-preset-save").title = running
+    ? "A Fluent 2D run is using these settings — wait for it to finish."
+    : name
+      ? "Save the current ANSYS settings as a named preset"
+      : "Give the preset a name first (the Save as field).";
+  const sel = $("fl2d-preset").value;
+  $("fl2d-preset-del").disabled = running || !sel;
+  $("fl2d-preset-del").title = running
+    ? "A Fluent 2D run is using these settings — wait for it to finish."
+    : sel
+      ? `Delete the "${sel}" preset from this machine`
+      : "Select a preset to delete.";
+}
+
+function renderAnsysPresetOptions() {
+  const sel = $("fl2d-preset");
+  const cur = sel.value;
+  sel.innerHTML = "";
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "— none —";
+  sel.appendChild(none);
+  for (const p of state.ansysPresets) {
+    const o = document.createElement("option");
+    o.value = p.name;
+    o.textContent = p.name;   // textContent: preset names are user data
+    sel.appendChild(o);
+  }
+  sel.value = state.ansysPresets.some((p) => p.name === cur) ? cur : "";
+  syncAnsysPresetButtons();
+}
+
+async function loadAnsysPresets() {
+  try {
+    const res = await api.ansysPresets();
+    state.ansysPresets = res.presets || [];
+  } catch {
+    state.ansysPresets = [];   // endpoint unreachable: an empty library
+  }
+  renderAnsysPresetOptions();
+}
+
+async function saveAnsysPreset() {
+  const name = ($("fl2d-preset-name").value || "").trim();
+  if (!name) { toast("Give the preset a name first."); return; }
+  const settings = readAnsysSettings();
+  if (!settings) return;   // the panel said which box; nothing is stored
+  // case-insensitive overwrite, matching the server's duplicate check —
+  // else saving "parity" over "Parity" 422s as a duplicate
+  const presets = [...state.ansysPresets.filter(
+                     (p) => p.name.toLowerCase() !== name.toLowerCase()),
+                   { name, settings }]
+    .sort((a, b) => a.name.localeCompare(b.name));
+  try {
+    await api.ansysPresetsSave(presets);
+    state.ansysPresets = presets;
+    renderAnsysPresetOptions();
+    setAnsysPreset(name);
+    toast(`ANSYS preset "${name}" saved.`, "good");
+  } catch (e) {
+    toast(`Preset not saved: ${e.message}`);
+  }
+}
+
+async function deleteAnsysPreset() {
+  const name = $("fl2d-preset").value;
+  if (!name) { toast("Select a preset to delete."); return; }
+  const presets = state.ansysPresets.filter((p) => p.name !== name);
+  try {
+    await api.ansysPresetsSave(presets);
+    state.ansysPresets = presets;
+    // the values on screen stay (they are what the next run would use) but
+    // they no longer come from a library preset
+    renderAnsysPresetOptions();
+    setAnsysPreset("");
+    toast(`ANSYS preset "${name}" deleted.`, "good");
+  } catch (e) {
+    toast(`Preset not deleted: ${e.message}`);
+  }
+}
+
+function bindAnsysSettings() {
+  // the recipe drives what a blank box inherits, so its placeholders move
+  // with the selection
+  $("fl2d-sizing").addEventListener("change", syncAnsysPlaceholders);
+  for (const id of FL2D_SETTING_IDS) {
+    // a hand edit is no longer the preset that was selected — but the
+    // values stay, they are what the next run would use
+    $(id).addEventListener("input", () => setAnsysPreset(""));
+  }
+  $("fl2d-preset").addEventListener("change", () => {
+    const p = state.ansysPresets.find(
+      (x) => x.name === $("fl2d-preset").value);
+    if (p) {
+      fillAnsysSettings(p.settings);
+      $("fl2d-preset-name").value = p.name;
+    }
+    syncAnsysPresetButtons();
+  });
+  $("fl2d-preset-save").addEventListener("click", saveAnsysPreset);
+  $("fl2d-preset-del").addEventListener("click", deleteAnsysPreset);
+  $("fl2d-preset-name").addEventListener("input", syncAnsysPresetButtons);
+  syncAnsysPlaceholders();
+  syncAnsysPresetButtons();
+}
+
+function gateFl2dRun() {
+  const btn = $("btn-fl2d-run");
+  if (fl2dJob) {
+    btn.disabled = true;
+    btn.title = "";
+    return;
+  }
+  if (state.ransJob || state.queueActive) {
+    btn.disabled = true;
+    btn.title = "The solver is busy (a RANS verify run or the re-rank " +
+                "queue) — wait for it to finish or cancel it first.";
+    return;
+  }
+  if (solverForeignBusy) {
+    btn.disabled = true;
+    btn.title = foreignBusyTitle();
+    return;
+  }
+  if (!fl2dAvail?.available) {
+    btn.disabled = true;
+    btn.title = "Needs a local ANSYS installation — the note beside this " +
+                "button says what is missing.";
+    return;
+  }
+  btn.disabled = false;
+  btn.title = "";
+}
+
+function applyFl2dAvailabilityNote() {
+  const note = $("fl2d-note");
+  const a = fl2dAvail || { available: false };
+  if (a.available) {
+    const ver = a.workbench?.version ? ` ${a.workbench.version}` : "";
+    note.textContent = `ANSYS Workbench${ver} and Fluent found — a run ` +
+      `holds a license seat from meshing through the solve`;
+  } else if (a.probe_error) {
+    note.textContent = `Could not check the ANSYS toolchain: ${a.probe_error}`;
+  } else {
+    const missing = [
+      a.workbench && !a.workbench.available ? a.workbench.detail : null,
+      a.fluent && !a.fluent.available ? a.fluent.detail : null,
+    ].filter(Boolean).join(" · ")
+      || a.detail || "no local ANSYS installation found";
+    note.textContent = `ANSYS toolchain unavailable — ${missing}`;
+  }
+  gateFl2dRun();
+}
+
+async function refreshFl2dAvailability() {
+  // a theme change while this tab was hidden left the chart in old ink —
+  // redraw now that the host is visible and measurable
+  if (fl2dLast) renderFl2d(fl2dLast);
+  // re-attach a Fluent 2D run this page lost (reload, second window). A
+  // LIVE run always wins over the shown result; a done run is adopted only
+  // when it is not the one already displayed. Jobs of any other engine
+  // belong to the RANS verify tab (or the re-rank queue) — leave them alone.
+  if (!fl2dJob) {
+    try {
+      const cur = await api.ransCurrent();
+      const s = cur.job_id ? await api.ransStatus(cur.job_id) : null;
+      const live = !!s && ["pending", "running"].includes(s.state);
+      // a live run of another engine is not adopted, but the Run button
+      // must still reflect the busy solver instead of 409ing on click
+      solverForeignBusy = live && s.engine !== "fluent2d" ? "rans" : null;
+      if (live && s.engine === "fluent2d") {
+        fl2dJob = cur.job_id;
+        fl2dConventions = s.conventions ?? null;
+        fl2dRev = null;             // start revision is unverifiable
+        fl2dAdoptedLive = true;     // completion renders as re-attached
+        fl2dFlow.reset();           // saved images predate this run
+        $("btn-fl2d-cancel").disabled = false;
+        fl2dLockControls(true);
+        $("fl2d-stale").hidden = true;
+        $("fl2d-flow").hidden = true;
+        $("fl2d-result").innerHTML =
+          '<div class="empty-note">Re-attached to a running Fluent 2D ' +
+          'run…</div>';
+        updateSolverButtons();
+        pollFl2d();
+      } else if (s && s.engine === "fluent2d" && s.state === "done"
+                 && fl2dResult?.id !== cur.job_id) {
+        fl2dResult = s;
+        fl2dRev = null;   // solved before this page session
+        fl2dFlow.reset();   // saved images predate this run
+        renderFl2d(s);
+        renderFl2dResult(s, { provenance: "reattached" });
+        fl2dFlow.show(s.id);
+      }
+    } catch { /* rediscovery is best-effort */ }
+  }
+  try {
+    fl2dAvail = await api.fluent2dAvailability();
+  } catch (e) {
+    fl2dAvail = { available: false, probe_error: e.message };
+  }
+  applyFl2dAvailabilityNote();
+}
+
+$("btn-fl2d-run").addEventListener("click", startFl2d);
+$("btn-fl2d-cancel").addEventListener("click", async () => {
+  if (fl2dJob) { try { await api.ransCancel(fl2dJob); } catch {} }
+});
+
+async function startFl2d() {
+  // click-time single-flight, same reasoning as startRansVerify: the
+  // disabled flag alone cannot stop a click+Enter pair racing the await
+  if (fl2dJob || state.ransJob || state.queueActive || solverForeignBusy) {
+    toast("The solver is already busy — wait for the current run or the " +
+          "re-rank queue to finish.", "info");
+    return;
+  }
+  // a box the panel cannot read aborts BEFORE anything is locked or
+  // started — a run must never mesh on a number other than the one shown
+  const overrides = readAnsysOverrides();
+  if (!overrides) return;
+  const iters = readAnsysInt("fl2d-iters", 50, 20000, 500);
+  const ranks = readAnsysInt("fl2d-ranks", 1, 32, 1);
+  if (iters == null || ranks == null) {
+    toast("Iterations and solver cores must be whole numbers.");
+    return;
+  }
+  $("btn-fl2d-run").disabled = true;   // close the window before the await
+  try {
+    const conventions =
+      $("fl2d-conventions").value === "studio" ? "studio" : "default";
+    // a blank override box is absent from the request, not zero — the
+    // chain resolves it against the sizing recipe
+    const { job_id } = await api.ransStart(
+      state.config, $("fl2d-sizing").value, iters, ranks,
+      "fluent2d", "fluent", conventions, overrides);
+    fl2dJob = job_id;
+    fl2dConventions = conventions;
+    // the comparison must describe the config THIS run solves — snapshot
+    // the estimate and the revision at start
+    fl2dCEst = state.analysis?.coefficients?.C_downforce_estimated ?? null;
+    fl2dRev = configRevision;
+    fl2dAdoptedLive = false;   // this page started the run — rev is known
+    fl2dFlow.reset();          // saved images predate this run
+    $("btn-fl2d-cancel").disabled = false;
+    fl2dLockControls(true);   // snapshotted at start — lock mid-run
+    $("fl2d-stale").hidden = true;
+    $("fl2d-conv").innerHTML = "";   // previous run's chart is not this run
+    $("fl2d-charts").classList.add("empty");
+    $("fl2d-flow").hidden = true;
+    $("fl2d-result").innerHTML =
+      '<div class="empty-note">Run started — geometry to DXF, then ANSYS ' +
+      'Workbench meshing (several minutes), then the 2D solve…</div>';
+    updateSolverButtons();
+    pollFl2d();
+  } catch (e) {
+    toast(`Could not start the Fluent 2D run: ${e.message}`);
+    // the run never started — restore the controls and re-gate the button
+    fl2dLockControls(false);
+    updateSolverButtons();
+  }
+}
+
+function pollFl2d() {
+  clearInterval(fl2dPoll);
+  let misses = 0;
+  fl2dPoll = setInterval(async () => {
+    try {
+      const s = await api.ransStatus(fl2dJob);
+      misses = 0;
+      renderFl2d(s);
+      if (["done", "failed", "cancelled"].includes(s.state)) {
+        clearInterval(fl2dPoll);
+        fl2dJob = null;
+        $("btn-fl2d-cancel").disabled = true;
+        fl2dLockControls(false);
+        updateSolverButtons();
+        if (s.state === "failed") {
+          toast("Fluent 2D run failed — details in the Fluent 2D tab.",
+                "err");
+          $("fl2d-result").innerHTML = "";
+          const d = document.createElement("div");
+          d.className = "warning-item crit";
+          d.style.whiteSpace = "pre-wrap";
+          d.textContent = s.error || "run failed";
+          $("fl2d-result").appendChild(d);
+        }
+        if (s.state === "cancelled") {
+          $("fl2d-result").innerHTML =
+            '<div class="empty-note">Run cancelled.</div>';
+        }
+        if (s.state === "done") {
+          fl2dResult = s;
+          // a mid-run config edit means these numbers describe the design
+          // at start, not the current form — say so and hold back the
+          // one-click k_g calibration (same guard the RANS tab has). A run
+          // adopted mid-flight has no verifiable start revision, so it
+          // must not present as fresh either — it keeps the re-attached
+          // wording, which also disables the one-click k_g
+          const prov = fl2dAdoptedLive ? "reattached"
+            : (fl2dRev != null && configRevision !== fl2dRev
+               ? "edited" : "fresh");
+          renderFl2dResult(s, { provenance: prov });
+          fl2dFlow.show(s.id);
+        }
+      }
+    } catch (e) {
+      // a lost poll must not orphan the run — it keeps solving server-side;
+      // ride out transient failures, detach only on 404 or a persistent
+      // outage (the tab re-attaches through /api/rans/current either way)
+      misses++;
+      if (e.status !== 404 && misses < 5) return;
+      clearInterval(fl2dPoll);
+      fl2dJob = null;
+      $("btn-fl2d-cancel").disabled = true;
+      fl2dLockControls(false);
+      updateSolverButtons();
+      toast(`Lost the Fluent 2D job: ${e.message} — reopen this tab to ` +
+            `re-attach if it is still running.`);
+    }
+  }, 1000);
+}
+
+function renderFl2d(s) {
+  fl2dLast = s;
+  const pct = Math.round((s.progress || 0) * 100);
+  $("fl2d-progress").style.width = pct + "%";
+  $("fl2d-progress").classList.toggle("done", s.state === "done");
+  const bits = [s.state === "running" ? (s.phase || "running") : s.state];
+  if (s.mesh && s.mesh.n_cells != null
+      && Number.isFinite(+s.mesh.n_cells) && +s.mesh.n_cells > 0) {
+    bits.push(`${(+s.mesh.n_cells).toLocaleString()} cells`);
+  }
+  if (s.iteration) bits.push(`iteration ${s.iteration} / ${s.n_iters}`);
+  if (s.latest) bits.push(`Cl ${numf(s.latest.cl, 3)}`,
+                          `Cd ${numf(s.latest.cd, 4)}`);
+  bits.push(`${Math.round(+s.elapsed_s || 0)}s`);
+  $("fl2d-status").textContent = bits.join(" · ");
+  if (s.history && s.history.length > 1) {
+    // reveal the convergence half BEFORE lineChart measures its width
+    $("fl2d-charts").classList.remove("empty");
+    // the two conventions chart different quantities: the default
+    // reports Fluent's raw lift_coef (reference area 1 m², lift-positive),
+    // which
+    // the panel C_est (chord-referenced, downforce-positive) cannot be
+    // drawn against — the estimate line appears only under studio
+    // conventions, where the report definition matches
+    const conv = s.conventions || s.result?.conventions || fl2dConventions;
+    const cEst = conv === "studio"
+      ? (s.result?.panel?.c_est ?? fl2dCEst) : null;
+    lineChart($("fl2d-conv"), {
+      series: [{ name: "Cl (Fluent)", color: SERIES[0],
+                 x: s.history.map(h => h.iter),
+                 y: s.history.map(h => h.cl) }],
+      xLabel: "iteration",
+      yLabel: conv === "studio" ? "Cl (downforce +)" : "Cl (Fluent report)",
+      targetY: cEst ?? undefined,
+      targetLabel: cEst != null
+        ? `panel C_est ${(+cEst).toFixed(2)}` : undefined,
+      height: 180,
+    });
+  }
+}
+
+function renderFl2dResult(s, { provenance = "fresh" } = {}) {
+  const r = s.result;
+  if (!r) return;
+  const host = $("fl2d-result");
+  // numbers that predate this page session cannot be tied to the current
+  // form — say which configuration they describe
+  if (provenance !== "fresh") {
+    $("fl2d-stale").textContent = provenance === "restored"
+      ? "restored result — it describes the configuration it was saved " +
+        "with; re-run to check the current one"
+      : provenance === "edited"
+      ? "the configuration was edited while this run solved — the numbers " +
+        "below describe the design at start; re-run"
+      : "re-attached result from an earlier run — it may describe an " +
+        "earlier configuration; re-run to be sure";
+    $("fl2d-stale").hidden = false;
+  }
+  const p = r.panel;
+  const pct = (v) => v == null ? "–"
+    : `${v > 0 ? "+" : ""}${(+v).toFixed(1)}%`;
+  const kv = ([k, v]) => `<div class="kv"><span>${k}</span><b>${v}</b></div>`;
+  // headline is the chord-referenced downforce-positive coefficient; the
+  // raw Fluent numbers (the ones the GUI shows) stay visible as the
+  // default-convention line with the reference note right under it
+  const head = [
+    ["C<sub>ΔF</sub> — Fluent 2D (downforce +, chord-referenced)",
+      numf(r.cl_chord, 3)],
+    ["Cd — Fluent 2D (chord-referenced)", numf(r.cd_chord, 4)],
+    ["Default conventions — Fluent's own report",
+      `Cl ${numf(r.cl_raw, 4)} · Cd ${numf(r.cd_raw, 5)}`],
+  ];
+  const rest = [
+    ["Sectional Cl — panel C_est", p ? numf(p.c_est, 3) : "–"],
+    ["Cl delta (Fluent vs estimate)", pct(r.delta_cl_pct)
+      + (r.delta_cl_provisional && r.delta_cl_pct != null ? " *" : "")],
+    ["Downforce at measured Cl", `${esc(r.downforce_n_at_rans_cl)} N`],
+    ["Downforce — panel estimate", p ? `${esc(p.downforce_n)} N` : "–"],
+    ["Iterations", `${esc(r.n_iters_run)} (${esc(r.stop_reason)}; ` +
+      `tail mean of ${esc(r.tail_rows)})`],
+  ];
+  // The panel unlocks the moment a run ends, so the boxes on screen need
+  // not describe the run beside them — the card states the RESOLVED set the
+  // run carried. A result saved before this surface existed has no settings
+  // key at all and must still render.
+  const st = s.settings ?? r.settings;
+  const sizing = r.sizing ?? s.mesh_size ?? "?";
+  let overridden = false;
+  if (st) {
+    // "†" marks a number that is not the recipe's own. Computable only
+    // where the recipe is a constant: the resolved-wall sizing follows the
+    // operating point the run started from, which is not recoverable here.
+    const base = { ...(sizing === "default"
+                       ? fl2dRecipe("default", state.config) : {}),
+                   ...FL2D_FALLBACKS };
+    const v = (k, unit = "") => {
+      const off = base[k] != null && +base[k] !== +st[k];
+      overridden = overridden || off;
+      return `${esc(st[k])}${unit}${off ? "†" : ""}`;
+    };
+    rest.push(
+      ["Mesh as run", `${esc(sizing)} · edge ${v("edge_size_mm", " mm")} · ` +
+        `first layer ${v("first_layer_mm", " mm")} × ` +
+        `${v("n_layers")} layers at growth ${v("growth")}`],
+      ["Domain / stage budgets",
+        `${v("front_l")} L ahead, ${v("back_l")} L behind, ` +
+        `${v("top_h")} H above · ${v("sc_budget_s", " s")} + ` +
+        `${v("wb_budget_s", " s")}`]);
+  } else {
+    rest.push(["Mesh as run",
+      `${esc(sizing)} — this run predates the settings record, so the ` +
+      `numbers it used are not stated`]);
+  }
+  host.innerHTML = head.map(kv).join("")
+    + (r.ref_note
+       ? `<p class="note" style="margin:2px 0 6px">${esc(r.ref_note)}</p>`
+       : "")
+    + rest.map(kv).join("");
+  if (overridden) {
+    const n = document.createElement("p");
+    n.className = "note";
+    n.style.margin = "2px 0 6px";
+    n.textContent = "† set by hand for this run, overriding the sizing " +
+      "recipe's own number — the recipe label is unchanged by design.";
+    host.appendChild(n);
+  }
+  // what the mesher actually built off the wall: the layer stack is capped
+  // to the slot and ground clearances it faces, and dropped outright if
+  // Mechanical still fails, so the requested count above is not always the
+  // count that was cut
+  const infl = s.mesh?.inflation;
+  if (infl && infl.note) {
+    const w = document.createElement("div");
+    w.className = infl.degraded ? "warning-item crit" : "warning-item";
+    w.textContent = `Inflation: ${infl.note}`;
+    host.appendChild(w);
+  }
+  if (r.residual_stop) {
+    const w = document.createElement("div");
+    w.className = "warning-item";
+    w.textContent = "Fluent's default residual criteria ended the run " +
+      "before the requested iteration count — the documented manual " +
+      "ANSYS workflow reads that as converged; the drift figures here " +
+      "still say how flat the " +
+      "force history actually was at the stop.";
+    host.appendChild(w);
+  }
+  if (r.cl_trend_note) {
+    const w = document.createElement("div");
+    w.className = "warning-item";
+    w.textContent = r.cl_trend_note;
+    host.appendChild(w);
+  }
+  if (r.estimate_scope_note) {
+    const w = document.createElement("div");
+    w.className = "warning-item";
+    w.textContent = `Estimate scope: ${r.estimate_scope_note}`;
+    host.appendChild(w);
+  }
+  if (r.engine_note) {
+    const w = document.createElement("div");
+    w.className = "warning-item";
+    w.textContent = r.engine_note;
+    host.appendChild(w);
+  }
+  if (!r.converged) {
+    const w = document.createElement("div");
+    w.className = "warning-item crit";
+    const capped = String(r.stop_reason || "").startsWith("iteration cap");
+    w.textContent = `NOT CONVERGED — ` +
+      `${r.stop_reason || "the force history had not settled when the run ended"}` +
+      (r.cl_drift != null ? ` (Cl drift ${(r.cl_drift * 100).toFixed(1)}% ` +
+        `per window)` : ``) +
+      `. The numbers above are a mid-transient snapshot, not a result: ` +
+      (capped
+        ? `raise Iterations and re-run.`
+        : `re-run; if it ends early again, step up the sizing.`) +
+      ` No k_g calibration is offered from an unconverged run.`;
+    host.appendChild(w);
+  }
+  if (!p && r.panel_error) {
+    const w = document.createElement("div");
+    w.className = "warning-item";
+    w.textContent = `The panel-model comparison could not be computed ` +
+      `(${r.panel_error}) — the Fluent numbers above stand on their own.`;
+    host.appendChild(w);
+  }
+  if (r.mesh_caution) {
+    const w = document.createElement("div");
+    w.className = "warning-item";
+    w.textContent = typeof r.mesh_caution === "string" ? r.mesh_caution
+      : "This sizing is not calibrated against the campaign's truth " +
+        "cases — treat the delta as screening and pin k_g only from a " +
+        "run you trust.";
+    host.appendChild(w);
+  }
+  if (r.suggested_k_g != null) {
+    const d = document.createElement("div");
+    d.className = "kv";
+    d.innerHTML = `<span title="Pinning the ground-gain factor to this ` +
+      `value makes the studio estimate reproduce the measured sectional ` +
+      `load at this operating point.">suggested k<sub>g</sub></span>
+      <b>${esc(r.suggested_k_g)}
+      <button id="btn-fl2d-apply-kg" class="btn tiny">Apply</button></b>`;
+    host.appendChild(d);
+    const kg = $("btn-fl2d-apply-kg");
+    if (provenance !== "fresh") {
+      // k_g calibrated on another (or unknown) config must not be pinned
+      // onto this one with one click
+      kg.disabled = true;
+      kg.title = "Calibrated on the configuration this run solved — " +
+                 "re-run the current configuration to calibrate k_g.";
+    } else {
+      kg.addEventListener("click", () => {
+        state.config.k_g = r.suggested_k_g;
+        writeConfigToForm();
+        onConfigChanged();
+        toast(`k_g pinned to ${r.suggested_k_g} — re-analyze to see the ` +
+              `calibrated estimate.`, "good", 6000);
+      });
+    }
+  }
+  // the solved case+data live beside the run — offer the durable copy
+  // under exports/ (same provenance gate as the RANS tab: an id from a
+  // restored snapshot would only 404)
+  if (s.id && provenance !== "restored") {
+    const b = document.createElement("button");
+    b.className = "btn small";
+    b.style.marginTop = "8px";
+    b.textContent = "Export case for ANSYS…";
+    b.title = "Copies the solved case+data (case.cas.h5 / case.dat.h5) " +
+      "and a README into exports/ — open in Fluent via File > Read > " +
+      "Case & Data.";
+    b.addEventListener("click", async () => {
+      busy(b, true);
+      try {
+        const saved = await api.ransExportFluent(s.id);
+        lastExport = { ...saved, fmt: null };
+        $("exp-dlg-name").textContent = saved.filename;
+        $("exp-dlg-size").textContent =
+          `${saved.files.join(" · ")} — ` +
+          `${(saved.size_bytes / 1048576).toFixed(1)} MB` +
+          (saved.data_included ? "" : " (no .dat.h5 — the data write " +
+                                      "did not land; re-run to export " +
+                                      "solved fields)");
+        $("exp-dlg-path").textContent = saved.path;
+        $("exp-dlg-download").hidden = true;
+        $("export-dialog").showModal();
+      } catch (e) {
+        toast(`ANSYS export failed: ${e.message}`);
+      } finally {
+        busy(b, false);
+      }
+    });
+    host.appendChild(b);
+  }
+  const note = document.createElement("p");
+  note.className = "note";
+  note.style.marginTop = "6px";
+  note.innerHTML = `True-2D case: Cd is profile drag only — induced drag
+    is a 3D effect and is compared in the studio's totals, not here.
+    <b>Use the Export button above</b> before opening this run in Fluent:
+    it writes <code>case.cas.h5</code> / <code>case.dat.h5</code> into
+    exports/, which is never cleaned up. Open that copy with File &gt;
+    Read &gt; Case &amp; Data. The working copy under
+    <code>${esc(r.case_dir)}</code> is scratch space — only the last few
+    runs are kept, so a path saved from there stops resolving once older
+    runs age out.`;
+  host.appendChild(note);
+}
+
+/* the same panel as the RANS verify tab, one instance further: the
+   Fluent 2D run's exported field reads through the identical endpoints,
+   so the only differences are the id prefix and the caption's wording —
+   the animation traces a converged STEADY solution, it does not step a
+   flow forward in time */
+const fl2dFlow = makeFlowView({
+  prefix: "fl2d", tab: "fluent2d", rerun: "re-run",
+  animLead: FLOW_ANIM_LEAD,
+});
 
 /* ---------------- export tab ---------------- */
 
@@ -3222,6 +4706,36 @@ $("btn-export-cfd").addEventListener("click", async () => {
     $("export-dialog").showModal();
   } catch (e) {
     toast(`Case generation failed: ${e.message}`);
+  } finally {
+    busy(b, false);
+  }
+});
+
+$("btn-export-fluent2d").addEventListener("click", async () => {
+  const b = $("btn-export-fluent2d");
+  // the bundle drives the same chain as a run, so it must mesh on the same
+  // numbers: the Fluent 2D tab's overrides ride on top of the sizing picked
+  // here, and an untouched panel sends nothing at all
+  const overrides = readAnsysOverrides();
+  if (!overrides) return;
+  busy(b, true);
+  toast("Meshing in ANSYS Workbench — the geometry and mesh stages " +
+        "typically take several minutes…", "info");
+  try {
+    const saved = await api.exportFluent2dMesh(state.config,
+                                               $("exp-fl2d-sizing").value,
+                                               overrides);
+    lastExport = { ...saved, fmt: null };   // a folder — no Download
+    $("exp-dlg-name").textContent = saved.filename;
+    $("exp-dlg-size").textContent =
+      (saved.n_cells != null
+        ? `${(+saved.n_cells).toLocaleString()} cells — `
+        : "") + (Array.isArray(saved.files) ? saved.files.join(" · ") : "");
+    $("exp-dlg-path").textContent = saved.path;
+    $("exp-dlg-download").hidden = true;
+    $("export-dialog").showModal();
+  } catch (e) {
+    toast(`ANSYS 2D mesh export failed: ${e.message}`);
   } finally {
     busy(b, false);
   }
@@ -3336,9 +4850,29 @@ async function buildReport() {
       ? [env.max_length_mm != null ? `length ≤ ${env.max_length_mm} mm` : "",
          env.max_height_mm != null ? `height ≤ ${env.max_height_mm} mm` : "",
          env.min_ground_clearance_mm != null
-           ? `clearance ≥ ${env.min_ground_clearance_mm} mm` : ""]
+           ? `clearance ≥ ${env.min_ground_clearance_mm} mm` : "",
+         env.min_le_radius_mm != null
+           ? `LE radius ≥ ${env.min_le_radius_mm} mm (` +
+             `${env.le_radius_scope === "all" ? "every element"
+                                              : "frontmost element"})` : "",
+         env.min_te_thickness_mm != null
+           ? `TE thickness ≥ ${env.min_te_thickness_mm} mm` : "",
+         env.measure_ride_height_mm != null
+           ? `heights measured at ${env.measure_ride_height_mm} mm ride height`
+           : ""]
           .filter(Boolean).join(", ") + (env.preset_name ? ` (${env.preset_name})` : "")
       : "off"],
+    // the report is where a number gets quoted from, so a draft's caveat has
+    // to travel with it
+    ["Rule source", env && ruleDraftSource(env)
+      ? "FSAE 2027 rules PUBLIC-COMMENT DRAFT (version 0.0, 21 July 2026) — "
+        + "that document states on its face it is not valid for competition "
+        + "and the numbers will move before V1. Verify against the rulebook "
+        + "the event actually runs."
+        + (builtinRulePreset(env.preset_name) ? ""
+           : " The limits above were derived from that draft and may have "
+             + "been edited since.")
+      : ""],
   ]) +
   `<table class="grid"><tr><th>Element</th><th>Airfoil</th><th>Chord</th>` +
   `<th>Deflection</th><th>Slot gap</th><th>Overlap</th></tr>${elRows}</table>`);
@@ -3501,8 +5035,9 @@ async function buildReport() {
   }
 
   sec.push(`<p class="meta">Estimates from the studio's panel + viscous
-    model; RANS rows are OpenFOAM (simpleFoam, k-ω SST, moving ground)
-    section truth checks. See the workflow guide for model limits.</p>`);
+    model; RANS rows are k-ω SST section truth checks over a moving ground,
+    solved by OpenFOAM (simpleFoam) or ANSYS Fluent — whichever engine ran
+    the verification. See the workflow guide for model limits.</p>`);
 
   const html = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>Wing section design report — ${esc(now.toISOString().slice(0, 10))}</title>
@@ -3604,15 +5139,18 @@ function blobToDataURL(blob) {
 // the flow-field renders live in the server's job registry, which forgets
 // them on restart — embed them in the project file while they are fetchable
 async function captureRansFlow() {
-  if (ransFlowCache) return ransFlowCache;   // restored images stay valid
+  if (ransFlow.cache) return ransFlow.cache;   // restored images stay valid
   const id = state.ransResult?.id;
   if (!id || state.ransResult.state !== "done") return null;
   const grab = async (field) => {
     try {
       const ctl = new AbortController();
       const t = setTimeout(() => ctl.abort(), 5000);
-      const res = await fetch(`/api/rans/${id}/flow?field=${field}`,
-                              { signal: ctl.signal });
+      // captured under the SAME view settings as the live panel — a bare
+      // fetch would bake the server's dark/magma defaults into the file
+      const res = await fetch(
+        `/api/rans/${id}/flow?field=${field}${ransFlow.query(field)}`,
+        { signal: ctl.signal });
       clearTimeout(t);
       if (res.ok) return await blobToDataURL(await res.blob());
     } catch { /* best effort — the verdict saves either way */ }
@@ -3623,7 +5161,36 @@ async function captureRansFlow() {
   if (umag) out.umag = umag;
   if (cp) out.cp = cp;
   if (!Object.keys(out).length) return null;
-  ransFlowCache = out;   // later saves skip the refetch
+  ransFlow.cache = out;   // later saves skip the refetch
+  return out;
+}
+
+// the Fluent 2D renders live in the same forget-on-restart registry —
+// embed them in the project file too, while they are fetchable
+async function captureFl2dFlow() {
+  if (fl2dFlow.cache) return fl2dFlow.cache;   // restored images stay valid
+  const id = fl2dResult?.id;
+  if (!id || fl2dResult.state !== "done") return null;
+  const grab = async (field) => {
+    try {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 5000);
+      // captured under the SAME view settings as the live panel — a bare
+      // fetch would bake the server's dark/magma defaults into the file
+      const res = await fetch(
+        `/api/rans/${id}/flow?field=${field}${fl2dFlow.query(field)}`,
+        { signal: ctl.signal });
+      clearTimeout(t);
+      if (res.ok) return await blobToDataURL(await res.blob());
+    } catch { /* best effort — the result saves either way */ }
+    return null;
+  };
+  const [umag, cp] = await Promise.all([grab("umag"), grab("cp")]);
+  const out = {};
+  if (umag) out.umag = umag;
+  if (cp) out.cp = cp;
+  if (!Object.keys(out).length) return null;
+  fl2dFlow.cache = out;   // later saves skip the refetch
   return out;
 }
 
@@ -3662,6 +5229,7 @@ async function saveProjectInner() {
     }
   }
   const flow = await captureRansFlow();
+  const fl2dImages = await captureFl2dFlow();
   const blob = new Blob([JSON.stringify({
     app: "wing-section-studio", version: 2,
     saved_at: new Date().toISOString(),
@@ -3671,6 +5239,7 @@ async function saveProjectInner() {
     rans_rerank: state.ransRerank,
     results: resultsSnapshot(),
     rans_flow: flow,
+    fl2d_flow: fl2dImages,
   }, null, 2)], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -3729,17 +5298,36 @@ function restoreResults(r) {
     state.ransRev = r.rans_stale ? -1 : null;
     renderRans(r.rans);
     renderRansResult(r.rans, { provenance: "restored" });
-    if (ransFlowCache) {
-      showRansFlow(null);   // rendered from the project file's images
+    if (ransFlow.cache) {
+      ransFlow.show(null);   // rendered from the project file's images
     } else if (r.rans.id) {
       // the server may still hold the job (same-process reload) — probe
       // quietly and only surface the flow view if it is actually there
       $("rans-flow").hidden = true;
       fetch(`/api/rans/${encodeURIComponent(r.rans.id)}/flow?field=umag`)
-        .then((res) => { if (res.ok) showRansFlow(r.rans.id); })
+        .then((res) => { if (res.ok) ransFlow.show(r.rans.id); })
         .catch(() => {});
     } else {
       $("rans-flow").hidden = true;
+    }
+  });
+  attempt("Fluent 2D result", () => {
+    if (!r.fl2d || !r.fl2d.result) return;
+    fl2dResult = r.fl2d;
+    fl2dRev = r.fl2d_stale ? -1 : null;
+    renderFl2d(r.fl2d);
+    renderFl2dResult(r.fl2d, { provenance: "restored" });
+    if (fl2dFlow.cache) {
+      fl2dFlow.show(null);   // rendered from the project file's images
+    } else if (r.fl2d.id) {
+      // the server may still hold the job (same-process reload) — probe
+      // quietly and only surface the flow view if it is actually there
+      $("fl2d-flow").hidden = true;
+      fetch(`/api/rans/${encodeURIComponent(r.fl2d.id)}/flow?field=umag`)
+        .then((res) => { if (res.ok) fl2dFlow.show(r.fl2d.id); })
+        .catch(() => {});
+    } else {
+      $("fl2d-flow").hidden = true;
     }
   });
   attempt("operating map", () => {
@@ -3812,7 +5400,8 @@ $("file-project").addEventListener("change", async () => {
       renderRerank({ rows: state.ransRerank });
       gateRerank();
     }
-    ransFlowCache = safeFlow(p.rans_flow);
+    ransFlow.cache = safeFlow(p.rans_flow);
+    fl2dFlow.cache = safeFlow(p.fl2d_flow);
     writeConfigToForm();
     renderPins();
     await refreshGeometry();
@@ -3902,8 +5491,10 @@ async function boot() {
   bindConfigInputs();
   bindManufacturing();
   bindRules();
+  bindAnsysSettings();
   loadPresets();
   loadRulePresets();
+  loadAnsysPresets();
   checkHealth();
   setInterval(checkHealth, 20000);
   // the desktop launcher's browser fallback reads request activity as "the
@@ -3941,6 +5532,7 @@ async function boot() {
       busy($("btn-rerank"), true);
       $("btn-rerank-cancel").disabled = false;
       $("rr-mesh").disabled = true;
+      $("rr-parallel").disabled = true;
       state.queueActive = true;
       updateSolverButtons();
       pollRerank();

@@ -411,10 +411,12 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
 .select-inline { background: transparent; border: none; padding: 0;
                  font-family: var(--mono); font-size: var(--fs-1); width: 100%; }
 .select-inline:focus { outline: none; }
-/* two select-inlines live outside an .f-wrap box (re-rank mesh, candidate
-   pool) — give them their own box so they read as controls, not plain text */
-#rr-mesh { background: var(--surface-2); border: 1px solid var(--hairline);
-           border-radius: var(--r-s); padding: 4px 8px; }
+/* three select-inlines live outside an .f-wrap box (re-rank mesh, re-rank
+   concurrency, candidate pool) — give them their own box so they read as
+   controls, not plain text, and let them share the action row */
+#rr-mesh, #rr-parallel { width: auto; background: var(--surface-2);
+           border: 1px solid var(--hairline); border-radius: var(--r-s);
+           padding: 4px 8px; }
 .af-pool-row .select-inline { width: auto; background: var(--surface-2);
            border: 1px solid var(--hairline); border-radius: var(--r-s);
            padding: 3px 7px; }
@@ -639,6 +641,19 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
    when it later draws) and let the result note take the full width */
 #rans-charts.empty { grid-template-columns: 1fr; }
 #rans-charts.empty #rans-conv { display: none; }
+#fl2d-charts.empty { grid-template-columns: 1fr; }
+#fl2d-charts.empty #fl2d-conv { display: none; }
+
+/* the ANSYS settings panel: the tab is as wide as the charts, but a
+   two-column form read across that width loses the label/value pairing —
+   hold it to a form's width, tight enough to scan in one column of sight */
+#fl2d-settings { max-width: 620px; }
+#fl2d-settings .var-set { margin: 0 0 8px; }
+#fl2d-settings .fields { margin: 6px 0 2px; }
+#fl2d-settings .action-row { padding: 2px 0 0; }
+/* an inherited value shown as a placeholder is not a typed one — it has to
+   read as the recipe speaking, never as an entry the user made */
+#fl2d-settings .f-wrap input::placeholder { color: var(--ink-3); opacity: 1; }
 
 .chart .grid { stroke: var(--grid-dot); stroke-width: 1; }
 .chart .axis { stroke: var(--hairline-2); stroke-width: 1; }
@@ -757,6 +772,9 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
 }
 .export-card h3 { margin: 0 0 6px; font: 600 var(--fs-2) var(--sans); }
 .export-card p { margin: 0 0 12px; color: var(--ink-3); font-size: var(--fs-1); flex: 1; }
+/* the cards line their buttons up by letting the description take the
+   slack — a qualifying note must not claim a share of it */
+.export-card p.group-note { flex: 0 0 auto; margin: 0 0 10px; }
 
 .path-line {
   display: block; padding: 7px 10px; margin: 2px 0 4px;
@@ -765,8 +783,25 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
   word-break: break-all; user-select: all;
 }
 
-#rans-flow-img { max-width: 100%; border: 1px solid var(--hairline-2);
+#rans-flow-img, #fl2d-flow-img {
+                 max-width: 100%; border: 1px solid var(--hairline-2);
+                 border-radius: var(--r); display: block;
+                 transform-origin: 0 0; }
+
+/* zoomable flow viewport: the static raster pans/zooms via CSS
+   transform, the animated canvases draw their own transform (crisp at
+   any zoom); both stay clipped to the frame */
+/* the static raster only pans while zoomed (app.js toggles touch-action on
+   the viewport at s > 1) — a blanket none here would dead-zone page scroll
+   over the unzoomed image on touch devices */
+.flow-viewport { overflow: hidden; position: relative;
                  border-radius: var(--r); }
+.flow-anim { position: relative; cursor: grab; touch-action: none;
+             border: 1px solid var(--hairline-2);
+             border-radius: var(--r); overflow: hidden; }
+.flow-anim:active { cursor: grabbing; }
+.flow-anim canvas { display: block; }
+.flow-anim canvas[data-role="pt"] { position: absolute; left: 0; top: 0; }
 
 /* dialog + toasts */
 .dialog {

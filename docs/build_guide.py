@@ -421,8 +421,9 @@ def part_i(made):
         "this guide explains every step of that computation."))
     s.append(h3("Capabilities at a glance"))
     s.append(bullets([
-        f"One to four elements; 2,174 bundled UIUC airfoils, 4-digit NACA "
-        f"generation, and Selig {C('.dat')} upload.",
+        f"One to four elements; the 2,174 UIUC airfoils that ship inside "
+        f"AeroSandbox, read at runtime; 4-digit NACA generation; and Selig "
+        f"{C('.dat')} upload.",
         "Slot geometry set directly as gap and overlap (percent of chord); "
         "placement is solved so the achieved values equal the requested ones.",
         "Coupled inviscid analysis of all elements in free air and in ground "

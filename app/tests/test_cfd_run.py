@@ -4,7 +4,8 @@ Covers: coefficient.dat parsing across header layouts, tail statistics,
 the k_g inversion (must round-trip the analysis model exactly), n_iters
 plumbing into the case files, job state machine with a faked container
 (progress, success, failure, cancellation short-circuit), the one-at-a-time
-registry guard and run-directory pruning. No docker binary is invoked.
+registry guard, the mesh-export exclusive claim, the atexit reaper and
+run-directory pruning. No docker binary is invoked.
 
 Run directly:  .venv\\Scripts\\python.exe app\\tests\\test_cfd_run.py
 """
@@ -143,11 +144,11 @@ FAKE_SUMMARY = {"mesh_size": "coarse", "n_iters": 300, "n_cells": 12345,
                 "re_main_chord": 350000, "patches": [], "files": []}
 
 
-def fake_build_case(cfg, out_dir, mesh_size, n_iters=3000):
+def fake_build_case(cfg, out_dir, mesh_size, n_iters=3000, n_ranks=1):
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "run.sh").write_text("#!/bin/bash\n")
-    return {**FAKE_SUMMARY, "n_iters": n_iters}
+    return {**FAKE_SUMMARY, "n_iters": n_iters, "n_ranks": n_ranks}
 
 
 def fake_availability(refresh=False):
@@ -477,8 +478,8 @@ class SlowFakeProc(FakeProc):
 def run_user_stop_job():
     job = cfd_run.RansJob(CFG_D, "coarse", 1000)   # cap far above the rows
 
-    def build_with_controldict(cfg, case_dir, mesh, iters):
-        out = fake_build_case(cfg, case_dir, mesh, iters)
+    def build_with_controldict(cfg, case_dir, mesh, iters, n_ranks=1):
+        out = fake_build_case(cfg, case_dir, mesh, iters, n_ranks)
         sysd = case_dir / "system"
         sysd.mkdir(parents=True, exist_ok=True)
         (sysd / "controlDict").write_text(
@@ -602,6 +603,79 @@ png = foam_post.flow_png(flow_case, CFG, "umag")
 check("flow field renders a PNG", png[:8] == b"\x89PNG\r\n\x1a\n"
       and len(png) > 20_000, f"({len(png)} bytes)")
 
+# the contour-dialog knobs: theme chrome, colormap, range clamp,
+# streamline toggle — distinct settings must produce distinct renders
+png_light = foam_post.flow_png(flow_case, CFG, "umag", theme="light")
+check("light theme renders and differs from dark",
+      png_light[:8] == b"\x89PNG\r\n\x1a\n" and png_light != png)
+png_set = foam_post.flow_png(flow_case, CFG, "umag", cmap="turbo",
+                             vmax=10.0, streamlines=False)
+check("cmap/clamp/streamline settings render and differ",
+      png_set[:8] == b"\x89PNG\r\n\x1a\n" and png_set != png
+      and png_set != png_light)
+for bad in (dict(theme="sepia"), dict(cmap="jet"),
+            dict(vmin=5.0, vmax=1.0)):
+    try:
+        foam_post.flow_png(flow_case, CFG, "umag", **bad)
+        check(f"bad view setting rejected {bad}", False)
+    except foam_post.PostError:
+        check(f"bad view setting rejected {bad}", True)
+
+# the animated view's field payload: same extraction path as the PNG,
+# JSON-clean (masked cells are null, never NaN), row-major with metadata
+ffj = foam_post.flow_field_json(flow_case, CFG, nx=160)
+check("flow field json: grid shape, metadata, element outlines",
+      ffj["nx"] == 160 and ffj["ny"] >= 40
+      and len(ffj["u"]) == len(ffj["v"]) == len(ffj["umag"])
+      == ffj["nx"] * ffj["ny"]
+      and ffj["iter"] == "3000" and ffj["speed_ms"] == CFG.speed_ms
+      and len(ffj["polys"]) == len(CFG.elements)
+      and ffj["x1"] > ffj["x0"] and ffj["y1"] > 0,
+      f"(nx {ffj['nx']}, ny {ffj['ny']}, polys {len(ffj['polys'])})")
+import json as _json  # noqa: E402
+try:
+    _json.dumps(ffj, allow_nan=False)
+    check("flow field json carries no NaN (masked cells are null)", True)
+except ValueError as e:
+    check("flow field json carries no NaN (masked cells are null)", False,
+          f"({e})")
+check("flow field json masks the element interiors",
+      any(x is None for x in ffj["umag"]))
+check("flow field json clamps the grid size",
+      foam_post.flow_field_json(flow_case, CFG, nx=50)["nx"] == 120)
+# "domain" extent spans exactly the solved cell-centre cloud (the whole
+# solve box in production; the synthetic fixture's cloud here) rather
+# than the section crop's fixed chord-margins
+ffd = foam_post.flow_field_json(flow_case, CFG, nx=160, extent="domain")
+check("domain extent follows the solved cloud's bounds",
+      abs(ffd["x0"] - (-0.2)) < 0.02 and abs(ffd["x1"] - 0.8) < 0.02
+      and ffd["x0"] != ffj["x0"] and ffd["x1"] != ffj["x1"],
+      f"(domain x {ffd['x0']}..{ffd['x1']} vs section "
+      f"{ffj['x0']}..{ffj['x1']})")
+try:
+    foam_post.flow_field_json(flow_case, CFG, extent="galaxy")
+    check("bad extent rejected", False)
+except foam_post.PostError:
+    check("bad extent rejected", True)
+# windowed (level-of-detail) extraction: an arbitrary box re-gridded at
+# full resolution, clamped to the solved cloud
+ffw = foam_post.flow_field_json(flow_case, CFG, nx=160,
+                                window=(0.1, 0.05, 0.5, 0.25))
+check("windowed field grids exactly the requested box",
+      abs(ffw["x0"] - 0.1) < 1e-6 and abs(ffw["x1"] - 0.5) < 1e-6
+      and abs(ffw["y0"] - 0.05) < 1e-6 and abs(ffw["y1"] - 0.25) < 1e-6
+      and ffw["nx"] == 160,
+      f"({ffw['x0']}..{ffw['x1']}, {ffw['y0']}..{ffw['y1']})")
+check("window clamps to the solved cloud",
+      foam_post.flow_field_json(flow_case, CFG, nx=160,
+                                window=(-5, 0.05, 5, 0.25))["x0"]
+      >= -0.21)
+try:
+    foam_post.flow_field_json(flow_case, CFG, window=(9, 9, 10, 10))
+    check("window outside the domain rejected", False)
+except foam_post.PostError:
+    check("window outside the domain rejected", True)
+
 # ---- registry: one at a time, rediscovery ----
 
 blocker = cfd_run.RansJob(CFG_D, "coarse", 300)
@@ -623,6 +697,233 @@ check("current() with no jobs reports none",
 
 check("unknown job id -> None", cfd_run.get("nope") is None)
 
+# ---- exclusive claim: the mesh export owns the slot, both directions ----
+
+from app.core import fluent_run as _flu_mod  # noqa: E402
+
+cfd_run.claim_exclusive("a Fluent mesh export")
+try:
+    check("exclusive_claim() reports the held tag",
+          cfd_run.exclusive_claim() == "a Fluent mesh export")
+    try:
+        cfd_run.start(CFG_D)
+        check("start refused while the mesh-export claim is held", False)
+    except RuntimeError as e:
+        # the tag carries its own article — the message must open with
+        # it verbatim, never a doubled "a a ..." / "a an ..."
+        check("start refused while the mesh-export claim is held",
+              str(e).startswith("a Fluent mesh export is running"), f"({e})")
+    try:
+        cfd_run.start_pooled(CFG_D, "coarse", 300)
+        check("pooled start refused while the claim is held", False)
+    except RuntimeError:
+        check("pooled start refused while the claim is held", True)
+    # the Fluent engine registers through the same start(), so the claim
+    # must refuse it too. Stub the docker CLI and the pyfluent session
+    # factory: the refusal fires before either, but a regression here
+    # must not reach the real CLI or launch a licensed Fluent
+    _claim_docker = cfd_run._docker
+    _claim_mcp = _flu_mod._mcp
+    cfd_run._docker = lambda args, timeout: type(
+        "R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    _flu_mod._mcp = lambda: (_ for _ in ()).throw(
+        RuntimeError("must not launch"))
+    try:
+        _leak = cfd_run.start(CFG_D, engine="fluent")
+        cfd_run._jobs.pop(_leak, None)
+        check("Fluent-engine start refused while the claim is held", False)
+    except RuntimeError:
+        check("Fluent-engine start refused while the claim is held", True)
+    finally:
+        cfd_run._docker = _claim_docker
+        _flu_mod._mcp = _claim_mcp
+    try:
+        cfd_run.claim_exclusive("a Fluent mesh export")
+        check("second concurrent claim refused", False)
+    except RuntimeError as e:
+        check("second concurrent claim refused",
+              str(e).startswith("a Fluent mesh export is already running"),
+              f"({e})")
+finally:
+    cfd_run.release_exclusive()
+
+_cl_blocker = cfd_run.RansJob(CFG_D, "coarse", 300)
+_cl_blocker.state = "running"
+cfd_run._jobs[_cl_blocker.id] = _cl_blocker
+try:
+    cfd_run.claim_exclusive("a Fluent mesh export")
+    cfd_run.release_exclusive()
+    check("claim refused while a job runs", False)
+except RuntimeError:
+    check("claim refused while a job runs", True)
+finally:
+    _cl_blocker.state = "cancelled"
+    cfd_run._jobs.pop(_cl_blocker.id, None)
+
+check("released claim leaves the slot free", cfd_run._exclusive_claim is None)
+check("exclusive_claim() reports a free slot as None",
+      cfd_run.exclusive_claim() is None)
+
+# ---- fluent2d dispatch: constructor plumbing, guard, claim ----
+# the module is stubbed through the package attribute (same seam the
+# lazy `from . import fluent2d_run` resolves), so the suite stays
+# offline whether or not the real module exists yet
+
+import types as _types  # noqa: E402
+
+import app.core as _core_pkg  # noqa: E402
+
+_f2d_calls = []
+
+
+class _StubFluent2DJob:
+    """Registry-shaped stand-in for the ANSYS 2D job — records its
+    constructor args and finishes at once."""
+
+    def __init__(self, config, mesh_size, n_iters, n_ranks, conventions,
+                 settings=None):
+        _f2d_calls.append((mesh_size, n_iters, n_ranks, conventions,
+                           settings))
+        self.id = f"f2dstub{len(_f2d_calls)}"
+        self.state = "pending"
+        self.case_dir = cfd_run._runs_dir() / self.id
+        self._container = ""
+        self.t_start = None
+        self.t_end = None
+
+    def run(self):
+        self.state = "done"
+
+    def cancel(self):
+        pass
+
+
+_f2d_saved_attr = getattr(_core_pkg, "fluent2d_run", None)
+_core_pkg.fluent2d_run = _types.SimpleNamespace(
+    Fluent2DJob=_StubFluent2DJob)
+_f2d_docker = cfd_run._docker
+cfd_run._docker = lambda args, timeout: type(
+    "R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+try:
+    # the constructor's positional order is a contract: the sizing mode,
+    # the iteration cap, the ranks, the conventions, then the settings
+    # object the job resolves against its recipe
+    _f2d_settings = {"sizing": "default", "edge_size_mm": 0.4,
+                     "first_layer_mm": None, "n_iters": 500,
+                     "n_ranks": 2, "conventions": "studio"}
+    _jid2d = cfd_run.start(CFG_D, "default", 500, 2, engine="fluent2d",
+                           conventions="studio",
+                           settings=_f2d_settings)
+    _j2d = cfd_run.get(_jid2d)
+    _deadline = time.time() + 5
+    while time.time() < _deadline and _j2d.state != "done":
+        time.sleep(0.01)
+    check("fluent2d start dispatches sizing, conventions and settings "
+          "verbatim",
+          _f2d_calls == [("default", 500, 2, "studio", _f2d_settings)]
+          and _j2d.state == "done", f"({_f2d_calls}, {_j2d.state})")
+    cfd_run._jobs.pop(_jid2d, None)
+
+    _blk2d = cfd_run.RansJob(CFG_D, "coarse", 300)
+    _blk2d.state = "running"
+    cfd_run._jobs[_blk2d.id] = _blk2d
+    try:
+        _leak = cfd_run.start(CFG_D, "default", 500, engine="fluent2d")
+        cfd_run._jobs.pop(_leak, None)
+        check("one-at-a-time guard spans the fluent2d engine", False)
+    except RuntimeError:
+        check("one-at-a-time guard spans the fluent2d engine", True)
+    finally:
+        _blk2d.state = "cancelled"
+        cfd_run._jobs.pop(_blk2d.id, None)
+
+    # the 2D mesh export's exclusive claim must refuse fluent2d starts —
+    # the export holds the same ANSYS seats the job would need
+    cfd_run.claim_exclusive("an ANSYS 2D mesh export")
+    try:
+        _leak = cfd_run.start(CFG_D, "default", 500, engine="fluent2d")
+        cfd_run._jobs.pop(_leak, None)
+        check("fluent2d start refused while the 2D export claim is held",
+              False)
+    except RuntimeError as e:
+        # "an ..." tags must scan too — no baked-in article upstream
+        check("fluent2d start refused while the 2D export claim is held",
+              str(e).startswith("an ANSYS 2D mesh export is running"),
+              f"({e})")
+    finally:
+        cfd_run.release_exclusive()
+
+    try:
+        cfd_run.start(CFG_D, engine="starccm")
+        check("unknown engine rejected with the full enum", False)
+    except ValueError as e:
+        check("unknown engine rejected with the full enum",
+              "fluent2d" in str(e), f"({e})")
+finally:
+    cfd_run._docker = _f2d_docker
+    if _f2d_saved_attr is None:
+        del _core_pkg.fluent2d_run
+    else:
+        _core_pkg.fluent2d_run = _f2d_saved_attr
+
+import inspect as _inspect  # noqa: E402
+
+check("start_pooled accepts the conventions parameter",
+      "conventions" in _inspect.signature(cfd_run.start_pooled).parameters)
+_start_sig = _inspect.signature(cfd_run.start).parameters
+check("start's 2D defaults are the neutral vocabulary, settings optional",
+      _start_sig["conventions"].default == "default"
+      and _inspect.signature(cfd_run.start_pooled)
+      .parameters["conventions"].default == "default"
+      and _start_sig["settings"].default is None
+      and list(_start_sig)[-1] == "settings",
+      f"({_start_sig['conventions'].default}, {list(_start_sig)[-1]})")
+
+# ---- atexit reaper: registry entries beyond RansJob ----
+
+class _ReapStub:
+    """Minimal registry-shaped job — like FluentJob, no _kill_container."""
+
+    def __init__(self, jid, boom=False):
+        self.id = jid
+        self.state = "running"
+        self.boom = boom
+        self.cancelled = False
+        self._container = ""
+        self.case_dir = cfd_run._runs_dir() / jid
+
+    def cancel(self):
+        self.cancelled = True
+        if self.boom:
+            raise RuntimeError("wedged")
+
+
+class _ReapRans(_ReapStub):
+    def __init__(self, jid):
+        super().__init__(jid)
+        self.killed = False
+
+    def _kill_container(self, timeout=60):
+        self.killed = True
+
+
+_r_bad = _ReapStub("reap_bad", boom=True)   # first: must not abort the loop
+_r_flu = _ReapStub("reap_flu")
+_r_of = _ReapRans("reap_of")
+for _j in (_r_bad, _r_flu, _r_of):
+    cfd_run._jobs[_j.id] = _j
+try:
+    cfd_run._reap_at_exit()
+    check("reaper survives a container-less job and a raising cancel, "
+          "and still reaps the rest",
+          _r_flu.cancelled and _r_of.cancelled and _r_of.killed)
+except Exception as e:
+    check("reaper survives a container-less job and a raising cancel, "
+          "and still reaps the rest", False, f"({e!r})")
+finally:
+    for _j in (_r_bad, _r_flu, _r_of):
+        cfd_run._jobs.pop(_j.id, None)
+
 try:
     cfd_run.RansJob(CFG_D, "ultra", 300)
     check("bad mesh size is rejected at construction", False)
@@ -634,6 +935,192 @@ try:
     check("bad max_iters is rejected at construction", False)
 except ValueError:
     check("bad max_iters is rejected at construction", True)
+
+# ---- opt-in parallelism: case generation, plumbing, knife-edge band ----
+
+_sh_par = cfd._run_sh(["wing_e1", "wing_e2"], 8)
+check("parallel run.sh decomposes, solves -parallel, reconstructs, cleans",
+      all(s in _sh_par for s in (
+          "decomposePar -force", "--allow-run-as-root", "-np 8",
+          "simpleFoam -parallel", "reconstructPar -latestTime",
+          "rm -rf processor*"))
+      and _sh_par.index("potentialFoam") < _sh_par.index("decomposePar -force")
+      < _sh_par.index("simpleFoam -parallel")
+      < _sh_par.index("reconstructPar -latestTime")
+      < _sh_par.index("writeCellCentres"))
+_sh_ser = cfd._run_sh(["wing_e1", "wing_e2"])
+check("serial run.sh is the n_ranks=1 script and carries no MPI",
+      _sh_ser == cfd._run_sh(["wing_e1", "wing_e2"], 1)
+      and "mpirun" not in _sh_ser and "decomposePar" not in _sh_ser)
+_dp = cfd._decomposepardict(6)
+check("decomposeParDict carries the rank count and scotch",
+      "numberOfSubdomains 6;" in _dp and "method          scotch;" in _dp)
+
+try:
+    cfd_run.RansJob(CFG_D, "coarse", 300, 40)
+    check("RansJob rejects out-of-range n_ranks", False)
+except ValueError:
+    check("RansJob rejects out-of-range n_ranks", True)
+_jr = cfd_run.RansJob(CFG_D, "coarse", 300, 8)
+check("RansJob snapshot reports its rank count",
+      _jr.snapshot()["n_ranks"] == 8)
+
+_env_prev = os.environ.pop("WSS_CORE_BUDGET", None)
+os.environ["WSS_CORE_BUDGET"] = "7"
+check("core budget honors the env override", cfd_run.core_budget() == 7)
+os.environ.pop("WSS_CORE_BUDGET", None)
+check("core budget defaults to half the logical cores",
+      cfd_run.core_budget() == max(1, (os.cpu_count() or 8) // 2))
+if _env_prev is not None:
+    os.environ["WSS_CORE_BUDGET"] = _env_prev
+
+
+def finalize_with_wall(fracs):
+    """Converged flat run whose wing patches read the given reversed
+    fractions (20 faces per element -> 0.05 granularity)."""
+    job = cfd_run.RansJob(CFG_D, "coarse", 3000)
+    cdir = job.case_dir / "postProcessing" / "forceCoeffs1" / "0"
+    cdir.mkdir(parents=True, exist_ok=True)
+    lines = ["# Time Cd Cd(f) Cd(r) Cl Cl(f) Cl(r)"]
+    lines += [f"{i + 1} 0.2 0.1 0.1 2.50000 1 1" for i in range(1500)]
+    (cdir / "coefficient.dat").write_text("\n".join(lines) + "\n")
+    n = 20
+    blocks = ""
+    for k, f in enumerate(fracs, 1):
+        n_rev = round(f * n)
+        vecs = " ".join(["(1 0 0)"] * n_rev + ["(-1 0 0)"] * (n - n_rev))
+        blocks += (f"    wing_e{k}\n    {{\n        type calculated;\n"
+                   f"        value nonuniform List<vector> {n}({vecs});\n"
+                   f"    }}\n")
+    tdir = job.case_dir / "500"
+    tdir.mkdir(parents=True, exist_ok=True)
+    (tdir / "wallShearStress").write_text(
+        "internalField nonuniform List<vector> 1((0 0 0));\n"
+        "boundaryField\n{\n" + blocks + "}\n")
+    job.t_start = time.time()
+    job._finalize()
+    return job.result
+
+
+# e1 sits ON the partial/separated line: whichever side a given rank
+# count computes, the verdict must say knife-edge rather than pretend
+# the classification is stable
+knife_r = finalize_with_wall([0.20, 0.40])
+check("fraction on the 0.20 line is reported knife-edge",
+      knife_r and knife_r["sep_knife_edge"] is True
+      and "knife-edge" in (knife_r["wall_verdict"] or "")
+      and "separated" in knife_r["wall_verdict"],
+      f"({knife_r and knife_r['wall_verdict']})")
+clean_r = finalize_with_wall([0.05, 0.30])
+check("fractions clear of both lines carry no knife-edge marker",
+      clean_r and clean_r["sep_knife_edge"] is False
+      and "knife-edge" not in (clean_r["wall_verdict"] or ""))
+check("legacy case without wall diagnostics has no knife-edge claim",
+      ramp_r and ramp_r["sep_knife_edge"] is None)
+check("result records the rank count that produced it",
+      knife_r and knife_r["n_ranks"] == 1)
+
+# ---- pooled starts: the queue's concurrency seam ----
+
+_gate = threading.Event()
+
+
+class GatedProc:
+    """Fake solver container that holds until the test releases it."""
+    def __init__(self, case_dir: Path):
+        self.case = case_dir
+        self.returncode = None
+
+    def poll(self):
+        cdir = self.case / "postProcessing" / "forceCoeffs1" / "0"
+        cdir.mkdir(parents=True, exist_ok=True)
+        lines = ["# Time Cd Cd(f) Cd(r) Cl Cl(f) Cl(r)"]
+        lines += [f"{i + 1} 0.2 0.1 0.1 2.5000 1 1" for i in range(300)]
+        (cdir / "coefficient.dat").write_text("\n".join(lines) + "\n")
+        if _gate.is_set():
+            self.returncode = 0
+            return 0
+        return None
+
+    def wait(self, timeout=None):
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -9
+
+
+_pooled_real = (cfd_run._popen, cfd_run.cfd.build_case,
+                cfd_run.availability, cfd_run.POLL_S, cfd_run._docker)
+cfd_run.cfd.build_case = fake_build_case
+cfd_run.availability = fake_availability
+cfd_run.POLL_S = 0.01
+cfd_run._docker = lambda args, timeout: type(
+    "R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+cfd_run._popen = lambda cmd, **kw: GatedProc(
+    Path(str(next(a for a in cmd if ":/case" in str(a))).split(":/case")[0]))
+try:
+    _gate.clear()
+    jid_a = cfd_run.start_pooled(CFG_D, "coarse", 300, 2)
+    jid_b = cfd_run.start_pooled(CFG_D, "coarse", 300, 2)
+    ja, jb = cfd_run.get(jid_a), cfd_run.get(jid_b)
+    deadline = time.time() + 10
+    while time.time() < deadline and not (ja._solving and jb._solving):
+        time.sleep(0.005)
+    check("two pooled jobs solve concurrently",
+          ja.state == "running" and jb.state == "running"
+          and ja._solving and jb._solving,
+          f"({ja.state}/{jb.state})")
+    try:
+        cfd_run.start(CFG_D)
+        check("interactive start is refused while pooled jobs run", False)
+    except RuntimeError:
+        check("interactive start is refused while pooled jobs run", True)
+    _gate.set()
+    deadline = time.time() + 10
+    while time.time() < deadline and not (
+            ja.state in ("done", "failed")
+            and jb.state in ("done", "failed")):
+        time.sleep(0.005)
+    check("pooled jobs finish independently",
+          ja.state == "done" and jb.state == "done",
+          f"({ja.state}: {ja.error} / {jb.state}: {jb.error})")
+finally:
+    _gate.set()
+    (cfd_run._popen, cfd_run.cfd.build_case, cfd_run.availability,
+     cfd_run.POLL_S, cfd_run._docker) = _pooled_real
+
+# ---- orphan sweep: gmsh->Fluent bridge containers ----
+
+# a pid that is genuinely dead: a child that has already exited
+import subprocess  # noqa: E402
+_swp = subprocess.Popen([sys.executable, "-c", "pass"])
+_swp.wait()
+_dead_pid = _swp.pid
+
+_sw_rm: list = []
+_sw_real = cfd_run._docker
+
+
+def _sw_docker(args, timeout):
+    if args[0] == "ps" and "name=wss-rans-" in args:
+        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    if args[0] == "ps" and "name=wss-fluent-mesh-" in args:
+        out = (f"wss-fluent-mesh-{_dead_pid}-123\n"
+               f"wss-fluent-mesh-{os.getpid()}-456\n")
+        return type("R", (), {"returncode": 0, "stdout": out,
+                              "stderr": ""})()
+    if args[:2] == ["rm", "-f"]:
+        _sw_rm.append(args[2])
+    return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+
+cfd_run._docker = _sw_docker
+try:
+    cfd_run._sweep_orphan_containers(set())
+finally:
+    cfd_run._docker = _sw_real
+check("bridge sweep removes the dead-owner container, spares the live one",
+      _sw_rm == [f"wss-fluent-mesh-{_dead_pid}-123"], f"({_sw_rm})")
 
 # ---- run-directory pruning ----
 

@@ -59,9 +59,10 @@ def downforce_at_cl(cl):
     return cfg.q_pa * area * cl * cfg.efficiency_3d
 
 
-def fake_build_case(cfg, case_dir, mesh_size, n_iters=10000):
+def fake_build_case(cfg, case_dir, mesh_size, n_iters=10000, n_ranks=1):
     case_dir.mkdir(parents=True, exist_ok=True)
-    return {"n_cells": 1000, "mesh_size": mesh_size, "n_iters": n_iters}
+    return {"n_cells": 1000, "mesh_size": mesh_size, "n_iters": n_iters,
+            "n_ranks": n_ranks}
 
 
 def fake_availability(refresh=False):
@@ -228,6 +229,24 @@ def main():
     except ValueError:
         check("unknown ranking objective is refused", True)
 
+    # ---- mesh-export exclusive claim: the queue must refuse at start
+    # (endpoint maps RuntimeError -> 409), not accept and then fail row 0
+    # inside start_pooled ----
+    cfd_run.claim_exclusive("a Fluent mesh export")
+    try:
+        try:
+            rans_queue.start([{"config": CFG_D}], "medium", 300)
+            check("queue start refused while a mesh-export claim is held",
+                  False)
+        except RuntimeError as e:
+            check("queue start refused while a mesh-export claim is held",
+                  str(e).startswith("a Fluent mesh export is running"),
+                  f"({e})")
+        check("refused queue registers nothing",
+              rans_queue.get_current() is None)
+    finally:
+        cfd_run.release_exclusive()
+
     # ---- end to end: two items, no source run in-process, so the queue
     # falls back to measured-downforce ranking ----
     with _Patched(runs=((2.5, 0.2), (3.0, 0.2))):
@@ -314,6 +333,27 @@ def main():
     check("wall verdict: rows without diagnostics stay un-penalized "
           "(earlier queues ranked on forces alone)",
           all(r["worst_reversed"] is None for r in rows))
+
+    # ---- the demotion line is cfd_run.SEP_PARTIAL_MAX, not a copied
+    # literal: re-anchor the constant for one queue and a 15%-reversed row
+    # must demote under the 0.10 line even though it clears the shipped
+    # 0.20 ----
+    wait_solver_idle()
+    _sep_saved = cfd_run.SEP_PARTIAL_MAX
+    try:
+        cfd_run.SEP_PARTIAL_MAX = 0.10
+        with _Patched(runs=((2.5, 0.2, 0.05), (3.0, 0.2, 0.15))):
+            rans_queue.start([{"label": "att", "config": CFG_D},
+                              {"label": "mild", "config": CFG_D2}],
+                             "medium", 300)
+            snap_c = wait_queue()
+    finally:
+        cfd_run.SEP_PARTIAL_MAX = _sep_saved
+    rc = snap_c["rows"]
+    check("queue demotion follows a re-anchored SEP_PARTIAL_MAX",
+          rc[0]["rank"] == 1 and rc[1]["rank"] == 2,
+          f"(ranks {[r['rank'] for r in rc]}, "
+          f"worst {[r['worst_reversed'] for r in rc]})")
 
     # ---- crash mid-queue: the in-flight solve is cancelled and the
     # remaining rows are reconciled instead of staying 'queued' inside a
@@ -411,6 +451,77 @@ def main():
     check("queue rows are registered as prune-protected dirs",
           {Path(r["case_dir"]).resolve() for r in rp}
           <= cfd_run._protected_dirs())
+
+    # ---- opt-in concurrency: budget admission + true overlap ----
+    # A pinned budget makes the admission check deterministic on any
+    # machine; core_budget() reads the env at call time.
+    wait_solver_idle()
+    _budget_prev = os.environ.pop("WSS_CORE_BUDGET", None)
+    os.environ["WSS_CORE_BUDGET"] = "8"
+    try:
+        try:
+            rans_queue.QueueJob([{"config": CFG_D}], n_ranks=4,
+                                max_concurrent=4)
+            check("over-budget parallel request is refused", False)
+        except ValueError as e:
+            check("over-budget parallel request is refused",
+                  "core budget" in str(e), f"({str(e)[:70]})")
+
+        conc = {"open": 0, "max_open": 0}
+
+        class TrackedProc(FlatProc):
+            """FlatProc that records how many fake solvers are open at
+            once — the proof the queue actually overlapped solves."""
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                conc["open"] += 1
+                conc["max_open"] = max(conc["max_open"], conc["open"])
+                self._closed = False
+
+            def poll(self):
+                rc = super().poll()
+                if rc is not None and not self._closed:
+                    self._closed = True
+                    conc["open"] -= 1
+                return rc
+
+        with _Patched(runs=((2.5, 0.2), (2.6, 0.2), (3.0, 0.2)),
+                      polls=6) as p:
+            real_popen = cfd_run._popen
+
+            def tracked_popen(cmd, **kw):
+                run = p.runs[min(p.calls, len(p.runs) - 1)]
+                p.calls += 1
+                case = Path(next(a for a in cmd if ":/case" in str(a))
+                            .split(":/case")[0])
+                return TrackedProc(case, run[0], run[1], p.polls)
+            cfd_run._popen = tracked_popen
+            try:
+                rans_queue.start(
+                    [{"label": "c1", "config": CFG_D},
+                     {"label": "c2", "config": CFG_D2},
+                     {"label": "c3", "config": CFG_D}],
+                    "medium", 300, n_ranks=2, max_concurrent=2)
+                snap_cc = wait_queue()
+            finally:
+                cfd_run._popen = real_popen
+        rcc = snap_cc["rows"]
+        check("concurrent queue completes with every row done",
+              snap_cc["state"] == "done"
+              and all(r["state"] == "done" for r in rcc),
+              f"(state {snap_cc['state']}: {[r['state'] for r in rcc]})")
+        check("solves actually overlapped (2 open at once)",
+              conc["max_open"] >= 2, f"(max_open {conc['max_open']})")
+        check("snapshot reports the parallel configuration",
+              snap_cc["n_ranks"] == 2 and snap_cc["max_concurrent"] == 2)
+        check("concurrent rows still rank by measured downforce",
+              rcc[2]["rank"] == 1 and rcc[1]["rank"] == 2
+              and rcc[0]["rank"] == 3,
+              f"(ranks {[r['rank'] for r in rcc]})")
+    finally:
+        os.environ.pop("WSS_CORE_BUDGET", None)
+        if _budget_prev is not None:
+            os.environ["WSS_CORE_BUDGET"] = _budget_prev
 
     print(f"\n{sum(results)}/{len(results)} rans-queue checks passed")
     return 0 if all(results) else 1

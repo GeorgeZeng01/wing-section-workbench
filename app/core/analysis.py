@@ -182,9 +182,9 @@ def shadow_warnings(shadows: list[dict], design: list[dict]) -> list[str]:
                 f"{role}: wake-shadow collapse — the stream over its upper "
                 f"side bottoms at {v:.2f}·V∞, below the measured "
                 f"0.50 separation line. Every wall-shear-graded element on "
-                f"record at this level ran 22-40% reversed flow in RANS "
-                f"(docs/calibration/wall_truth.json): the top-side flow "
-                f"will not reach this element's trailing edge and the "
+                f"record at this level ran 22-40% reversed flow in RANS: "
+                f"the top-side flow will not reach this element's "
+                f"trailing edge and the "
                 f"downforce estimate does not describe that flow state. "
                 f"Open the stagger/gap to its neighbors, reduce loading, "
                 f"or verify with RANS before trusting this design.")
@@ -217,7 +217,7 @@ def slot_signature_warnings(design: list[dict]) -> list[str]:
                 f"({g * 100:.2f}%c gap) with no overlap tuck "
                 f"({o * 100:.2f}%c) — the corner the optimizer gravitates "
                 f"to, and the geometry every observed detachment failure "
-                f"wore. Fine-mesh truth (docs/calibration): at moderate "
+                f"wore. Fine-mesh truth runs on record: at moderate "
                 f"loading this corner measured -1.3% (essentially exact), "
                 f"but optimism climbs steeply with loading everywhere "
                 f"(-14% near 85%, -24% at the 90% line, -37..-42% past "
@@ -360,6 +360,7 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
             "shadow_min": shadows[i]["shadow_min"],
             "shadow_status": shadows[i]["status"],
             "shadow_arc": shadows[i]["arc_at_min"],
+            "shadow_knife_edge": shadows[i].get("knife_edge"),
         })
     clamped = [e["role"] for i, e in enumerate(design)
                if cfg.element_re(i) < viscous.RE_FLOOR]
@@ -407,7 +408,9 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
             f"runs measured outright lift loss here that the estimate's "
             f"model cannot express (-19% at h/c 0.071 on the baseline, "
             f"worsening toward the ground) — treat the estimate as an "
-            f"upper bound and verify with RANS on a medium or fine mesh.")
+            f"upper bound and verify with RANS on a fine mesh — the "
+            f"calibration record grades medium and coarse as "
+            f"screening-only at these ride heights.")
 
     drag_profile_n = q * area * cd_stack
     drag_induced, induced_detail = induced_drag_n(downforce_n, cfg, installed)

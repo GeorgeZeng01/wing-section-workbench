@@ -192,9 +192,53 @@ def main():
               and "type            wallShearStress;" in cd_text)
         check("run.sh reports tail drift and flags a trending run",
               "NOT CONVERGED" in text and "Cl drift over the trailing" in text)
-        check("run.sh reset clears stale result artifacts",
-              "flow_umag.png" in text and "results.txt" in text.split(
-                  "resetting the case")[1].split("gmshToFoam")[0])
+        # the /flow endpoint also writes keyed per-view-settings PNGs
+        # (flow_<field>_<theme>_...) — the reset must glob, not enumerate
+        check("run.sh reset clears stale result artifacts incl. keyed "
+              "flow renders",
+              all(s in text.split("resetting the case")[1]
+                  .split("gmshToFoam")[0]
+                  for s in ("results.txt", "flow_*.png",
+                            "flow_field_*.json")))
+
+        # ---- opt-in MPI parallel case generation ----
+        wings2 = ["wing_e1", "wing_e2"]
+        check("serial case carries no parallel artifacts",
+              "mpirun" not in text and "decomposePar" not in text
+              and not (case / "system" / "decomposeParDict").is_file())
+        check("built serial run.sh is exactly the n_ranks=1 script",
+              cfd._run_sh(wings2, 1) == text)
+        sh8 = cfd._run_sh(wings2, 8)
+        check("parallel run.sh: decompose, solve -parallel, reconstruct, "
+              "clean — in that order, after potentialFoam",
+              all(s in sh8 for s in (
+                  "decomposePar -force", "--allow-run-as-root", "-np 8",
+                  "simpleFoam -parallel", "reconstructPar -latestTime",
+                  "rm -rf processor*"))
+              and sh8.index("potentialFoam")
+              < sh8.index("decomposePar -force")
+              < sh8.index("simpleFoam -parallel")
+              < sh8.index("reconstructPar -latestTime")
+              < sh8.index("writeCellCentres"))
+        check("run.sh reset already clears processor dirs (reruns of a "
+              "parallel case start clean)",
+              "processor*" in text.split("resetting the case")[1]
+              .split("gmshToFoam")[0])
+        dp8 = cfd._decomposepardict(8)
+        check("decomposeParDict: rank count + scotch",
+              "numberOfSubdomains 8;" in dp8
+              and "method          scotch;" in dp8)
+        check("bad n_ranks is rejected before meshing",
+              _raises(lambda: cfd.build_case(CFG, tmp / "z", "coarse",
+                                             cfd.N_ITERS, 0))
+              and _raises(lambda: cfd.build_case(CFG, tmp / "z", "coarse",
+                                                 cfd.N_ITERS, 64)))
+        check("parallel README documents the rank workflow; serial stays "
+              "silent about it",
+              "PARALLEL" in cfd._case_readme(CFG, summary, wings2,
+                                             cfd.N_ITERS, 8)
+              and "PARALLEL" not in (case / "README.txt").read_text(
+                  encoding="utf-8"))
 
         # ---- foam_post field parsing: every legal ASCII list encoding ----
         from app.core import foam_post
@@ -233,6 +277,78 @@ def main():
               and wr["yplus"]["wing_e1"]["avg"] == 1.2, f"({wr})")
         check("wall_report is None for a case without diagnostics",
               foam_post.wall_report(tmp / "case") is None)
+
+        # ---- flow-field extraction: window hardening + single-pass cp ----
+        # synthetic solved case: uniform freestream on a scattered cloud
+        # spanning the installed section, zero kinematic pressure
+        fcase = tmp / "flowcase"
+        (fcase / "200").mkdir(parents=True)
+        fx, fy = np.meshgrid(np.linspace(-0.2, 0.6, 25),
+                             np.linspace(0.0, 0.5, 20))
+        fpts = np.column_stack([fx.ravel(), fy.ravel()])
+        (fcase / "200" / "C").write_text(
+            "internalField nonuniform List<vector> %d(%s);\n"
+            % (len(fpts), " ".join(f"({x:.4f} {y:.4f} 0)" for x, y in fpts)))
+        (fcase / "200" / "U").write_text(
+            "internalField nonuniform List<vector> %d(%s);\n"
+            % (len(fpts), " ".join("(15 0 0)" for _ in fpts)))
+        (fcase / "200" / "p").write_text(
+            "internalField nonuniform List<scalar> %d(%s);\n"
+            % (len(fpts), " ".join("0" for _ in fpts)))
+
+        # a sliver window after the cloud clamp (1 mm wide, full height)
+        # must keep a fixed pixel budget, not allocate a multi-GB grid
+        ff = foam_post.flow_field_json(fcase, CFG, nx=320,
+                                       window=(-0.101, 0.0, -0.1, 0.5))
+        check("sliver window keeps the grid inside the pixel budget",
+              ff["ny"] <= 4 * foam_post.GRID_NX
+              and all(v == 15.0 for v in ff["u"][:5]),
+              f"(nx {ff['nx']}, ny {ff['ny']})")
+
+        # a window entirely inside an element silhouette grids to all NaN:
+        # must be a PostError (-> 422), never NaN into allow_nan=False JSON
+        from matplotlib.path import Path as MplPath
+        p0 = foam_post._installed_polys_m(CFG)[0]
+        # mid-thickness at mid-chord: deep inside the main element
+        band = p0[np.abs(p0[:, 0] - 0.175) < 0.01]
+        cen = (0.175, 0.5 * (band[:, 1].min() + band[:, 1].max()))
+        win = (cen[0] - 5e-4, cen[1] - 5e-4, cen[0] + 5e-4, cen[1] + 5e-4)
+        check("all-masked window raises PostError, not NaN",
+              MplPath(p0).contains_point(cen)
+              and _raises(lambda: foam_post.flow_field_json(
+                  fcase, CFG, nx=320, window=win), foam_post.PostError))
+
+        # include_cp must ride the umag pass: one parse of each field file,
+        # one triangulation — not a second _field_grid call
+        parse_calls = []
+        real_parse = foam_post.parse_internal_field
+        foam_post.parse_internal_field = \
+            lambda t: parse_calls.append(1) or real_parse(t)
+        try:
+            ff2 = foam_post.flow_field_json(fcase, CFG, nx=160,
+                                            include_cp=True)
+        finally:
+            foam_post.parse_internal_field = real_parse
+        check("include_cp parses C, U and p exactly once each",
+              len(parse_calls) == 3 and "cp" in ff2
+              and ff2["cp_p98"] == 0.5, f"({len(parse_calls)} parses)")
+
+        # flow_png bounds: each field honors a lone vmin/vmax, and a lone
+        # bound that inverts the resolved range is a parameter message
+        check("umag render: lone vmin above the auto ceiling is a "
+              "PostError, not a matplotlib error",
+              _raises(lambda: foam_post.flow_png(
+                  fcase, CFG, field="umag", vmin=100.0, streamlines=False),
+                  foam_post.PostError))
+        check("cp render: lone vmin above the auto range is refused, "
+              "not silently ignored",
+              _raises(lambda: foam_post.flow_png(
+                  fcase, CFG, field="cp", vmin=1.0, streamlines=False),
+                  foam_post.PostError))
+        png = foam_post.flow_png(fcase, CFG, field="cp", vmax=2.0,
+                                 streamlines=False)
+        check("cp render honors a lone vmax",
+              png[:8] == b"\x89PNG\r\n\x1a\n")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
@@ -240,12 +356,14 @@ def main():
     return all(results)
 
 
-def _raises(fn):
+def _raises(fn, exc=ValueError):
     try:
         fn()
         return False
-    except ValueError:
+    except exc:
         return True
+    except Exception:
+        return False
 
 
 if __name__ == "__main__":

@@ -189,8 +189,14 @@ export class Viewport {
     const r = this.geo.rules;
     const env = r.envelope || {};
     const mm = this.chordMm;
-    const viol = {};                       // edge -> violation record
-    for (const v of r.violations || []) viol[v.edge] = v;
+    const viol = {};                       // box edge -> violation record
+    // per-element edge rules (nose radius, trailing-edge thickness) carry
+    // edge "element" and no box edge to color — they are badged on the
+    // element cards. Keeping them out of this map is what stops a violation
+    // named "length" from ever meaning anything but the length rule.
+    for (const v of r.violations || []) {
+      if (v.edge !== "element") viol[v.edge] = v;
+    }
     const { x0, x1, y1 } = this.bbox();
     const cls = (edge) => `rule-line${viol[edge] ? " viol" : ""}`;
     // box anchor: the stack's leading extent plus the user's offset — the
@@ -198,7 +204,16 @@ export class Viewport {
     // the stack where it sits
     const xL = x0 + (env.x_offset_mm || 0) / mm;
     const len = env.max_length_mm != null ? env.max_length_mm / mm : null;
-    const hTop = env.max_height_mm != null ? env.max_height_mm / mm : null;
+    // the height cap is judged with the stack rigidly translated to the rule
+    // ride height, so the line has to be shifted by the same amount to sit in
+    // the drawn frame — else the drawing and the verdict contradict each
+    // other in both directions. extents_mm.bottom is the installed lowest
+    // point, i.e. the configured ride height. Never below the ground line:
+    // a cap under the measurement height has no drawable position.
+    const hShift = (env.measure_ride_height_mm != null && r.extents_mm)
+      ? (r.extents_mm.bottom - env.measure_ride_height_mm) / mm : 0;
+    const hTop = env.max_height_mm != null
+      ? Math.max(env.max_height_mm / mm + hShift, 0) : null;
     const clr = env.min_ground_clearance_mm != null
       ? env.min_ground_clearance_mm / mm : null;
     const xR = len != null ? xL + len : Math.max(x1, xL);
@@ -220,9 +235,13 @@ export class Viewport {
       const [hx1] = this.P(xR + padC, 0);
       el("line", { x1: hx0, y1: pyT, x2: hx1, y2: pyT, class: cls("top") }, svg);
       const v = viol.top;
+      // the compliant label must not imply the drawn geometry was measured
+      // against this line when the caps belong to another load case
+      const atRh = env.measure_ride_height_mm != null
+        ? ` @ ${env.measure_ride_height_mm} mm rule ride height` : "";
       this._ruleLabel(svg, hx1 - 2, pyT - 5,
-                      v ? `max height +${v.by_mm.toFixed(1)} mm`
-                        : `${env.max_height_mm} mm`, !!v, "end");
+                      v ? `max height +${v.by_mm.toFixed(1)} mm${atRh}`
+                        : `${env.max_height_mm} mm${atRh}`, !!v, "end");
     }
     if (clr != null) {
       const [cx0, cy] = this.P(xL - padC, clr);

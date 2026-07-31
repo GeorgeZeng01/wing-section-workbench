@@ -129,6 +129,20 @@ def main():
         check("metric stable across search/full paneling",
               abs(v70 - v50) < 0.02, f"(70p {v70} vs 50p {v50})")
 
+        # knife-edge skirt: flagged exactly when shadow_min sits inside
+        # [SEP - band, WARN + band); exempt/degenerate elements carry None.
+        # The flag never alters status — that pair is pinned above.
+        lo = wake_shadow.SHADOW_SEP - wake_shadow.SHADOW_KNIFE_BAND
+        hi = wake_shadow.SHADOW_WARN + wake_shadow.SHADOW_KNIFE_BAND
+        check("knife-edge flag matches the band on every recorded case",
+              all((e["knife_edge"] is None) == (e["shadow_min"] is None)
+                  and (e["shadow_min"] is None
+                       or e["knife_edge"] == (lo <= e["shadow_min"] < hi))
+                  for sh_case in shadows.values() for e in sh_case))
+        check("healthy baseline flap is not knife-edge",
+              sh[1]["knife_edge"] is False and sh[0]["knife_edge"] is None,
+              f"(flap shadow {sh[1]['shadow_min']})")
+
         # ---- analysis wiring ----
         cfg_hot = StackConfig.from_dict(by_id["1c4bf2d726c3"]["config"])
         r_hot = analysis.analyze(cfg_hot, include_geometry=False)

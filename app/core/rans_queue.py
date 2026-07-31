@@ -1,15 +1,24 @@
-"""Sequential RANS verification of an optimizer shortlist.
+"""RANS verification of an optimizer shortlist, sequential by default.
 
 The panel model navigates; RANS measures. This queue takes the finalists
-(winner, candidates, a Pareto pick) and runs each through the existing
-cfd_run pipeline one at a time — the one-job guard is real: Docker/WSL2
-is a single-lane resource — then re-ranks the rows under the objective
-the shortlist was optimized for (measured drag at the target level for
+(winner, candidates, a Pareto pick), runs each through the existing
+cfd_run pipeline, then re-ranks the rows under the objective the
+shortlist was optimized for (measured drag at the target level for
 target mode, measured downforce for max-downforce) and classifies each
 delta against the recorded calibration classes. Each row also carries
 the per-element wall-shear attachment verdict, and any row measuring an
 element separated ranks behind every attached row — high forces from a
 separated flow state are not a podium.
+
+Concurrency is an explicit opt-in, never the default: with
+max_concurrent=1 and n_ranks=1 (the defaults) the queue behaves exactly
+as it always has — one serial solve at a time. Opting in schedules up to
+max_concurrent pooled solves of n_ranks MPI ranks each, admission-checked
+against cfd_run.core_budget() — OpenFOAM's FV solvers have no threading,
+so idle cores are real capacity, but memory bandwidth is the actual
+ceiling; the measured sweet spots live in DECISIONS.md. The interactive
+verify tab stays one-run-at-a-time either way (cfd_run.start's guard
+covers pooled jobs too).
 
 The queue never spends solver hours on an illegal design: every item is
 rule-envelope-checked eagerly at submission, same gate as the optimizer.
@@ -101,7 +110,8 @@ def _shortlist_objective() -> tuple[str, float | None]:
 class QueueJob:
     def __init__(self, items: list[dict], mesh_size: str = "medium",
                  max_iters: int = 10000, objective: str | None = None,
-                 target_downforce_n: float | None = None):
+                 target_downforce_n: float | None = None,
+                 n_ranks: int = 1, max_concurrent: int = 1):
         self.id = uuid.uuid4().hex[:12]
         if not isinstance(items, list) or not items:
             raise ValueError("nothing to verify — the queue needs at least "
@@ -112,6 +122,21 @@ class QueueJob:
             raise ValueError("mesh_size must be coarse, medium or fine")
         if objective not in (None, "target", "max_downforce"):
             raise ValueError("objective must be 'target' or 'max_downforce'")
+        self.n_ranks = int(n_ranks)
+        if not (1 <= self.n_ranks <= cfd_run.MAX_RANKS):
+            raise ValueError(
+                f"n_ranks must be between 1 and {cfd_run.MAX_RANKS}")
+        self.max_concurrent = int(max_concurrent)
+        if not (1 <= self.max_concurrent <= MAX_ITEMS):
+            raise ValueError(
+                f"max_concurrent must be between 1 and {MAX_ITEMS}")
+        budget = cfd_run.core_budget()
+        if self.n_ranks * self.max_concurrent > budget:
+            raise ValueError(
+                f"{self.max_concurrent} concurrent solves x {self.n_ranks} "
+                f"ranks = {self.n_ranks * self.max_concurrent} cores — over "
+                f"this machine's core budget of {budget} (WSS_CORE_BUDGET "
+                f"overrides)")
         self.mesh_size = str(mesh_size)
         self.max_iters = int(max_iters)
         self.objective = objective
@@ -154,12 +179,13 @@ class QueueJob:
                 "delta_cl_pct": None, "converged": None, "stop_reason": None,
                 "mesh_caution": None, "verdict": None, "error": None,
                 "wall_verdict": None, "worst_reversed": None,
-                "rank": None,
+                "sep_knife_edge": None, "rank": None,
             })
         self.state = "pending"   # pending | running | done | failed
                                  # | cancelled
         self.error: str | None = None
-        self.active: int | None = None
+        self.active: int | None = None      # lowest running row index
+        self._active_rows: list[int] = []   # every running row index
         self.t_start: float | None = None
         self.t_end: float | None = None
         self._cancel = threading.Event()
@@ -171,83 +197,92 @@ class QueueJob:
         with self._lock:
             self.state = "running"
             self.t_start = time.time()
+        active: dict[int, object] = {}   # row index -> live RansJob
         try:
-            for i, row in enumerate(self.rows):
-                if self._cancel.is_set():
-                    with self._lock:
-                        row["state"] = "skipped"
-                    continue
+            # once per batch, not per start: pooled starts skip the sweep,
+            # so another instance's live solve is checked for here. Failing
+            # eagerly with the cause on the first row mirrors the old
+            # per-start refusal exactly.
+            housekeeping_error: RuntimeError | None = None
+            try:
+                cfd_run.batch_housekeep()
+            except RuntimeError as e:
+                housekeeping_error = e
+            except Exception:
+                pass   # housekeeping is best-effort, same as start()
+            n = len(self.rows)
+            launch_next = 0
+            abort_launches = False
+            if housekeeping_error is not None:
+                row = self.rows[0]
                 with self._lock:
-                    self.active = i
-                    row["state"] = "running"
-                try:
-                    jid = cfd_run.start(row["config"], self.mesh_size,
-                                        self.max_iters)
-                except (RuntimeError, ValueError) as e:
-                    # a run started by another window mid-queue: stop the
-                    # whole queue with a diagnosable cause rather than
-                    # failing every remaining row one by one
+                    row["state"] = "failed"
+                    row["error"] = str(housekeeping_error)
+                    self.error = (f"queue stopped at {row['label']}: "
+                                  f"{housekeeping_error}")
+                launch_next = n
+                abort_launches = True
+            while True:
+                # top up the active set in row order; a start failure stops
+                # further launches with a diagnosable cause but lets the
+                # in-flight solves finish and report rather than killing
+                # work already paid for
+                while (not abort_launches and not self._cancel.is_set()
+                       and launch_next < n
+                       and len(active) < self.max_concurrent):
+                    i = launch_next
+                    launch_next += 1
+                    row = self.rows[i]
                     with self._lock:
-                        row["state"] = "failed"
-                        row["error"] = str(e)
-                        self.error = (f"queue stopped at {row['label']}: "
-                                      f"{e}")
-                        for r2 in self.rows[i + 1:]:
-                            if r2["state"] == "queued":
-                                r2["state"] = "skipped"
-                    break
-                # job_id is recorded BEFORE the first registry read: the
-                # crash-recovery path below can only cancel an in-flight
-                # solve it can name
-                with self._lock:
-                    row["job_id"] = jid
-                job = cfd_run.get(jid)
-                if job is None:   # registry eviction between start and get
-                    with self._lock:
-                        row["state"] = "failed"
-                        row["error"] = ("solver job vanished from the "
-                                        "registry before it could be polled")
-                    continue
-                while True:
-                    if self._cancel.is_set():
-                        job.cancel()
-                    s = job.snapshot()
-                    if s["state"] in ("done", "failed", "cancelled"):
+                        row["state"] = "running"
+                        self._active_rows = sorted({*active, i})
+                        self.active = self._active_rows[0]
+                    try:
+                        jid = cfd_run.start_pooled(
+                            row["config"], self.mesh_size, self.max_iters,
+                            self.n_ranks)
+                    except (RuntimeError, ValueError) as e:
+                        with self._lock:
+                            row["state"] = "failed"
+                            row["error"] = str(e)
+                            self.error = (f"queue stopped at "
+                                          f"{row['label']}: {e}")
+                        abort_launches = True
                         break
-                    time.sleep(POLL_S)
+                    # job_id is recorded BEFORE the first registry read: the
+                    # crash-recovery path below can only cancel an in-flight
+                    # solve it can name
+                    with self._lock:
+                        row["job_id"] = jid
+                    job = cfd_run.get(jid)
+                    if job is None:   # eviction between start and get
+                        with self._lock:
+                            row["state"] = "failed"
+                            row["error"] = (
+                                "solver job vanished from the registry "
+                                "before it could be polled")
+                        continue
+                    active[i] = job
+                if not active and (abort_launches or self._cancel.is_set()
+                                   or launch_next >= n):
+                    break
+                if self._cancel.is_set():
+                    for job in active.values():
+                        job.cancel()
+                for i in sorted(list(active)):
+                    s = active[i].snapshot()
+                    if s["state"] in ("done", "failed", "cancelled"):
+                        del active[i]
+                        self._harvest(self.rows[i], s)
                 with self._lock:
-                    row["state"] = s["state"]
-                    if s["state"] == "done" and s.get("result"):
-                        r = s["result"]
-                        cl, cd = r["cl_rans"], r["cd_rans"]
-                        dn = r["downforce_n_at_rans_cl"]
-                        # same q*S_ref as the downforce, so D = L*cd/cl
-                        drag = (round(abs(dn) * abs(cd) / abs(cl), 2)
-                                if None not in (cl, cd, dn)
-                                and abs(cl) > 1e-9 else None)
-                        row.update(
-                            cl_rans=cl, cd_rans=cd,
-                            rans_downforce_n=dn, drag_rans_n=drag,
-                            delta_cl_pct=r["delta_cl_pct"],
-                            converged=r["converged"],
-                            stop_reason=r["stop_reason"],
-                            mesh_caution=bool(r["mesh_caution"]) or
-                            cfd_run.mesh_below_calibration_grade(
-                                self.mesh_size),
-                            case_dir=r.get("case_dir"))
-                        row["verdict"] = classify(r, self.mesh_size)
-                        # measured attachment state: a separated row must
-                        # not outrank an attached one, whatever its forces
-                        # say — the ranking demotes on this
-                        row["wall_verdict"] = r.get("wall_verdict")
-                        wall = r.get("wall_report") or {}
-                        sep = wall.get("separation") or {}
-                        fracs = [p.get("reversed_frac") for p in sep.values()
-                                 if p.get("reversed_frac") is not None]
-                        row["worst_reversed"] = (max(fracs) if fracs
-                                                 else None)
-                    elif s["state"] == "failed":
-                        row["error"] = s.get("error")
+                    self._active_rows = sorted(active)
+                    self.active = self._active_rows[0] if active else None
+                if active:
+                    time.sleep(POLL_S)
+            with self._lock:
+                for r2 in self.rows:
+                    if r2["state"] == "queued":
+                        r2["state"] = "skipped"
             ranked = self._ranked_rows()
             with self._lock:
                 for k, r in enumerate(ranked, 1):
@@ -259,18 +294,20 @@ class QueueJob:
             with self._lock:
                 self.state = "failed"
                 self.error = str(e)
-                jid = (self.rows[self.active]["job_id"]
-                       if self.active is not None else None)
+                in_flight = []
                 for r2 in self.rows:
                     if r2["state"] == "running":
                         r2["state"] = "failed"
                         r2["error"] = r2.get("error") or str(e)
+                        if r2.get("job_id"):
+                            in_flight.append(r2["job_id"])
                     elif r2["state"] == "queued":
                         r2["state"] = "skipped"
-            # the in-flight solve must not keep burning Docker/WSL hours
-            # inside a dead queue — and its one-job guard would refuse
-            # every new start until someone found and cancelled it by hand
-            if jid:
+            # in-flight solves must not keep burning Docker/WSL hours
+            # inside a dead queue — and their pooled registrations would
+            # make the verify tab refuse every start until someone found
+            # and cancelled them by hand
+            for jid in in_flight:
                 try:
                     j = cfd_run.get(jid)
                     if j is not None:
@@ -281,6 +318,44 @@ class QueueJob:
             with self._lock:
                 self.t_end = time.time()
                 self.active = None
+                self._active_rows = []
+
+    def _harvest(self, row: dict, s: dict) -> None:
+        """Fold one finished solver job's terminal snapshot into its row."""
+        with self._lock:
+            row["state"] = s["state"]
+            if s["state"] == "done" and s.get("result"):
+                r = s["result"]
+                cl, cd = r["cl_rans"], r["cd_rans"]
+                dn = r["downforce_n_at_rans_cl"]
+                # same q*S_ref as the downforce, so D = L*cd/cl
+                drag = (round(abs(dn) * abs(cd) / abs(cl), 2)
+                        if None not in (cl, cd, dn)
+                        and abs(cl) > 1e-9 else None)
+                row.update(
+                    cl_rans=cl, cd_rans=cd,
+                    rans_downforce_n=dn, drag_rans_n=drag,
+                    delta_cl_pct=r["delta_cl_pct"],
+                    converged=r["converged"],
+                    stop_reason=r["stop_reason"],
+                    mesh_caution=bool(r["mesh_caution"]) or
+                    cfd_run.mesh_below_calibration_grade(
+                        self.mesh_size),
+                    case_dir=r.get("case_dir"))
+                row["verdict"] = classify(r, self.mesh_size)
+                # measured attachment state: a separated row must not
+                # outrank an attached one, whatever its forces say — the
+                # ranking demotes on this
+                row["wall_verdict"] = r.get("wall_verdict")
+                row["sep_knife_edge"] = r.get("sep_knife_edge")
+                wall = r.get("wall_report") or {}
+                sep = wall.get("separation") or {}
+                fracs = [p.get("reversed_frac") for p in sep.values()
+                         if p.get("reversed_frac") is not None]
+                row["worst_reversed"] = (max(fracs) if fracs
+                                         else None)
+            elif s["state"] == "failed":
+                row["error"] = s.get("error")
 
     def _ranked_rows(self) -> list[dict]:
         """Converged rows in rank order, consistent with the objective the
@@ -293,18 +368,18 @@ class QueueJob:
         provenance) shortlists rank by measured downforce.
 
         Measured separation outranks everything: a row whose wall shear
-        grades any element separated (reversed fraction past the in-app
-        0.20 line) ranks behind every attached row under either
-        objective — its forces are the product of a flow state the
-        screening model does not describe, so they cannot buy it a
-        podium. Rows without wall diagnostics (older cases) keep tier 0
-        rather than being punished for missing data."""
+        grades any element separated (reversed fraction past cfd_run's
+        SEP_PARTIAL_MAX demotion line) ranks behind every attached row
+        under either objective — its forces are the product of a flow
+        state the screening model does not describe, so they cannot buy
+        it a podium. Rows without wall diagnostics (older cases) keep
+        tier 0 rather than being punished for missing data."""
         rows = [r for r in self.rows
                 if r["converged"] and r["rans_downforce_n"] is not None]
 
         def sep_tier(r):
             w = r.get("worst_reversed")
-            return 1 if w is not None and w > 0.20 else 0
+            return 1 if w is not None and w > cfd_run.SEP_PARTIAL_MAX else 0
 
         t = self.target_downforce_n
         if self.objective == "target" and t:
@@ -334,6 +409,9 @@ class QueueJob:
                 "id": self.id, "state": self.state, "error": self.error,
                 "mesh_size": self.mesh_size, "active": self.active,
                 "active_job_id": active_jid,
+                "active_rows": list(self._active_rows),
+                "n_ranks": self.n_ranks,
+                "max_concurrent": self.max_concurrent,
                 "objective": self.objective,
                 "target_downforce_n": self.target_downforce_n,
                 "elapsed_s": round(elapsed, 1),
@@ -343,9 +421,9 @@ class QueueJob:
     def cancel(self) -> None:
         self._cancel.set()
         with self._lock:
-            jid = (self.rows[self.active]["job_id"]
-                   if self.active is not None else None)
-        if jid:
+            jids = [r["job_id"] for r in self.rows
+                    if r["state"] == "running" and r.get("job_id")]
+        for jid in jids:
             job = cfd_run.get(jid)
             if job is not None:
                 job.cancel()
@@ -359,10 +437,12 @@ _lock = threading.Lock()
 
 def start(items: list[dict], mesh_size: str = "medium",
           max_iters: int = 10000, objective: str | None = None,
-          target_downforce_n: float | None = None) -> str:
+          target_downforce_n: float | None = None,
+          n_ranks: int = 1, max_concurrent: int = 1) -> str:
     global _current
     job = QueueJob(items, mesh_size, max_iters, objective,
-                   target_downforce_n)   # validates eagerly
+                   target_downforce_n, n_ranks,
+                   max_concurrent)   # validates eagerly
     with _lock:
         if _current is not None and _current.state in ("pending", "running"):
             raise RuntimeError("a verification queue is already running — "
@@ -372,6 +452,12 @@ def start(items: list[dict], mesh_size: str = "medium",
             raise RuntimeError("a RANS verification is already running — "
                                "the queue shares the solver; cancel it or "
                                "wait for it to finish")
+        # a mesh export's exclusive claim would fail row 0 inside
+        # start_pooled and abort the whole shortlist — refuse up front
+        claim = cfd_run.exclusive_claim()
+        if claim is not None:
+            raise RuntimeError(
+                f"{claim} is running — wait for it to finish")
         _current = job
     threading.Thread(target=job.run, name=f"rans-queue-{job.id}",
                      daemon=True).start()

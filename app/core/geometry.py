@@ -102,12 +102,39 @@ class RuleEnvelopeSpec:
                              anywhere along the car)
     preset_name              label of the preset these values came from
                              (display only)
+
+    The edge limits below are per-element, measured on the as-built contour:
+
+    min_le_radius_mm         floor under the leading-edge radius of curvature
+                             (blunt-edge rules for surfaces a person could
+                             walk into). None disables the check, and 0 is
+                             normalized to None at parse so the echoed
+                             envelope never advertises a limit that is not
+                             being applied.
+    le_radius_scope          "frontmost" — only the element leading the stack
+                             is exposed, the usual case behind a nose cone;
+                             "all" — every element must meet the floor
+    min_te_thickness_mm      floor under the built trailing-edge thickness.
+                             The user's own number: blunt-edge rules commonly
+                             give a radius for forward-facing edges but only
+                             say "not sharp" about the rest. 0 is normalized
+                             to None, as for the radius floor.
+    measure_ride_height_mm   ride height the HEIGHT CAPS are measured at,
+                             when the rules measure them in a different load
+                             case than the one being designed (unladen, no
+                             driver, so the stack sits at its highest). The
+                             ground-clearance floor stays on the configured
+                             ride height — worst case there is laden.
     """
     max_length_mm: float | None = None
     max_height_mm: float | None = None
     min_ground_clearance_mm: float | None = None
     x_offset_mm: float = 0.0
     preset_name: str | None = None
+    min_le_radius_mm: float | None = None
+    le_radius_scope: str = "frontmost"
+    min_te_thickness_mm: float | None = None
+    measure_ride_height_mm: float | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> "RuleEnvelopeSpec":
@@ -116,7 +143,9 @@ class RuleEnvelopeSpec:
         # strict keys: a typo'd limit ("max_lenght_mm") must fail loudly,
         # not silently produce an unconstrained axis and a false "rules ok"
         allowed = {"max_length_mm", "max_height_mm",
-                   "min_ground_clearance_mm", "x_offset_mm", "preset_name"}
+                   "min_ground_clearance_mm", "x_offset_mm", "preset_name",
+                   "min_le_radius_mm", "le_radius_scope",
+                   "min_te_thickness_mm", "measure_ride_height_mm"}
         unknown = sorted(set(d) - allowed)
         if unknown:
             raise ValueError(f"rule_envelope: unknown field(s) "
@@ -125,13 +154,24 @@ class RuleEnvelopeSpec:
         def _opt(key):
             v = d.get(key)
             return None if v is None else float(v)
+        def _off(key):
+            # 0 means "no limit" for the edge floors; normalize it here so the
+            # echoed envelope and the report agree with the check, which tests
+            # these two for truthiness
+            v = _opt(key)
+            return None if v == 0.0 else v
         name = d.get("preset_name")
+        scope = d.get("le_radius_scope")
         return cls(
             max_length_mm=_opt("max_length_mm"),
             max_height_mm=_opt("max_height_mm"),
             min_ground_clearance_mm=_opt("min_ground_clearance_mm"),
             x_offset_mm=float(d.get("x_offset_mm", 0.0) or 0.0),
             preset_name=None if name is None else str(name),
+            min_le_radius_mm=_off("min_le_radius_mm"),
+            le_radius_scope="frontmost" if scope is None else str(scope),
+            min_te_thickness_mm=_off("min_te_thickness_mm"),
+            measure_ride_height_mm=_opt("measure_ride_height_mm"),
         )
 
 
@@ -199,7 +239,7 @@ class StackConfig:
             npv = float(d["n_panels_per_side"])
             if not math.isfinite(npv):
                 raise ValueError("n_panels_per_side must be a finite value "
-                                 "in 10..200")
+                                 "in 11..200")
             kw["n_panels_per_side"] = int(npv)
         if d.get("manufacturing") is not None:
             kw["manufacturing"] = ManufacturingSpec.from_dict(d["manufacturing"])
@@ -237,8 +277,11 @@ def _validate(cfg: StackConfig) -> None:
                          "the automatic ride-height curve)")
     if not (1 <= len(cfg.elements) <= 4):
         raise ValueError("element count must be 1..4")
-    if not (10 <= cfg.n_panels_per_side <= 200):
-        raise ValueError("n_panels_per_side must be 10..200")
+    # floor 11: repanel(n_points_per_side=N) yields 2N-1 contour points and
+    # the panel solver refuses anything under 20 — 10 would validate here
+    # yet fail every solve
+    if not (11 <= cfg.n_panels_per_side <= 200):
+        raise ValueError("n_panels_per_side must be 11..200")
     if cfg.ride_height_mm < 0.005 * cfg.chord_mm:
         raise ValueError("ride height below 0.5% chord — panel method invalid")
     m = cfg.manufacturing
@@ -261,11 +304,15 @@ def _validate(cfg: StackConfig) -> None:
             if not (math.isfinite(v) and lo <= v <= hi):
                 raise ValueError(f"element {i+1}: {f} must be finite, {lo}..{hi}")
         # raw "mfg:" specs arrive straight from API clients — hold them to
-        # the same physical bounds as the validated manufacturing block
+        # the same physical bounds as the validated manufacturing block.
+        # Check anywhere in the chain, not just the head: the optimizer's
+        # opt_shape re-wrap yields "shape:...:mfg:...:base", and a wrapped
+        # mfg: layer opens the TE exactly like a bare one
         spec = str(e.airfoil)
-        if spec.lower().startswith("mfg:"):
+        k = spec.lower().find("mfg:")
+        if k != -1:
             from . import manufacturing as mfg_mod
-            mode, gap_c, base = mfg_mod.parse(spec)   # raises ValueError
+            mode, gap_c, base = mfg_mod.parse(spec[k:])   # raises ValueError
             if base.lower().startswith("mfg:"):
                 raise ValueError(f"element {i+1}: nested mfg: specs are not "
                                  f"allowed")
@@ -286,11 +333,19 @@ def _validate_envelope(env: RuleEnvelopeSpec) -> None:
     import math
     for name, lo, hi in (("max_length_mm", 10.0, 20000.0),
                          ("max_height_mm", 1.0, 5000.0),
-                         ("min_ground_clearance_mm", 0.0, 1000.0)):
+                         ("min_ground_clearance_mm", 0.0, 1000.0),
+                         # 0 disables the edge checks and is normalized to
+                         # None at parse, so only a negative floor is rejected
+                         ("min_le_radius_mm", 0.0, 100.0),
+                         ("min_te_thickness_mm", 0.0, 100.0),
+                         ("measure_ride_height_mm", 0.0, 1000.0)):
         v = getattr(env, name)
         if v is not None and not (math.isfinite(v) and lo <= v <= hi):
             raise ValueError(f"rule_envelope.{name} must be a finite "
                              f"value in {lo}..{hi} mm (or omitted)")
+    if env.le_radius_scope not in ("frontmost", "all"):
+        raise ValueError("rule_envelope.le_radius_scope must be 'frontmost' "
+                         "(only the element leading the stack) or 'all'")
     if not (math.isfinite(env.x_offset_mm)
             and -20000.0 <= env.x_offset_mm <= 20000.0):
         raise ValueError("rule_envelope.x_offset_mm must be a finite "
@@ -300,6 +355,16 @@ def _validate_envelope(env: RuleEnvelopeSpec) -> None:
             and env.min_ground_clearance_mm >= env.max_height_mm):
         raise ValueError("rule_envelope: min_ground_clearance_mm must be "
                          "below max_height_mm — the box is empty")
+    # the caps are measured with the stack lifted to measure_ride_height_mm,
+    # so a measurement height at or above the cap fails every design, however
+    # thin — the same empty box one field over
+    if (env.max_height_mm is not None
+            and env.measure_ride_height_mm is not None
+            and env.measure_ride_height_mm >= env.max_height_mm):
+        raise ValueError("rule_envelope: measure_ride_height_mm must be below "
+                         "max_height_mm — the height cap is measured at a "
+                         "ride height at or above the cap itself, so no stack "
+                         "of any height can comply")
 
 
 def validate_rule_envelope(d: dict) -> RuleEnvelopeSpec:
@@ -527,6 +592,112 @@ def stack_extents(elements: list[dict]) -> dict:
 # jitter (0.01 mm is far below any manufacturing tolerance)
 ENVELOPE_TOL_MM = 0.01
 
+# complying with a required nose radius this large a fraction of an element's
+# chord costs real section quality — the nose swallows the suction peak. The
+# flag is advisory: the rule is still the rule, but the user should know the
+# section is being spent to meet it before the optimizer is blamed.
+RADIUS_COST_C = 0.05
+
+# paneling the edge rules are MEASURED at, independent of the paneling the
+# solver or the optimizer's search is running: legality has to be a property
+# of the section, not of a speed setting. The optimizer searches 3- and
+# 4-element stacks at 50 and 45 panels a side, where the nose fit degrades to
+# "unmeasured" on a large share of the library — and preferentially on the
+# sharp noses a radius floor exists to catch.
+RULE_CHECK_PANELS = 120
+
+# the nose fit's own uncertainty, as a fraction of the radius floor. Measured
+# on the shipped fit: a systematic -5.8% against the analytic NACA 4-digit
+# radius (1.1019*t^2, consistent across 0006..0024) plus up to ~9% scatter
+# across panel counts on real library sections. A verdict inside this band of
+# the floor is therefore the measurement talking, not the section: it is
+# reported as knife-edge beside the verdict rather than silently flipping it,
+# the same doctrine the RANS attachment lines carry. The bias direction is
+# conservative — the fit UNDER-reads, so it flags compliant noses rather than
+# passing sharp ones.
+LE_RADIUS_BAND = 0.10
+
+
+def _element_rule_checks(
+        installed: list[dict], cfg: StackConfig, env: RuleEnvelopeSpec
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """Per-element edge rules; returns (rows, violations, unverified).
+
+    Measured on the AS-BUILT contour (effective_spec, exactly as
+    manufacturing_report does) so trailing-edge prep is reflected in the
+    verdict rather than checked against a shape nobody will build, and the
+    nose at RULE_CHECK_PANELS so the verdict does not move with the solver
+    or search resolution. Attaches e["rules"] to every element a check
+    actually reaches, and lists in unverified every check that ran but could
+    not produce a verdict.
+    """
+    want_le = bool(env.min_le_radius_mm)
+    want_te = bool(env.min_te_thickness_mm)
+    if not (want_le or want_te):
+        return [], [], []
+    # the exposed element is COMPUTED, never assumed to be index 0: a large
+    # negative overlap or a nose-down stack angle can put a flap in front
+    front = int(np.argmin([e["coords"][:, 0].min() for e in installed]))
+    # exactly RULE_CHECK_PANELS, never max(user, RULE_CHECK_PANELS): a floor
+    # still lets the verdict track the solver knob above it (measured: a nose
+    # on the limit flipped between 120 and 200 panels a side)
+    n_rule = RULE_CHECK_PANELS
+    rows, violations, unverified = [], [], []
+    for i, e in enumerate(installed):
+        need_le = want_le and (env.le_radius_scope == "all" or i == front)
+        if not (need_le or want_te):
+            continue          # out of scope: no row, so a row implies a check
+        c_mm = element_chord_mm(cfg, i)
+        spec = e.get("airfoil_eff") or effective_spec(cfg, i)
+        # only the nose fit needs the rule resolution; the built trailing edge
+        # survives any repaneling, so a TE-only envelope stays on the contour
+        # the solver already has
+        n_meas = n_rule if need_le else int(cfg.n_panels_per_side)
+        info = airfoils.geometry_info(
+            airfoils.repaneled(spec, n_meas)[1], with_le_radius=need_le)
+        r = {}
+        if need_le:
+            r_c = info["le_radius"]
+            r_mm = None if r_c is None else r_c * c_mm
+            r["le_radius_c"] = r_c
+            r["le_radius_mm"] = None if r_mm is None else round(r_mm, 2)
+            # an unmeasurable nose is reported as unknown, never as a pass
+            # and never as a violation — the contour is what is at fault
+            r["le_radius_ok"] = (None if r_mm is None else
+                                 bool(r_mm >= env.min_le_radius_mm
+                                      - ENVELOPE_TOL_MM))
+            r["radius_cost_flag"] = bool(
+                env.min_le_radius_mm / c_mm > RADIUS_COST_C)
+            r["le_radius_knife_edge"] = bool(
+                r_mm is not None
+                and abs(r_mm - env.min_le_radius_mm)
+                <= LE_RADIUS_BAND * env.min_le_radius_mm)
+            if r["le_radius_ok"] is None:
+                r["le_radius_reason"] = info["le_radius_reason"]
+                unverified.append({"rule": "min_le_radius",
+                                   "element": e["role"],
+                                   "reason": info["le_radius_reason"]})
+            if r["le_radius_ok"] is False:
+                violations.append({
+                    "rule": "min_le_radius", "edge": "element",
+                    "element": e["role"], "value_mm": r["le_radius_mm"],
+                    "limit_mm": env.min_le_radius_mm,
+                    "by_mm": round(env.min_le_radius_mm - r_mm, 2)})
+        if want_te:
+            te_mm = info["te_gap"] * c_mm
+            r["te_thickness_mm"] = round(te_mm, 2)
+            r["te_ok"] = bool(te_mm >= env.min_te_thickness_mm
+                              - ENVELOPE_TOL_MM)
+            if not r["te_ok"]:
+                violations.append({
+                    "rule": "min_te_thickness", "edge": "element",
+                    "element": e["role"], "value_mm": round(te_mm, 2),
+                    "limit_mm": env.min_te_thickness_mm,
+                    "by_mm": round(env.min_te_thickness_mm - te_mm, 2)})
+        e["rules"] = r
+        rows.append({"element": e["role"], **r})
+    return rows, violations, unverified
+
 
 def envelope_check(installed: list[dict], cfg: StackConfig) -> dict | None:
     """Rule-envelope compliance of the installed stack, in mm.
@@ -537,7 +708,20 @@ def envelope_check(installed: list[dict], cfg: StackConfig) -> dict | None:
     never disagree. Returns None when no envelope is configured; otherwise
     {ok, extents_mm, violations: [{rule, edge, value_mm, limit_mm, by_mm}]}
     where edge is one of "length" | "top" | "bottom" (the viewport colors
-    the matching box edge).
+    the matching box edge) or "element" for a per-element edge rule, which
+    carries the element's role and no box edge to color.
+
+    With measure_ride_height_mm set the height caps are evaluated with the
+    stack raised (or lowered) to that height and the verdict reports
+    measured_at_ride_height_mm and measure_shift_mm (the rigid translation
+    applied, positive upward) beside extents_mm.top_running, so a drawing in
+    the installed frame can put the cap line where the verdict was taken;
+    the ground-clearance floor is left on the configured ride height, since
+    the two limits bound different load cases.
+
+    "ok" is the verdict on the checks that produced one. A check that ran but
+    could not (an unmeasurable nose) is listed in "unverified" instead, which
+    is present only when non-empty — an unresolved constraint, not a pass.
     """
     env = cfg.rule_envelope
     if env is None:
@@ -547,6 +731,11 @@ def envelope_check(installed: list[dict], cfg: StackConfig) -> dict | None:
     length = (ext["x_max"] - ext["x_min"]) * mm
     top = ext["y_max"] * mm
     bottom = ext["y_min"] * mm
+    if env.measure_ride_height_mm is not None:
+        # rigid translation: the stack's own height above its lowest point is
+        # a property of the geometry, so re-installing it at the measurement
+        # ride height only moves the top by the difference
+        top = (ext["y_max"] - ext["y_min"]) * mm + env.measure_ride_height_mm
     violations = []
     if (env.max_length_mm is not None
             and length > env.max_length_mm + ENVELOPE_TOL_MM):
@@ -567,7 +756,11 @@ def envelope_check(installed: list[dict], cfg: StackConfig) -> dict | None:
             "value_mm": round(bottom, 2),
             "limit_mm": env.min_ground_clearance_mm,
             "by_mm": round(env.min_ground_clearance_mm - bottom, 2)})
-    return {
+    # box edges first: the eager-refusal and feasibility messages quote
+    # violations[0], and a stack outside its box is the bigger news
+    rows, el_viol, unverified = _element_rule_checks(installed, cfg, env)
+    violations += el_viol
+    out = {
         "ok": not violations,
         # echo the limits so every consumer (viewport box, warnings,
         # optimizer messages) draws from this one object
@@ -577,26 +770,76 @@ def envelope_check(installed: list[dict], cfg: StackConfig) -> dict | None:
             "min_ground_clearance_mm": env.min_ground_clearance_mm,
             "x_offset_mm": env.x_offset_mm,
             "preset_name": env.preset_name,
+            "min_le_radius_mm": env.min_le_radius_mm,
+            "le_radius_scope": env.le_radius_scope,
+            "min_te_thickness_mm": env.min_te_thickness_mm,
+            "measure_ride_height_mm": env.measure_ride_height_mm,
         },
         "extents_mm": {"length": round(length, 2), "top": round(top, 2),
-                       "bottom": round(bottom, 2)},
+                       "bottom": round(bottom, 2),
+                       # the drawn stack's own top, so a viewport in the
+                       # installed frame never has to infer the shift
+                       "top_running": round(ext["y_max"] * mm, 2)},
+        # the trailing-edge remedy depends on whether the prep that sets it
+        # is switched on at all
+        "manufacturing_on": cfg.manufacturing is not None,
         "violations": violations,
     }
+    if unverified:
+        out["unverified"] = unverified
+    if rows:
+        # the same verdicts ride on the elements themselves; this copy lets a
+        # consumer that only holds the rules block (warnings, exports) reach
+        # them without walking the geometry
+        out["elements"] = rows
+    if env.measure_ride_height_mm is not None:
+        out["measured_at_ride_height_mm"] = env.measure_ride_height_mm
+        out["measure_shift_mm"] = round(
+            env.measure_ride_height_mm - cfg.ride_height_mm, 2)
+    return out
 
 
 _RULE_LABELS = {"max_length_mm": "max length",
                 "max_height_mm": "max height above ground",
-                "min_ground_clearance_mm": "min ground clearance"}
+                "min_ground_clearance_mm": "min ground clearance",
+                "min_le_radius": "min leading-edge radius",
+                "min_te_thickness": "min trailing-edge thickness"}
 
 
 def envelope_warnings(rules: dict | None) -> list[str]:
     """Prose for the report's warning list, derived from envelope_check."""
-    if not rules or rules["ok"]:
+    if not rules:
         return []
     out = []
     for v in rules["violations"]:
         label = _RULE_LABELS.get(v["rule"], v["rule"])
-        if v["edge"] == "bottom":
+        if v["edge"] == "element" and v["rule"] == "min_le_radius":
+            out.append(
+                f"Rule '{label}': {v['element']} noses to {v['value_mm']:.2f} "
+                f"mm radius, {v['by_mm']:.2f} mm under the required "
+                f"{v['limit_mm']:.1f} mm — blunt the nose (a thicker section "
+                f"or a leading-edge radius in the shaping), lengthen that "
+                f"element's chord, or fit a permanently attached "
+                f"leading-edge piece that provides the radius.")
+        elif v["edge"] == "element":
+            # the prep that sets the built edge may be switched off, in which
+            # case every section reads a knife edge and the field the remedy
+            # names is not even on screen
+            remedy = (
+                "raise the manufacturing trailing-edge thickness to meet it "
+                "or lower the floor."
+                if rules.get("manufacturing_on") else
+                f"Manufacturing prep is off, so every section is built with "
+                f"a knife edge — turn it on and set its trailing-edge "
+                f"thickness to at least {v['limit_mm']:.1f} mm, or lower "
+                f"this floor.")
+            out.append(
+                f"Rule '{label}': {v['element']} builds a {v['value_mm']:.2f} "
+                f"mm trailing edge, {v['by_mm']:.2f} mm under your "
+                f"{v['limit_mm']:.1f} mm floor. The rules give no number for "
+                f"a non-forward-facing edge, so this limit is yours — "
+                f"{remedy}")
+        elif v["edge"] == "bottom":
             out.append(
                 f"Rule '{label}': lowest point {v['value_mm']:.1f} mm is "
                 f"under the required {v['limit_mm']:.1f} mm by "
@@ -605,9 +848,56 @@ def envelope_warnings(rules: dict | None) -> list[str]:
         else:
             what = ("installed length" if v["edge"] == "length"
                     else "highest point")
+            at = ("" if v["rule"] != "max_height_mm"
+                  or "measured_at_ride_height_mm" not in rules else
+                  f" (measured at the "
+                  f"{rules['measured_at_ride_height_mm']:.0f} mm rule ride "
+                  f"height, not the configured one)")
             out.append(
-                f"Rule '{label}': {what} {v['value_mm']:.1f} mm exceeds the "
-                f"{v['limit_mm']:.1f} mm limit by {v['by_mm']:.1f} mm.")
+                f"Rule '{label}': {what} {v['value_mm']:.1f} mm{at} exceeds "
+                f"the {v['limit_mm']:.1f} mm limit by {v['by_mm']:.1f} mm.")
+    # advisories: never violations, but the user is entitled to know the rule
+    # is being paid for out of the section
+    for row in rules.get("elements", []):
+        if row.get("radius_cost_flag"):
+            out.append(
+                f"{row['element']}: the required leading-edge radius is more "
+                f"than {RADIUS_COST_C * 100:.0f}% of this element's chord — "
+                f"a nose that blunt costs suction peak and stall margin. "
+                f"Lengthen the chord if the rule allows it, or expect to "
+                f"lose downforce meeting the radius.")
+        if row.get("le_radius_knife_edge"):
+            floor = (rules.get("envelope") or {}).get("min_le_radius_mm")
+            out.append(
+                f"{row['element']}: the leading-edge radius measures "
+                f"{row['le_radius_mm']:.2f} mm against a "
+                f"{floor:.1f} mm floor — inside the nose fit's own "
+                f"{LE_RADIUS_BAND * 100:.0f}% uncertainty, so the "
+                f"measurement cannot decide this one. Measure the built nose "
+                f"before relying on either side of it.")
+        if row.get("le_radius_ok") is None and "le_radius_mm" in row:
+            # the two causes have opposite remedies: raising the panel count
+            # is the fix for a thin nose and no help at all for a cut-off one
+            why = ("the nose folds back or is cut off rather than rounded, "
+                   "so there is no radius there to measure. Repair the "
+                   "section's leading edge"
+                   if row.get("le_radius_reason") == "shape" else
+                   "the nose carries too few points at this resolution. "
+                   "Raise the panel count or supply a finer section file")
+            out.append(
+                f"{row['element']}: leading-edge radius could not be measured "
+                f"— {why}, and treat the radius rule as unchecked here.")
+    if "measured_at_ride_height_mm" in rules:
+        # stated whether or not a cap is exceeded: the drawn stack sits at the
+        # configured ride height, the height verdict does not
+        shift = rules.get("measure_shift_mm") or 0.0
+        out.append(
+            f"Height limits are measured with the stack at "
+            f"{rules['measured_at_ride_height_mm']:.0f} mm ride height, "
+            f"{abs(shift):.0f} mm {'above' if shift >= 0 else 'below'} the "
+            f"one drawn, so the highest point compared against the cap is "
+            f"{rules['extents_mm']['top']:.1f} mm and not the "
+            f"{rules['extents_mm']['top_running']:.1f} mm on screen.")
     return out
 
 
@@ -750,6 +1040,12 @@ def geometry_report(cfg: StackConfig) -> dict:
     warnings += manufacturing_report(cfg, design)
     rules = envelope_check(installed, cfg)
     warnings += envelope_warnings(rules)
+    # install_stack shallow-copies each element, so the per-element rule
+    # verdicts envelope_check attached live only on the installed copies —
+    # mirror them so both frames carry the same badges
+    for e_d, e_i in zip(design, installed):
+        if "rules" in e_i:
+            e_d["rules"] = e_i["rules"]
     te_clear = min(e["coords"][:, 1].min() for e in installed)
     m = cfg.manufacturing
     return {

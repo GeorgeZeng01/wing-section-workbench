@@ -9,3 +9,10 @@ pywebview>=5.0
 pillow>=10.0
 reportlab>=4.0
 
+# Optional — ANSYS Fluent integration: the in-app Fluent RANS engine
+# (app/core/fluent_run.py), the Export tab's native Fluent case, and the
+# MCP server (scripts/fluent_mcp.py); mcp itself is MCP-server-only.
+# Requires a locally installed, licensed ANSYS Fluent (2024 R2+); see README.
+ansys-fluent-core>=0.40
+mcp>=2.0
+

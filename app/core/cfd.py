@@ -109,6 +109,104 @@ class MeshError(RuntimeError):
     """gmsh could not produce a usable mesh for this geometry."""
 
 
+def section_geometry(cfg: StackConfig, mesh_size: str = "medium") -> dict:
+    """The exact geometry build_case meshes, minus the meshing: the
+    densified installed-section polylines in meters (ground at y = 0),
+    the fixed domain box, per-element boundary-layer caps and slot
+    refinement boxes — ONE source for every mesher. The gmsh route
+    (build_case) consumes it directly; the Fluent-native route
+    (fluent_run / fluent_mcp) builds its STL slab and sizing controls
+    from the same numbers, so the two meshers argue about cells, never
+    about geometry. Also carries the preset's sizes mapped for a
+    native mesher: wall/far sizes in meters, BL growth, an explicit
+    layer count derived from the preset's thickness cap through the
+    geometric series, and the slab depth."""
+    if mesh_size not in MESH_PRESETS:
+        raise ValueError(f"mesh_size must be one of {sorted(MESH_PRESETS)}")
+    preset = MESH_PRESETS[mesh_size]
+    c = cfg.chord_m
+    # the wall polyline is meshed as straight facets, so its node count is
+    # the surface resolution for EVERY preset — decoupled from the panel
+    # count (the solver's 70/side leaves ~8 mm facets on the main element;
+    # the flow solution deserves better even when the panel method doesn't
+    # need it). Same underlying section, denser sampling. The densified
+    # rebuild re-solves the slot placement on its own discretisation, so
+    # the intersection guard runs AFTER it: the geometry that is checked
+    # has to be the geometry that is meshed, or a stack that reads clear
+    # at the user's panel count reaches the mesher self-intersecting and
+    # fails as an opaque mesh error.
+    mesh_nodes = max(cfg.n_panels_per_side, MESH_SURFACE_MIN_N)
+    design = geometry.build_stack(
+        cfg if mesh_nodes == cfg.n_panels_per_side
+        else dataclasses.replace(cfg, n_panels_per_side=mesh_nodes))
+    if any(e["intersects"] for e in design):
+        raise ValueError("elements intersect — open the slots before meshing")
+    installed = geometry.install_stack(design, cfg.ride_height_c)
+    polys = [_closed_poly_m(e["coords"], cfg.chord_m) for e in installed]
+    # the domain is a fixed box (Y_TOP_C chords tall): a validated config can
+    # still push the section out of it (e.g. a huge ride height on a small
+    # chord), which would produce a broken or impossible mesh — refuse with a
+    # clear message instead
+    y_top_c = max(e["coords"][:, 1].max() for e in installed)
+    x_lo_c = min(e["coords"][:, 0].min() for e in installed)
+    x_hi_c = max(e["coords"][:, 0].max() for e in installed)
+    if y_top_c > 0.75 * Y_TOP_C or x_lo_c < -0.5 * X_UP_C \
+            or x_hi_c > 0.5 * X_DOWN_C:
+        raise ValueError(
+            f"the installed section (top at {y_top_c:.2f} chords above the "
+            f"ground) does not fit the CFD domain ({Y_TOP_C:g} chords tall) "
+            f"with clearance — reduce the ride height relative to the chord")
+    # each element's boundary-layer stack is capped by the clearances IT
+    # actually faces: its own ground clearance and the slot gaps on either
+    # side of it (both sides of a gap carry that gap, so opposing stacks
+    # cannot collide across it)
+    gaps = [e.get("slot_gap") for e in installed]
+    bl_caps_c = []
+    for i, e in enumerate(installed):
+        own = [float(e["coords"][:, 1].min())]
+        if gaps[i] is not None:
+            own.append(gaps[i])
+        if i + 1 < len(installed) and gaps[i + 1] is not None:
+            own.append(gaps[i + 1])
+        bl_caps_c.append(max(min(own), 1e-4))
+    # refinement box over each slot throat (centred on the flap LE) so the
+    # jet is carried by >= SLOT_GAP_CELLS cells on every preset
+    slot_boxes = []
+    for i, e in enumerate(installed):
+        if gaps[i] is None:
+            continue
+        g_m = gaps[i] * cfg.chord_m
+        le = e["coords"][int(np.argmin(e["coords"][:, 0]))] * cfg.chord_m
+        r = 3.0 * g_m
+        slot_boxes.append((le[0] - r, le[0] + r, max(le[1] - r, 0.0),
+                           le[1] + r, g_m / SLOT_GAP_CELLS))
+
+    h1, u_tau = first_layer(cfg)
+    growth = preset["bl_ratio"]
+    bl_thick_m = min(preset["bl_thick"] * c,
+                     BL_CLEAR_FRAC * min(bl_caps_c) * c)
+    n_bl = max(4, min(30, int(math.log(
+        1.0 + bl_thick_m * (growth - 1.0) / h1) / math.log(growth))))
+    return {
+        "installed": installed,
+        "polys": polys,
+        "bl_caps_c": bl_caps_c,
+        "slot_boxes": slot_boxes,
+        "surface_nodes_per_side": mesh_nodes,
+        "wings": [f"wing_e{i+1}" for i in range(len(installed))],
+        "domain_m": (-X_UP_C * c, 0.0, X_DOWN_C * c, Y_TOP_C * c),
+        "dz_m": DZ_C * c,
+        "wall_size_m": preset["wall"] * c,
+        "far_size_m": preset["far"] * c,
+        "first_layer_m": h1,
+        "u_tau": u_tau,
+        "bl_growth": growth,
+        "bl_thickness_m": bl_thick_m,
+        "n_bl_layers": n_bl,
+        "slot_gap_cells": SLOT_GAP_CELLS,
+    }
+
+
 def first_layer(cfg: StackConfig) -> tuple[float, float]:
     """(first-layer height m, u_tau m/s) for y+ ~ 1 at the main-chord Re."""
     re = cfg.speed_ms * cfg.chord_m / cfg.nu
@@ -677,10 +775,45 @@ boundaryField
 """)
 
 
-def _run_sh(wings: list[str]) -> str:
+def _decomposepardict(n_ranks: int) -> str:
+    # scotch: a graph partitioner with no geometry assumptions — right for
+    # unstructured tri+quad meshes, and deterministic for a fixed mesh and
+    # rank count, so the same case at the same n_ranks reproduces exactly.
+    # (ACROSS rank counts the partition, and with it the solver's iteration
+    # path, legitimately differs — see the knife-edge note in cfd_run.)
+    return _foam("dictionary", "system", "decomposeParDict",
+                 f"numberOfSubdomains {n_ranks};\n\n"
+                 "method          scotch;\n")
+
+
+def _run_sh(wings: list[str], n_ranks: int = 1) -> str:
     fixes = "\n".join(
         f"foamDictionary constant/polyMesh/boundary "
         f"-entry entry0/{w}/type -set wall" for w in ["ground", *wings])
+    if n_ranks > 1:
+        # potentialFoam stays serial: it initializes 0/U before decomposePar
+        # distributes the fields, so serial and parallel runs start from the
+        # IDENTICAL initial state. --allow-run-as-root: the container runs
+        # as root. --oversubscribe: OpenMPI's slot detection inside a
+        # container can undercount; the core budget is enforced by the
+        # caller, not by mpirun.
+        solve = f"""\
+echo "== decomposePar"
+decomposePar -force > log.decomposePar 2>&1
+
+echo "== simpleFoam"
+mpirun --allow-run-as-root --oversubscribe -np {n_ranks} \\
+    simpleFoam -parallel > log.simpleFoam 2>&1
+
+echo "== reconstructPar"
+reconstructPar -latestTime > log.reconstructPar 2>&1
+# the decomposed copies are dead disk weight once the merged fields exist;
+# postProcessing/ (forces, y+) was written by the master rank all along
+rm -rf processor*"""
+    else:
+        solve = """\
+echo "== simpleFoam"
+simpleFoam > log.simpleFoam 2>&1"""
     return f"""\
 #!/usr/bin/env bash
 # Run this 2D RANS case in WSL:   wsl -d Ubuntu -- bash run.sh
@@ -706,7 +839,7 @@ if ls -d [0-9]*.[0-9]* [1-9]* postProcessing 2>/dev/null | grep -q .; then
     # flow_*.png / results.txt describe the PREVIOUS solve - stale beside
     # a fresh one
     rm -rf postProcessing processor* constant/polyMesh \
-        results.txt flow_umag.png flow_cp.png
+        results.txt flow_*.png flow_field_*.json
     find . -maxdepth 1 -regextype posix-extended -type d \
         -regex '\./[0-9]+(\.[0-9]+)?' ! -name 0 -exec rm -rf {{}} +
 fi
@@ -727,8 +860,7 @@ checkMesh > log.checkMesh 2>&1 || echo "checkMesh reported problems - see log.ch
 echo "== potentialFoam"
 potentialFoam -writephi > log.potentialFoam 2>&1
 
-echo "== simpleFoam"
-simpleFoam > log.simpleFoam 2>&1
+{solve}
 
 # cell-centre coordinates beside the final U/p fields: the app's flow-field
 # view (and any external plotting) reads the 2D section straight from them
@@ -778,9 +910,24 @@ cat results.txt
 
 
 def _case_readme(cfg: StackConfig, summary: dict, wings: list[str],
-                 n_iters: int = N_ITERS) -> str:
+                 n_iters: int = N_ITERS, n_ranks: int = 1) -> str:
     re_c = summary["re_main_chord"]
     bl = "yes" if summary["boundary_layer"] else "NO - refinement fallback"
+    par = "" if n_ranks == 1 else f"""
+
+PARALLEL
+--------
+This case is configured for {n_ranks} MPI ranks: run.sh decomposes the
+mesh (scotch), solves with mpirun -np {n_ranks} simpleFoam -parallel and
+reconstructs the latest time before post-processing, so results.txt and
+the flow fields come out exactly where the serial case puts them. The
+same script runs in WSL and in the app's Docker container. A fixed rank
+count reproduces exactly; DIFFERENT rank counts follow slightly different
+iteration paths (domain decomposition changes the linear algebra), which
+matters only within the knife-edge band around the attachment verdict
+lines — see the studio docs. Regenerate with ranks = 1 for the serial
+reference case.\
+"""
     return f"""\
 OPENFOAM 2D RANS CASE - generated by Wing Section Studio
 ========================================================
@@ -809,7 +956,7 @@ does not fire on a loaded high-lift case — expect the run to use the full
 iteration budget, and read the drift verdict in results.txt. Rerunning
 the script resets the case to a clean start first (previous time
 directories, postProcessing and stale result artifacts are removed), so
-every run is a full, reproducible solve.
+every run is a full, reproducible solve.{par}
 
 RESULTS
 -------
@@ -823,7 +970,7 @@ history): raise endTime and rerun. liftDir is (0 -1 0), so Cl POSITIVE
 Aref = chord x depth) and the freestream dynamic pressure. Sectional
 downforce per unit span: L' = Cl * 0.5 * rho * U^2 * c. Steady RANS on
 a heavily loaded section often ends in a bounded oscillation rather
-than a point value - check the convergence history in coefficient.dat
+than a point value — check the convergence history in coefficient.dat
 and prefer the tail mean once the drift verdict is clean.
 Compare against the studio's estimate and recalibrate its k_g /
 viscous-efficiency knobs with the result.
@@ -834,7 +981,7 @@ CASE NOTES
   in the wing-fixed frame road and air translate together (0/U ground is
   fixedValue, not noSlip).
 - Wall treatment is y+-adaptive (omegaWallFunction, kLowReWallFunction,
-  nutUSpaldingWallFunction) - valid on the resolved boundary-layer mesh
+  nutUSpaldingWallFunction) — valid on the resolved boundary-layer mesh
   and on the pure-refinement fallback alike. The yPlus1 function object
   writes the measured y+ beside each field set — check it rather than
   trusting the flat-plate target on the mesh summary.
@@ -856,7 +1003,7 @@ CASE NOTES
 
 
 def build_case(cfg: StackConfig, out_dir: Path, mesh_size: str = "medium",
-               n_iters: int = N_ITERS) -> dict:
+               n_iters: int = N_ITERS, n_ranks: int = 1) -> dict:
     """Write a complete, ready-to-run OpenFOAM case into out_dir.
 
     n_iters caps the simpleFoam iteration count. The residualControl
@@ -864,68 +1011,32 @@ def build_case(cfg: StackConfig, out_dir: Path, mesh_size: str = "medium",
     residuals plateau above them), so an exported run goes the full
     n_iters; results.txt reports the tail drift so a still-trending run is
     flagged. The in-app Docker runs stop on force drift instead.
+
+    n_ranks=1 (the default) generates the same serial case this module has
+    always generated, byte for byte. n_ranks>1 additionally writes
+    system/decomposeParDict and swaps run.sh's solver step for
+    decomposePar / mpirun -np N simpleFoam -parallel / reconstructPar —
+    everything upstream (mesh, fields, schemes) and downstream
+    (postProcessing layout, results.txt, flow view) is identical, so the
+    choice is an explicit opt-in per run, never a format change.
     Returns a summary: cell count, y+ estimate, patch and file lists."""
     if mesh_size not in MESH_PRESETS:
         raise ValueError(f"mesh_size must be one of {sorted(MESH_PRESETS)}")
     n_iters = int(n_iters)
     if not (100 <= n_iters <= 20_000):
         raise ValueError("n_iters must be between 100 and 20000")
+    n_ranks = int(n_ranks)
+    if not (1 <= n_ranks <= 32):
+        raise ValueError("n_ranks must be between 1 and 32")
     preset = MESH_PRESETS[mesh_size]
-    # the wall polyline is meshed as straight facets, so its node count is
-    # the surface resolution for EVERY preset — decoupled from the panel
-    # count here (the solver's 70/side leaves ~8 mm facets on the main
-    # element; the flow solution deserves better even when the panel
-    # method doesn't need it). Same underlying section, denser sampling.
-    # The densified rebuild re-solves the slot placement on its own
-    # discretisation, so the intersection guard runs AFTER it: the geometry
-    # that is checked has to be the geometry that is meshed, or a stack
-    # that reads clear at the user's panel count reaches gmsh self-
-    # intersecting and fails as an opaque mesh error.
-    mesh_nodes = max(cfg.n_panels_per_side, MESH_SURFACE_MIN_N)
-    design = geometry.build_stack(
-        cfg if mesh_nodes == cfg.n_panels_per_side
-        else dataclasses.replace(cfg, n_panels_per_side=mesh_nodes))
-    if any(e["intersects"] for e in design):
-        raise ValueError("elements intersect — open the slots before meshing")
-    installed = geometry.install_stack(design, cfg.ride_height_c)
-    polys = [_closed_poly_m(e["coords"], cfg.chord_m) for e in installed]
-    # the domain is a fixed box (Y_TOP_C chords tall): a validated config can
-    # still push the section out of it (e.g. a huge ride height on a small
-    # chord), which would produce a broken or impossible mesh — refuse with a
-    # clear message instead
-    y_top_c = max(e["coords"][:, 1].max() for e in installed)
-    x_lo_c = min(e["coords"][:, 0].min() for e in installed)
-    x_hi_c = max(e["coords"][:, 0].max() for e in installed)
-    if y_top_c > 0.75 * Y_TOP_C or x_lo_c < -0.5 * X_UP_C \
-            or x_hi_c > 0.5 * X_DOWN_C:
-        raise ValueError(
-            f"the installed section (top at {y_top_c:.2f} chords above the "
-            f"ground) does not fit the CFD domain ({Y_TOP_C:g} chords tall) "
-            f"with clearance — reduce the ride height relative to the chord")
-    # each element's boundary-layer stack is capped by the clearances IT
-    # actually faces: its own ground clearance and the slot gaps on either
-    # side of it (both sides of a gap carry that gap, so opposing stacks
-    # cannot collide across it)
-    gaps = [e.get("slot_gap") for e in installed]
-    bl_caps_c = []
-    for i, e in enumerate(installed):
-        own = [float(e["coords"][:, 1].min())]
-        if gaps[i] is not None:
-            own.append(gaps[i])
-        if i + 1 < len(installed) and gaps[i + 1] is not None:
-            own.append(gaps[i + 1])
-        bl_caps_c.append(max(min(own), 1e-4))
-    # refinement box over each slot throat (centred on the flap LE) so the
-    # jet is carried by >= SLOT_GAP_CELLS cells on every preset
-    slot_boxes = []
-    for i, e in enumerate(installed):
-        if gaps[i] is None:
-            continue
-        g_m = gaps[i] * cfg.chord_m
-        le = e["coords"][int(np.argmin(e["coords"][:, 0]))] * cfg.chord_m
-        r = 3.0 * g_m
-        slot_boxes.append((le[0] - r, le[0] + r, max(le[1] - r, 0.0),
-                           le[1] + r, g_m / SLOT_GAP_CELLS))
+    # geometry (densified polylines, domain fit, BL caps, slot boxes)
+    # comes from the shared source — see section_geometry
+    g = section_geometry(cfg, mesh_size)
+    installed = g["installed"]
+    polys = g["polys"]
+    bl_caps_c = g["bl_caps_c"]
+    slot_boxes = g["slot_boxes"]
+    mesh_nodes = g["surface_nodes_per_side"]
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -952,6 +1063,7 @@ def build_case(cfg: StackConfig, out_dir: Path, mesh_size: str = "medium",
     summary = {
         "mesh_size": mesh_size,
         "n_iters": n_iters,
+        "n_ranks": n_ranks,
         "n_cells": stats["n_cells"],
         "n_bl_quads": stats["n_quads"],
         "boundary_layer": stats["bl_used"],
@@ -980,10 +1092,12 @@ def build_case(cfg: StackConfig, out_dir: Path, mesh_size: str = "medium",
         "0/k": _field_k(cfg),
         "0/omega": _field_omega(cfg),
         "0/nut": _FIELD_NUT,
-        "run.sh": _run_sh(wings),
-        "README.txt": _case_readme(cfg, summary, wings, n_iters),
+        "run.sh": _run_sh(wings, n_ranks),
+        "README.txt": _case_readme(cfg, summary, wings, n_iters, n_ranks),
         "case.foam": "",   # ParaView opens the case through this stub
     }
+    if n_ranks > 1:
+        files["system/decomposeParDict"] = _decomposepardict(n_ranks)
     for rel, text in files.items():
         p = out_dir / rel
         p.parent.mkdir(parents=True, exist_ok=True)

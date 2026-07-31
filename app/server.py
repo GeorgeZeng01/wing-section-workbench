@@ -5,12 +5,15 @@ Run:  .venv\\Scripts\\python.exe -m uvicorn app.server:app --port 8642
 
 from __future__ import annotations
 
+import math
+import re
 import sys
 import threading
 from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -229,17 +232,214 @@ class CfdExportBody(BaseModel):
     mesh_size: Literal["coarse", "medium", "fine"] = "medium"
 
 
-class RansStartBody(BaseModel):
+# (name, kind, low, high, low_is_inclusive) for the ANSYS 2D per-run
+# overrides. The request bodies enforce these through pydantic Fields; the
+# preset library re-checks the same numbers by hand, so a stored preset can
+# never carry a value a run would refuse. high None = unbounded above
+# (finite is still required).
+_ANSYS_OVERRIDE_RANGES = (
+    ("edge_size_mm", float, 0.0, None, False),
+    ("first_layer_mm", float, 0.0, None, False),
+    ("n_layers", int, 0, 100, True),
+    ("growth", float, 1.0, 3.0, False),
+    ("front_l", float, 0.5, 20.0, True),
+    ("back_l", float, 0.5, 40.0, True),
+    ("top_h", float, 0.5, 20.0, True),
+    ("sc_budget_s", float, 30.0, 7200.0, True),
+    ("wb_budget_s", float, 60.0, 43200.0, True),
+)
+_ANSYS_OVERRIDE_NAMES = tuple(n for n, *_rest in _ANSYS_OVERRIDE_RANGES)
+
+
+class _AnsysOverrides(BaseModel):
+    """The ANSYS 2D knobs a request may override on top of its sizing
+    recipe, shared by the verify start and the mesh export.
+
+    null (or absent) means "take the recipe's value" for the mesh knobs
+    and the documented default for the domain and the stage budgets. An
+    override never changes the sizing label — the result reports the
+    values actually used.
+    """
+    edge_size_mm: float | None = Field(default=None, gt=0,
+                                       allow_inf_nan=False)
+    first_layer_mm: float | None = Field(default=None, gt=0,
+                                         allow_inf_nan=False)
+    n_layers: int | None = Field(default=None, ge=0, le=100)
+    growth: float | None = Field(default=None, gt=1.0, le=3.0,
+                                 allow_inf_nan=False)
+    # domain extents in chords: ahead of, behind and above the section
+    front_l: float | None = Field(default=None, ge=0.5, le=20,
+                                  allow_inf_nan=False)
+    back_l: float | None = Field(default=None, ge=0.5, le=40,
+                                 allow_inf_nan=False)
+    top_h: float | None = Field(default=None, ge=0.5, le=20,
+                                allow_inf_nan=False)
+    # wall-clock budgets for the two meshing stages
+    sc_budget_s: float | None = Field(default=None, ge=30, le=7200,
+                                      allow_inf_nan=False)
+    wb_budget_s: float | None = Field(default=None, ge=60, le=43200,
+                                      allow_inf_nan=False)
+
+    def overrides(self) -> dict:
+        """The overrides actually set, ready for the 2D job/chain."""
+        return {n: getattr(self, n) for n in _ANSYS_OVERRIDE_NAMES
+                if getattr(self, n) is not None}
+
+
+# iteration defaults, per engine: the drift-stopped engines take a
+# generous cap they rarely reach, the ANSYS 2D engine the walkthrough's
+# own 500 (the number its settings contract states everywhere else)
+RANS_ITERS_DEFAULT = 10000
+FLUENT2D_ITERS = 500
+
+
+class RansStartBody(_AnsysOverrides):
     config: dict
-    mesh_size: Literal["coarse", "medium", "fine"] = "coarse"
-    # generous default: the runner stops on its own the moment the force
-    # history flattens, so the cap only matters for runs that need it
-    max_iters: int = Field(default=10000, ge=100, le=20000)
+    # openfoam/fluent take the studio mesh presets; for the fluent2d
+    # engine this field is a SIZING mode (default | studio-yplus1). The
+    # Literal admits every engine's values, so the pairing is
+    # cross-checked in rans_start
+    mesh_size: Literal["coarse", "medium", "fine",
+                       "default", "studio-yplus1"] = "coarse"
+    # null = the engine's own default, resolved in rans_start: 10000 for
+    # the drift-stopped engines (generous — they stop themselves the
+    # moment the force history flattens), 500 for the ANSYS 2D engine,
+    # the documented walkthrough length its settings contract states
+    # everywhere else. The floor is engine-dependent too: fluent2d admits
+    # the 50-iteration runs that replicate the manual walkthrough, the
+    # other engines keep 100 — cross-checked in rans_start alongside the
+    # mesh/engine pairing
+    max_iters: int | None = Field(default=None, ge=50, le=20000)
+    # MPI ranks for the solve — an explicit opt-in; 1 (the default) is the
+    # serial case this endpoint has always produced
+    n_ranks: int = Field(default=1, ge=1, le=32)
+    # openfoam (default): the Docker screening engine. fluent: a licensed
+    # local ANSYS Fluent on the 3D slab (the documented revert path).
+    # fluent2d: the true-2D ANSYS workflow (Workbench-meshed)
+    engine: Literal["openfoam", "fluent", "fluent2d"] = "openfoam"
+    # Fluent slab engine only: who cuts the cells. fluent (default) = ANSYS
+    # Fluent Meshing on the identical section geometry (no Docker);
+    # gmsh = the studio mesher + containerized conversion — the
+    # identical-mesh cross-check against the OpenFOAM engine
+    mesher: Literal["fluent", "gmsh"] = "fluent"
+    # fluent2d only: default = the documented manual ANSYS workflow's
+    # solver defaults (residual auto-stop live, Fluent-native
+    # references); studio = the app's conventions (SST pinned,
+    # force-drift stop, chord-referenced downforce-positive display).
+    # Other engines ignore it.
+    conventions: Literal["default", "studio"] = "default"
+
+
+def _num_in(field: str, value, kind, lo, hi, lo_inclusive: bool):
+    """One settings number, range-checked the way its pydantic Field is.
+
+    bool is rejected explicitly — it passes isinstance(x, int), and
+    True would otherwise sail through an n_layers check as 1."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} must be a number")
+    if kind is int:
+        if isinstance(value, float) and (not math.isfinite(value)
+                                         or value != int(value)):
+            raise ValueError(f"{field} must be a whole number")
+        value = int(value)
+    else:
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError(f"{field} must be a finite number")
+    if (value < lo if lo_inclusive else value <= lo) or (
+            hi is not None and value > hi):
+        raise ValueError(
+            f"{field} must be {'>=' if lo_inclusive else '>'} {lo:g}"
+            + (f" and <= {hi:g}" if hi is not None else ""))
+    return value
+
+
+def _validate_ansys_settings(raw) -> dict:
+    """The ANSYS 2D settings object, normalized.
+
+    The base recipe (sizing, conventions, iterations, ranks) plus the
+    per-run overrides, each inside the range a run accepts. Unknown keys
+    are dropped — a preset's name lives beside its settings, never
+    inside — and an absent override stays null so it resolves against
+    the sizing recipe at run time instead of freezing a number here."""
+    if not isinstance(raw, dict):
+        raise ValueError("settings must be an object")
+
+    def _default(key, fallback):
+        # null and absent both mean "the documented default" for EVERY
+        # key — and only those two: a falsy WRONG value ("" or 0) still
+        # answers its own refusal instead of being coerced into it
+        v = raw.get(key)
+        return fallback if v is None else v
+
+    sizing = _default("sizing", "default")
+    if sizing not in ("default", "studio-yplus1"):
+        raise ValueError(f"sizing must be 'default' or 'studio-yplus1', "
+                         f"not {sizing!r}")
+    conventions = _default("conventions", "default")
+    if conventions not in ("default", "studio"):
+        raise ValueError(f"conventions must be 'default' or 'studio', "
+                         f"not {conventions!r}")
+    out = {
+        "sizing": sizing,
+        "conventions": conventions,
+        "n_iters": _num_in("n_iters", _default("n_iters", FLUENT2D_ITERS),
+                           int, 50, 20000, True),
+        "n_ranks": _num_in("n_ranks", _default("n_ranks", 1),
+                           int, 1, 32, True),
+    }
+    for name, kind, lo, hi, lo_inclusive in _ANSYS_OVERRIDE_RANGES:
+        v = raw.get(name)
+        out[name] = (None if v is None
+                     else _num_in(name, v, kind, lo, hi, lo_inclusive))
+    return out
 
 
 def _err_detail(e: BaseException) -> str:
     # KeyError stringifies with quotes around its message — strip them
-    return str(e.args[0]) if (isinstance(e, KeyError) and e.args) else str(e)
+    msg = str(e.args[0]) if (isinstance(e, KeyError) and e.args) else str(e)
+    return _scrub_paths(msg)
+
+
+# machine paths must not ride out in an error body: an OSError from deep in
+# the run tree carries the whole home directory, and these strings end up in
+# screenshots and pasted issue reports. The run directory is the app's own
+# scratch, so its absolute location tells a user nothing they can act on.
+_PATH_RE = re.compile(
+    r"""(?:[A-Za-z]:[\\/]|\\\\|/(?:home|Users|mnt)/)[^\s'"()]*""")
+
+
+def _scrub_paths(msg: str) -> str:
+    """Replace absolute filesystem paths with their final component."""
+    def keep_tail(m: re.Match) -> str:
+        tail = re.split(r"[\\/]", m.group(0).rstrip("\\/"))[-1]
+        return tail or "a file"
+    return _PATH_RE.sub(keep_tail, msg)
+
+
+def _finite_safe(obj):
+    """A validation-error payload with every non-finite float stringified.
+
+    JSON's Infinity/NaN literals parse (Python's decoder accepts them) but
+    do NOT encode — the response encoder refuses them. A rejected field
+    echoes its input back in the 422 detail, so a body carrying Infinity
+    would fail on the way out and become a 500."""
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return repr(obj)
+    if isinstance(obj, dict):
+        return {k: _finite_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_finite_safe(v) for v in obj]
+    return obj
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_handler(request, exc):
+    from fastapi.encoders import jsonable_encoder
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=422,
+        content={"detail": _finite_safe(jsonable_encoder(exc.errors()))})
 
 
 def _cfg(config: dict) -> StackConfig:
@@ -378,6 +578,10 @@ def optimize_start(body: OptimizeBody):
     _cfg(body.config)  # validate before spawning the job
     try:
         job_id = optimizer.start(body.config, body.options)
+    except RuntimeError as e:
+        # a search is already running — the same refusal shape as the RANS
+        # start path, so the client can tell "busy" from "bad request"
+        raise HTTPException(409, detail=str(e))
     except (ValueError, TypeError, KeyError) as e:
         # malformed options (wrong-typed bounds, bogus keys) are client
         # errors, whatever exception type they surface as
@@ -428,6 +632,39 @@ def rans_current():
     return cfd_run.current()
 
 
+def _fluent2d_workflow():
+    """scripts.fluent2d_workflow, loaded lazily off the project root —
+    the Workbench chain and its templates load only when the 2D engine
+    or its mesh export is actually used (same lazy pattern as
+    fluent_run's scripts imports)."""
+    import importlib
+    root = str(Path(__file__).resolve().parents[1])
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    return importlib.import_module("scripts.fluent2d_workflow")
+
+
+@app.get("/api/fluent2d/availability")
+def fluent2d_availability():
+    """Can the ANSYS 2D workflow run here? Both halves are required:
+    the Workbench meshing chain (SpaceClaim + Mechanical) and a
+    licensed Fluent for the solve."""
+    from .core import fluent_run
+    fl = fluent_run.availability()
+    try:
+        wb = _fluent2d_workflow().availability()
+    except Exception:
+        # a missing/broken scripts module reads as unavailable, never a 500
+        wb = {"available": False, "awp_root": "", "version": "",
+              "detail": "the ANSYS 2D meshing tools are not installed "
+                        "with this app"}
+    ok = bool(fl.get("available")) and bool(wb.get("available"))
+    detail = "" if ok else "; ".join(
+        d for d in (wb.get("detail"), fl.get("detail")) if d)
+    return {"available": ok, "detail": detail,
+            "fluent": fl, "workbench": wb}
+
+
 # single-run and queue starts guard each other through two different module
 # locks (rans_queue._lock vs cfd_run's job lock), so both guard+start
 # sequences must serialize here — otherwise two concurrent starts can each
@@ -438,6 +675,37 @@ _rans_start_lock = threading.Lock()
 @app.post("/api/rans/start")
 def rans_start(body: RansStartBody):
     _cfg(body.config)   # validate before spawning the job
+    # cross-field engine/mesh validation: a mesh preset handed to the
+    # wrong engine must answer an actionable 422 here, not a deep
+    # ValueError out of a job constructor
+    if body.engine == "fluent2d":
+        if body.mesh_size not in ("default", "studio-yplus1"):
+            raise HTTPException(422, detail=(
+                f"the Fluent 2D engine takes sizing 'default' or "
+                f"'studio-yplus1' — {body.mesh_size!r} is a mesh preset "
+                f"for the OpenFOAM and Fluent engines"))
+    elif body.mesh_size not in ("coarse", "medium", "fine"):
+        raise HTTPException(422, detail=(
+            f"{body.mesh_size!r} is a Fluent 2D sizing mode — the "
+            f"{body.engine} engine takes mesh 'coarse', 'medium' or "
+            f"'fine'"))
+    max_iters = (body.max_iters if body.max_iters is not None
+                 else (FLUENT2D_ITERS if body.engine == "fluent2d"
+                       else RANS_ITERS_DEFAULT))
+    if body.engine != "fluent2d" and max_iters < 100:
+        raise HTTPException(422, detail=(
+            f"the {body.engine} engine needs at least 100 iterations — "
+            f"values down to 50 are only for the Fluent 2D runs that "
+            f"replicate the manual walkthrough"))
+    # the mesh/domain/budget overrides steer the ANSYS 2D chain only:
+    # accepting one silently on another engine would report a sizing the
+    # solve never used
+    settings = body.overrides()
+    if settings and body.engine != "fluent2d":
+        raise HTTPException(422, detail=(
+            f"the {body.engine} engine takes no ANSYS 2D overrides "
+            f"({', '.join(sorted(settings))}) — drop them, or set "
+            f"engine 'fluent2d' to use them"))
     from .core import cfd_run, rans_queue
     with _rans_start_lock:
         # the guard must be two-directional: a single run started in the gap
@@ -450,7 +718,9 @@ def rans_start(body: RansStartBody):
                                             "for it to finish")
         try:
             job_id = cfd_run.start(body.config, body.mesh_size,
-                                   body.max_iters)
+                                   max_iters, body.n_ranks,
+                                   body.engine, body.mesher,
+                                   body.conventions, settings=settings)
         except RuntimeError as e:
             raise HTTPException(409, detail=str(e))
         except (ValueError, TypeError, KeyError) as e:
@@ -481,18 +751,26 @@ class RansQueueBody(BaseModel):
     items: list[dict]
     mesh_size: Literal["coarse", "medium", "fine"] = "medium"
     max_iters: int = Field(default=10000, ge=100, le=20000)
+    # opt-in parallelism: defaults reproduce the sequential serial queue
+    # exactly. n_ranks x max_concurrent is admission-checked against the
+    # machine's core budget (422 when over).
+    n_ranks: int = Field(default=1, ge=1, le=32)
+    max_concurrent: int = Field(default=1, ge=1, le=8)
 
 
 @app.post("/api/rans-queue/start")
 def rans_queue_start(body: RansQueueBody):
-    """Verify an optimizer shortlist sequentially with RANS and re-rank
-    by measured downforce. One queue at a time; shares the single-run
-    solver guard."""
+    """Verify an optimizer shortlist with RANS and re-rank by measured
+    downforce. One queue at a time; shares the single-run solver guard.
+    Sequential serial solves by default — concurrency is an explicit
+    opt-in via n_ranks/max_concurrent."""
     from .core import rans_queue
     try:
         with _rans_start_lock:
             qid = rans_queue.start(body.items, body.mesh_size,
-                                   body.max_iters)
+                                   body.max_iters,
+                                   n_ranks=body.n_ranks,
+                                   max_concurrent=body.max_concurrent)
     except (ValueError, KeyError, TypeError) as e:
         raise HTTPException(422, detail=_err_detail(e))
     except RuntimeError as e:
@@ -527,6 +805,14 @@ def rans_stop(job_id: str):
     if job is None:
         raise HTTPException(404, detail="unknown job")
     if not job.stop_graceful():
+        # the refusal reasons differ per engine: Fluent (slab and 2D)
+        # writes fields only at the end, so there is never a partial
+        # state worth keeping — "not running yet" would be a lie mid-solve
+        if job.snapshot().get("engine") in ("fluent", "fluent2d"):
+            raise HTTPException(409, detail="the Fluent engine writes "
+                                            "fields only at the end — "
+                                            "there is no keep-fields "
+                                            "stop; use Cancel instead")
         raise HTTPException(409, detail="the solver is not running yet — "
                                         "there are no fields to keep; use "
                                         "Cancel instead")
@@ -534,22 +820,45 @@ def rans_stop(job_id: str):
 
 
 @app.get("/api/rans/{job_id}/flow")
-def rans_flow(job_id: str, field: str = "umag"):
-    """The solved section flow as a PNG — rendered once, cached in the
-    case directory."""
+def rans_flow(job_id: str, field: str = "umag", theme: str = "dark",
+              cmap: str = "auto", vmin: float | None = None,
+              vmax: float | None = None, streamlines: bool = True,
+              extent: str = "section"):
+    """The solved section flow as a PNG — rendered per view-settings
+    combination, cached in the case directory. theme/cmap/vmin/vmax/
+    streamlines are the contour-dialog knobs the manual GUI offers."""
     from .core import cfd_run, foam_post
     if field not in ("umag", "cp"):
         raise HTTPException(422, detail="field must be 'umag' or 'cp'")
+    if theme not in ("dark", "light"):
+        raise HTTPException(422, detail="theme must be 'dark' or 'light'")
+    if cmap != "auto" and cmap not in foam_post.FLOW_CMAPS:
+        raise HTTPException(
+            422, detail=f"cmap must be auto or one of "
+                        f"{foam_post.FLOW_CMAPS}")
     job = cfd_run.get(job_id)
     if job is None:
         raise HTTPException(404, detail="unknown job")
     if job.state != "done":
         raise HTTPException(409, detail="the run has not finished")
-    png = job.case_dir / f"flow_{field}.png"
+    if extent not in ("section", "domain"):
+        raise HTTPException(422, detail="extent must be 'section' or "
+                                        "'domain'")
+    key = (f"{field}_{theme}_{cmap}_{vmin if vmin is not None else 'a'}_"
+           f"{vmax if vmax is not None else 'a'}_{int(streamlines)}_"
+           f"{extent}").replace(".", "p").replace("-", "m")
+    png = (job.case_dir / f"flow_{field}.png"
+           if (theme, cmap, vmin, vmax, streamlines, extent)
+           == ("dark", "auto", None, None, True, "section")
+           else job.case_dir / f"flow_{key}.png")
     if png.is_file():
         return Response(content=png.read_bytes(), media_type="image/png")
     try:
-        data = foam_post.flow_png(job.case_dir, job.cfg, field)
+        data = foam_post.flow_png(
+            job.case_dir, job.cfg, field, theme=theme,
+            cmap=None if cmap == "auto" else cmap,
+            vmin=vmin, vmax=vmax, streamlines=streamlines,
+            extent=extent)
     except foam_post.PostError as e:
         raise HTTPException(422, detail=str(e))
     except (OSError, ValueError, KeyError) as e:
@@ -567,6 +876,181 @@ def rans_flow(job_id: str, field: str = "umag"):
     except OSError:
         tmp.unlink(missing_ok=True)
     return Response(content=data, media_type="image/png")
+
+
+@app.get("/api/rans/{job_id}/flowfield")
+def rans_flowfield(job_id: str, nx: int = 320,
+                   extent: str = "section",
+                   x0: float | None = None, y0: float | None = None,
+                   x1: float | None = None, y1: float | None = None,
+                   fields: str = "umag"):
+    """The solved velocity field as JSON for the animated flow view —
+    gridded, interior-masked, cached beside the case like the PNG.
+    extent: "section" (working window) or "domain" (the whole box).
+    x0/y0/x1/y1 (all four, meters) grid an arbitrary window instead —
+    the animated view's level-of-detail path, so a zoomed-in region is
+    re-sampled at full grid resolution. fields="umag,cp" adds the Cp
+    field on the same grid (the animation's pressure backdrop)."""
+    from .core import cfd_run, foam_post
+    nx = max(120, min(int(nx), 640))
+    if extent not in ("section", "domain"):
+        raise HTTPException(422, detail="extent must be 'section' or "
+                                        "'domain'")
+    want = {f.strip() for f in fields.split(",") if f.strip()}
+    if not want or not want <= {"umag", "cp"}:
+        raise HTTPException(422, detail="fields must be a comma list "
+                                        "from: umag, cp")
+    include_cp = "cp" in want
+    window = None
+    coords = (x0, y0, x1, y1)
+    if any(v is not None for v in coords):
+        if any(v is None for v in coords):
+            raise HTTPException(422, detail="a window needs all four of "
+                                            "x0, y0, x1, y1")
+        if not (x1 > x0 and y1 > y0):
+            raise HTTPException(422, detail="window must have positive "
+                                            "spans")
+        window = (x0, y0, x1, y1)
+    job = cfd_run.get(job_id)
+    if job is None:
+        raise HTTPException(404, detail="unknown job")
+    if job.state != "done":
+        raise HTTPException(409, detail="the run has not finished")
+    cache = job.case_dir / (f"flow_field_{nx}_{extent}"
+                            + ("_cp" if include_cp else "") + ".json")
+    if window is None and cache.is_file():
+        return Response(content=cache.read_bytes(),
+                        media_type="application/json")
+    try:
+        data = foam_post.flow_field_json(job.case_dir, job.cfg, nx,
+                                         extent, window,
+                                         include_cp=include_cp)
+    except foam_post.PostError as e:
+        raise HTTPException(422, detail=str(e))
+    except (OSError, ValueError, KeyError) as e:
+        raise HTTPException(422, detail=f"flow field extraction failed: {e}")
+    import json as _json
+    # allow_nan=False: a NaN that slips past the extractor's masking must
+    # fail loudly here, not reach the browser as invalid JSON
+    payload = _json.dumps(data, separators=(",", ":"),
+                          allow_nan=False).encode()
+    # publish atomically, same as the PNG cache above; windowed
+    # (level-of-detail) responses are arbitrary boxes and are not cached
+    if window is None:
+        import os as _os
+        tmp = cache.with_name(
+            f".{cache.name}.{_os.getpid()}.{threading.get_ident()}")
+        try:
+            tmp.write_bytes(payload)
+            _os.replace(tmp, cache)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+    return Response(content=payload, media_type="application/json")
+
+
+@app.post("/api/rans/{job_id}/export/fluent")
+def rans_export_fluent(job_id: str):
+    """Copy a finished Fluent run's solved case into exports/ so it can
+    be opened in ANSYS (Fluent: File > Read > Case & Data; CFD-Post and
+    ParaView read the .h5 pair too). The run directory keeps its own
+    copy; this creates the durable, revealable one under exports/."""
+    import shutil
+    import time as _time
+
+    from .core import cfd_run
+    job = cfd_run.get(job_id)
+    if job is None:
+        raise HTTPException(404, detail="unknown job")
+    # state gate BEFORE the snapshot: a snapshot taken while the job is
+    # still running carries result=None, and a running->done flip between
+    # the two reads would export a README full of placeholders
+    if job.state == "failed":
+        raise HTTPException(409, detail="the run failed — there is no "
+                                        "solved case to export")
+    if job.state == "cancelled":
+        raise HTTPException(409, detail="the run was cancelled — there "
+                                        "is no solved case to export")
+    if job.state != "done":
+        raise HTTPException(409, detail="the run has not finished")
+    snap = job.snapshot()
+    if snap.get("engine") not in ("fluent", "fluent2d"):
+        raise HTTPException(422, detail="this run was solved by the "
+                                        "OpenFOAM engine — the ANSYS "
+                                        "export applies to Fluent runs")
+    cas = job.case_dir / "case.cas.h5"
+    dat = job.case_dir / "case.dat.h5"
+    if not cas.is_file():
+        raise HTTPException(422, detail="this run carries no "
+                                        "case.cas.h5 — the case write "
+                                        "failed (or predates the ANSYS "
+                                        "export); re-run the "
+                                        "verification")
+    EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = _time.strftime("%Y%m%d-%H%M%S")
+    dest = EXPORTS_DIR / f"fluent_case_{stamp}"
+    k = 2
+    # mkdir is the claim — same two-writers guard as the OpenFOAM case
+    # export above
+    while True:
+        try:
+            dest.mkdir()
+            break
+        except FileExistsError:
+            dest = EXPORTS_DIR / f"fluent_case_{stamp}-{k}"
+            k += 1
+    try:
+        files = []
+        for src in (cas, dat, job.case_dir / "config.json"):
+            if src.is_file():
+                shutil.copy2(src, dest / src.name)
+                files.append(src.name)
+        r = snap.get("result") or {}
+        mesh = snap.get("mesh") or {}
+        if snap.get("engine") == "fluent2d":
+            # the 2D engine's conventions are the run's own choice —
+            # report what was actually solved, never the slab recipe
+            conv_block = (
+                "Conventions (as solved - ANSYS Fluent 2D, "
+                f"{r.get('conventions', 'default')} conventions):\n"
+                + (f"  - {r['ref_note']}\n" if r.get("ref_note") else "")
+                + "  - true-2D case meshed by the ANSYS Workbench "
+                "chain\n\n")
+        else:
+            conv_block = (
+                "Conventions (as solved - the studio recipe):\n"
+                "  - reported lift is DOWNFORCE-POSITIVE (force vector "
+                "(0,-1,0))\n"
+                "  - coefficients are chord-referenced (area = chord x "
+                "slab depth)\n"
+                "  - residual auto-stop was DISABLED; convergence was "
+                "judged on\n"
+                "    the force-history drift criterion\n"
+                "  - one-cell 2D slab solved in 3D with symmetry "
+                "z-planes\n\n")
+        (dest / "README.txt").write_text(
+            "Wing Section Studio - ANSYS Fluent case export\n"
+            "==============================================\n\n"
+            "Open in Fluent (2024 R2+): File > Read > Case & Data,\n"
+            "pick case.cas.h5 (case.dat.h5 loads with it). CFD-Post,\n"
+            "EnSight and ParaView read the pair as well.\n\n"
+            + conv_block +
+            f"Run summary: mesh {snap.get('mesh_size', '?')} "
+            f"({mesh.get('n_cells', '?')} cells), "
+            f"{r.get('n_iters_run', '?')} iterations, "
+            f"Cl {r.get('cl_rans', '?')}, Cd {r.get('cd_rans', '?')}, "
+            f"converged: {r.get('converged', '?')}\n"
+            f"Exported {_time.strftime('%Y-%m-%d %H:%M:%S')} from run "
+            f"{job.id}\n",
+            encoding="utf-8")
+        files.append("README.txt")
+    except BaseException:
+        # never leave a half-copied export folder looking complete
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
+    total = sum((dest / f).stat().st_size for f in files)
+    return {"filename": dest.name, "path": str(dest),
+            "dir": str(EXPORTS_DIR), "files": files,
+            "size_bytes": total, "data_included": dat.is_file()}
 
 
 # ---------- screener ----------
@@ -635,7 +1119,12 @@ def export_reveal(body: RevealBody):
 
     Restricted to files inside the exports folder."""
     import subprocess
-    p = Path(body.path).resolve()
+    # resolve() itself rejects a malformed path (an embedded NUL raises
+    # ValueError on Windows) — that is a bad request, not a server fault
+    try:
+        p = Path(body.path).resolve()
+    except (ValueError, OSError):
+        raise HTTPException(422, detail="that is not a usable file path")
     try:
         p.relative_to(EXPORTS_DIR.resolve())
     except ValueError:
@@ -693,6 +1182,224 @@ def export_cfd_save(body: CfdExportBody):
             "dir": str(EXPORTS_DIR), "summary": summary}
 
 
+@app.post("/api/export/fluent-mesh/save")   # before /api/export/{fmt}
+def export_fluent_mesh_save(body: CfdExportBody):
+    """Generate the ANSYS Fluent native-mesh case under exports/:
+    slab.stl geometry + native.msh.h5 (cut by Fluent Meshing at export
+    time — needs a licensed local Fluent and holds a seat for the few
+    minutes it runs) + a conventions README. The solved-case export
+    lives on a finished Fluent verify run."""
+    from .core import cfd_run, fluent_run, rans_queue
+    # config problems answer 422 before any license is touched
+    _cfg(body.config)
+    av = fluent_run.availability()
+    if not av["available"]:
+        raise HTTPException(424, detail=f"ANSYS Fluent unavailable: "
+                                        f"{av['detail']}")
+    # the mesher holds a license and gmsh state — never alongside a
+    # running verification or queue. The check alone is one-directional:
+    # the export must also be REGISTERED as the exclusive claim in
+    # cfd_run so a verify/queue (or second export) started during the
+    # multi-minute meshing is refused rather than exiting the export's
+    # live Fluent session. Guard + claim run under the start mutex so a
+    # concurrent rans_start cannot slip between them.
+    with _rans_start_lock:
+        q = rans_queue.get_current()
+        if q is not None and q.state in ("pending", "running"):
+            raise HTTPException(409, detail="the shortlist queue is "
+                                            "running — wait for it or "
+                                            "cancel it first")
+        try:
+            # refuses while any job is pending/running, or while another
+            # export holds the claim
+            cfd_run.claim_exclusive("a Fluent mesh export")
+        except RuntimeError as e:
+            raise HTTPException(409, detail=str(e))
+    try:
+        return fluent_run.export_native_case(body.config,
+                                             body.mesh_size,
+                                             EXPORTS_DIR)
+    except (ValueError, KeyError) as e:
+        raise HTTPException(422, detail=_err_detail(e))
+    except Exception as e:
+        # a failed launch/mesh is a client-visible condition (license,
+        # install, geometry) — surface the reason, not a bare 500
+        raise HTTPException(422, detail=f"native meshing failed: {e}")
+    finally:
+        cfd_run.release_exclusive()
+
+
+class Fluent2DMeshBody(_AnsysOverrides):
+    config: dict
+    # default = the documented manual ANSYS workflow's sizing exactly
+    # (0.1 mm profile edges, 1 mm first layer x 10); studio-yplus1 = a
+    # resolved wall (y+ ~ 1 first layer, chord-scaled edge sizing).
+    # The inherited overrides ride on top of whichever recipe is picked.
+    sizing: Literal["default", "studio-yplus1"] = "default"
+
+
+@app.post("/api/export/fluent2d-mesh/save")   # before /api/export/{fmt}
+def export_fluent2d_mesh_save(body: Fluent2DMeshBody):
+    """Generate the ANSYS 2D mesh bundle under exports/: the profile +
+    domain DXF plus the true-2D Fluent mesh cut by the Workbench chain
+    (SpaceClaim -> Mechanical — holds ANSYS seats for the minutes it
+    runs) and a README with the solve recipe. The solved-case export
+    lives on a finished verify run."""
+    import shutil
+    import time as _time
+
+    from .core import cfd, cfd_run, rans_queue
+    # config problems answer 422 before any ANSYS process is touched
+    cfg = _cfg(body.config)
+    try:
+        wf = _fluent2d_workflow()
+    except Exception:
+        raise HTTPException(424, detail="the ANSYS 2D meshing tools are "
+                                        "not installed with this app")
+    av = wf.availability()
+    if not av["available"]:
+        raise HTTPException(424, detail=f"ANSYS Workbench tools "
+                                        f"unavailable: {av['detail']}")
+    # the chain holds SpaceClaim/Workbench seats for minutes — never
+    # alongside a running verification or queue. Same wiring as the
+    # Fluent mesh export above: guard + exclusive claim under the start
+    # mutex, work outside it, release in a finally.
+    with _rans_start_lock:
+        q = rans_queue.get_current()
+        if q is not None and q.state in ("pending", "running"):
+            raise HTTPException(409, detail="the shortlist queue is "
+                                            "running — wait for it or "
+                                            "cancel it first")
+        try:
+            cfd_run.claim_exclusive("an ANSYS 2D mesh export")
+        except RuntimeError as e:
+            raise HTTPException(409, detail=str(e))
+    try:
+        # POLYS ONLY from the shared geometry source: the 2D domain
+        # rectangle is write_dxf_2d's own, not the slab box
+        g = cfd.section_geometry(cfg, "coarse")
+        # the recipe first, then whatever the request overrode: the label
+        # stays the recipe's, the numbers reported below are the ones the
+        # chain actually ran with
+        over = body.overrides()
+        sizing = dict(wf.mesh_sizing(body.sizing, cfg))
+        sizing.update({k: v for k, v in over.items() if k in sizing})
+        domain = {k: over[k] for k in ("front_l", "back_l", "top_h")
+                  if k in over}
+        budgets = {k: over[k] for k in ("sc_budget_s", "wb_budget_s")
+                   if k in over}
+        # the clearances the inflation stack faces, exactly as the verify
+        # job computes them: without them the chain cannot cap a stack
+        # that physically cannot fit, and Mechanical's whole generation
+        # collapses (measured: 0 elements in a narrow slot)
+        slot_gaps = [e.get("slot_gap_pct") for e in
+                     (body.config.get("elements") or [])
+                     if isinstance(e, dict) and e.get("slot_gap_pct")]
+        clear = {"slot_gap_mm": (min(slot_gaps) / 100.0 * cfg.chord_m
+                                 * 1000.0 if slot_gaps else None),
+                 "ground_clear_mm": min(float(p[:, 1].min())
+                                        for p, _b in g["polys"]) * 1000.0}
+        EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+        stamp = _time.strftime("%Y%m%d-%H%M%S")
+        dest = EXPORTS_DIR / f"fluent2d_mesh_{stamp}"
+        k = 2
+        # mkdir is the claim — same two-writers guard as the sibling
+        # case exports
+        while True:
+            try:
+                dest.mkdir()
+                break
+            except FileExistsError:
+                dest = EXPORTS_DIR / f"fluent2d_mesh_{stamp}-{k}"
+                k += 1
+        try:
+            dxf = wf.write_dxf_2d([p for p, _b in g["polys"]],
+                                  dest / "section_2d.dxf", **domain)
+            work = dest / "_mesh_work"
+            chain = wf.run_chain(dxf["dxf_path"], work,
+                                 edge_size_mm=sizing["edge_size_mm"],
+                                 first_layer_mm=sizing["first_layer_mm"],
+                                 n_layers=sizing["n_layers"],
+                                 growth=sizing["growth"],
+                                 **clear, **budgets)
+            # the mesh's own inflation, not the request: a capped or
+            # dropped stack must not be documented as the one asked for
+            inflation = chain.get("inflation") or {}
+            meshed = dict(sizing)
+            for k in ("first_layer_mm", "n_layers"):
+                if inflation.get(k) is not None:
+                    meshed[k] = inflation[k]
+            bl_note = inflation.get("note")
+            shutil.copy2(chain["msh_path"], dest / "FFF.msh")
+            shutil.rmtree(work, ignore_errors=True)
+            import json as _json
+            (dest / "config.json").write_text(
+                _json.dumps(body.config, indent=1), encoding="utf-8")
+            (dest / "README.txt").write_text(
+                "Wing Section Studio - ANSYS Fluent 2D mesh export\n"
+                "=================================================\n\n"
+                "FFF.msh is a true-2D Fluent mesh cut by the ANSYS "
+                "Workbench chain\n(SpaceClaim geometry -> Mechanical "
+                "mesh) from section_2d.dxf; the DXF\nis included so the "
+                "geometry can be re-imported or re-meshed by hand.\n\n"
+                "Open in Fluent (2D, double precision): File > Read > "
+                "Mesh, pick\nFFF.msh. Zones arrive named: fluid, inlet, "
+                "outlet, ground,\nupper_bound, profile.\n\n"
+                "Solve recipe (the documented manual ANSYS workflow):\n"
+                f"  - velocity inlet at the design speed "
+                f"({cfg.speed_ms:g} m/s); pressure outlet 0 Pa\n"
+                "  - profile: no-slip stationary wall\n"
+                "  - upper_bound: specified shear = 0\n"
+                "  - ground: moving wall, +x at the inlet speed\n"
+                "  - reference values: compute from inlet, then set "
+                "area 1 m2 and\n    length 1 m explicitly (2D "
+                "coefficients per meter depth)\n"
+                "  - report definitions: lift_coef and drag_coef on the "
+                "profile zone\n    (Fluent default force vectors)\n"
+                "  - hybrid initialization; run 500 iterations, residual "
+                "criteria at\n    the Fluent defaults\n\n"
+                f"Mesh sizing ({body.sizing}"
+                + (" + request overrides" if over else "") + "):\n"
+                f"  - profile edge sizing "
+                f"{meshed['edge_size_mm']:g} mm\n"
+                + (f"  - no inflation layers on the profile boundary\n"
+                   if not meshed["n_layers"] else
+                   f"  - inflation from the profile boundary: first layer "
+                   f"{meshed['first_layer_mm']:g} mm,\n    up to "
+                   f"{meshed['n_layers']} layers, growth "
+                   f"{meshed['growth']:g}\n")
+                + (f"  - {bl_note}\n" if bl_note else "") + "\n"
+                f"Cells: {chain.get('n_cells', '?')}; exported "
+                f"{_time.strftime('%Y-%m-%d %H:%M:%S')}\n",
+                encoding="utf-8")
+        except BaseException:
+            # never leave a half-built export folder looking complete
+            shutil.rmtree(dest, ignore_errors=True)
+            raise
+        files = sorted(p.name for p in dest.iterdir())
+        return {"filename": dest.name, "path": str(dest),
+                "dir": str(EXPORTS_DIR), "files": files,
+                "n_cells": chain.get("n_cells"),
+                "zones": chain.get("zones"),
+                # the recipe label plus the values it actually ran with:
+                # mesh_sizing is what the mesh GOT, requested_sizing what
+                # was asked, inflation the chain's own cap/degrade verdict
+                "sizing": body.sizing, "mesh_sizing": meshed,
+                "requested_sizing": sizing,
+                "inflation": chain.get("inflation"),
+                "overrides": over}
+    except HTTPException:
+        raise
+    except (ValueError, KeyError) as e:
+        raise HTTPException(422, detail=_err_detail(e))
+    except Exception as e:
+        # a failed stage is a client-visible condition (install, license,
+        # geometry) — surface the reason, not a bare 500
+        raise HTTPException(422, detail=f"2D meshing failed: {e}")
+    finally:
+        cfd_run.release_exclusive()
+
+
 @app.post("/api/export/{fmt}")
 def export_file(fmt: str, body: ExportBody):
     data, media, ext = _export_bytes(fmt, body)
@@ -709,18 +1416,28 @@ def export_save(fmt: str, body: ExportBody):
     The server runs on this machine, so saving directly gives the user a
     real, linkable file location instead of a browser download that lands
     who-knows-where."""
+    import os as _os
     import time as _time
     data, _media, ext = _export_bytes(fmt, body)
     EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
     n = len(body.config.get("elements") or [1])
     stamp = _time.strftime("%Y%m%d-%H%M%S")
-    fname = f"wing_section_{n}element_{stamp}.{ext}"
-    path = EXPORTS_DIR / fname
+    path = EXPORTS_DIR / f"wing_section_{n}element_{stamp}.{ext}"
     k = 2
-    while path.exists():
-        path = EXPORTS_DIR / f"wing_section_{n}element_{stamp}-{k}.{ext}"
-        k += 1
-    path.write_bytes(data)
+    # O_EXCL is the claim: an exists() probe would let two same-second
+    # saves pick one name and the second silently replace the first
+    # (same guard as the mkdir loops in the directory exports above)
+    flags = (_os.O_CREAT | _os.O_EXCL | _os.O_WRONLY
+             | getattr(_os, "O_BINARY", 0))
+    while True:
+        try:
+            fd = _os.open(path, flags)
+            break
+        except FileExistsError:
+            path = EXPORTS_DIR / f"wing_section_{n}element_{stamp}-{k}.{ext}"
+            k += 1
+    with _os.fdopen(fd, "wb") as f:
+        f.write(data)
     return {"filename": path.name, "path": str(path),
             "dir": str(EXPORTS_DIR), "size_bytes": len(data)}
 
@@ -892,6 +1609,88 @@ def session_put(body: SessionBody):
     return {"ok": True, "bytes": len(data), "rev": rev}
 
 
+# ---------- preset libraries ----------
+#
+# A preset PUT carries the client's whole library, so two windows editing
+# presets would otherwise silently drop each other's saves. The libraries
+# therefore carry the session file's optimistic-concurrency token: a client
+# that echoes the rev it loaded gets a 409 (with the newer library) instead
+# of overwriting a save it never saw; a client that omits it keeps
+# last-write-wins.
+
+_presets_lock = threading.Lock()
+
+
+def _presets_read(path: Path) -> tuple[int, list]:
+    """Stored (rev, presets); (0, []) when the library does not exist or
+    cannot be read. A pre-rev file is a bare list, at rev 0."""
+    import json as _json
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return 0, []
+    except OSError:
+        return 0, []
+    try:
+        data = _json.loads(raw)
+    except ValueError:
+        return 0, []
+    if (isinstance(data, dict) and set(data) == {"rev", "presets"}
+            and isinstance(data["rev"], int)
+            and isinstance(data["presets"], list)):
+        return data["rev"], data["presets"]
+    return 0, data if isinstance(data, list) else []
+
+
+def _presets_write(path: Path, presets: list, rev: int, stem: str) -> None:
+    """The library at its new rev, atomically. Unique tmp per writer, and
+    os.replace on Windows can transiently fail under an outside reader."""
+    import json as _json
+    import os as _os
+    import time as _time
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(
+        f".{stem}.{_os.getpid()}.{threading.get_ident()}.tmp")
+    try:
+        tmp.write_text(_json.dumps({"rev": rev, "presets": presets},
+                                   indent=1), encoding="utf-8")
+        for attempt in range(4):
+            try:
+                _os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 3:
+                    raise
+                _time.sleep(0.05 * (attempt + 1))
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _preset_name(p: dict, seen: set) -> str:
+    """One preset's name, validated (never coerced: str(["x"]) would
+    store a repr) and unique case-insensitively."""
+    name = p.get("name")
+    if not isinstance(name, str):
+        raise HTTPException(422, detail="each preset name must be text")
+    name = name.strip()
+    if not (1 <= len(name) <= 60):
+        raise HTTPException(422,
+                            detail="each preset needs a name, 1..60 chars")
+    if name.lower() in seen:
+        raise HTTPException(422, detail=f"duplicate preset name {name!r}")
+    seen.add(name.lower())
+    return name
+
+
+def _presets_stale(rev, cur_rev: int, cur_presets: list, what: str) -> None:
+    """409 when the client echoes a rev the library has moved past."""
+    if rev is not None and rev != cur_rev:
+        raise HTTPException(409, detail={
+            "message": f"the {what} presets were saved by another window "
+                       f"since this one loaded them",
+            "rev": cur_rev, "presets": cur_presets})
+
+
 # ---------- rule presets ----------
 #
 # Named rule envelopes ("FSAE 2026", ...) are a machine-level library — the
@@ -905,26 +1704,18 @@ RULE_PRESETS_MAX = 50
 
 class RulePresetsBody(BaseModel):
     presets: list[dict]
+    rev: int | None = None   # optimistic-concurrency token; see above
 
 
 @app.get("/api/rule-presets")
 def rule_presets_get():
-    if not RULE_PRESETS_FILE.exists():
-        return {"presets": []}
-    try:
-        import json as _json
-        data = _json.loads(RULE_PRESETS_FILE.read_text(encoding="utf-8"))
-        return {"presets": data if isinstance(data, list) else []}
-    except Exception:
-        return {"presets": []}
+    rev, presets = _presets_read(RULE_PRESETS_FILE)
+    return {"presets": presets, "rev": rev}
 
 
 @app.put("/api/rule-presets")
 def rule_presets_put(body: RulePresetsBody):
     import dataclasses
-    import json as _json
-    import os as _os
-    import time as _time
     if len(body.presets) > RULE_PRESETS_MAX:
         raise HTTPException(422,
                             detail=f"at most {RULE_PRESETS_MAX} rule presets")
@@ -932,13 +1723,7 @@ def rule_presets_put(body: RulePresetsBody):
     for p in body.presets:
         if not isinstance(p, dict):
             raise HTTPException(422, detail="each preset must be an object")
-        name = str(p.get("name") or "").strip()
-        if not (1 <= len(name) <= 60):
-            raise HTTPException(422,
-                                detail="each preset needs a name, 1..60 chars")
-        if name.lower() in seen:
-            raise HTTPException(422, detail=f"duplicate preset name {name!r}")
-        seen.add(name.lower())
+        name = _preset_name(p, seen)
         try:
             env = geometry.validate_rule_envelope(p.get("envelope") or {})
         except (ValueError, TypeError) as e:
@@ -946,23 +1731,61 @@ def rule_presets_put(body: RulePresetsBody):
         d = dataclasses.asdict(env)
         d.pop("preset_name", None)   # the name lives beside, not inside
         cleaned.append({"name": name, "envelope": d})
-    RULE_PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    data = _json.dumps(cleaned, indent=1)
-    tmp = RULE_PRESETS_FILE.with_name(
-        f".rule_presets.{_os.getpid()}.{threading.get_ident()}.tmp")
-    try:
-        tmp.write_text(data, encoding="utf-8")
-        for attempt in range(4):
-            try:
-                _os.replace(tmp, RULE_PRESETS_FILE)
-                break
-            except PermissionError:
-                if attempt == 3:
-                    raise
-                _time.sleep(0.05 * (attempt + 1))
-    finally:
-        tmp.unlink(missing_ok=True)
-    return {"ok": True, "count": len(cleaned)}
+    # read-check-write under the lock: the stale check is worthless if
+    # another writer can land between it and the replace
+    with _presets_lock:
+        cur_rev, cur = _presets_read(RULE_PRESETS_FILE)
+        _presets_stale(body.rev, cur_rev, cur, "rule")
+        rev = cur_rev + 1
+        _presets_write(RULE_PRESETS_FILE, cleaned, rev, "rule_presets")
+    return {"ok": True, "count": len(cleaned), "rev": rev}
+
+
+# ---------- ANSYS settings presets ----------
+#
+# Named ANSYS 2D settings ("walkthrough parity", "resolved wall", ...) are
+# a machine-level library for the same reason the rule presets are: the
+# meshing recipe belongs to the install and its ANSYS version, not to any
+# one section. The settings a run USED still travel with that run's result.
+
+ANSYS_PRESETS_FILE = SESSION_FILE.parent / "ansys_presets.json"
+ANSYS_PRESETS_MAX = 50
+
+
+class AnsysPresetsBody(BaseModel):
+    presets: list[dict]
+    rev: int | None = None   # optimistic-concurrency token
+
+
+@app.get("/api/ansys-presets")
+def ansys_presets_get():
+    rev, presets = _presets_read(ANSYS_PRESETS_FILE)
+    return {"presets": presets, "rev": rev}
+
+
+@app.put("/api/ansys-presets")
+def ansys_presets_put(body: AnsysPresetsBody):
+    if len(body.presets) > ANSYS_PRESETS_MAX:
+        raise HTTPException(
+            422, detail=f"at most {ANSYS_PRESETS_MAX} ANSYS presets")
+    cleaned, seen = [], set()
+    for p in body.presets:
+        if not isinstance(p, dict):
+            raise HTTPException(422, detail="each preset must be an object")
+        name = _preset_name(p, seen)
+        try:
+            # the same ranges a run enforces: a preset that could not be
+            # started is not worth storing
+            st = _validate_ansys_settings(p.get("settings") or {})
+        except (ValueError, TypeError) as e:
+            raise HTTPException(422, detail=f"preset {name!r}: {e}")
+        cleaned.append({"name": name, "settings": st})
+    with _presets_lock:
+        cur_rev, cur = _presets_read(ANSYS_PRESETS_FILE)
+        _presets_stale(body.rev, cur_rev, cur, "ANSYS")
+        rev = cur_rev + 1
+        _presets_write(ANSYS_PRESETS_FILE, cleaned, rev, "ansys_presets")
+    return {"ok": True, "count": len(cleaned), "rev": rev}
 
 
 @app.get("/api/health")

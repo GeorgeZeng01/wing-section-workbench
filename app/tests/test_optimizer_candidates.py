@@ -265,6 +265,104 @@ finally:
 check("current() prefers the newest job even while it is still pending",
       cur["job_id"] == j_new.id and cur["state"] == "pending", f"({cur})")
 
+# ---- last_candidate_job() tie-break ---------------------------------------
+# back-to-back constructions can land on the same Windows clock tick; the
+# RANS queue must attribute a shortlist to the NEWER run, not the older one
+_saved_jobs = dict(optimizer._jobs)
+try:
+    j_a = optimizer.Job(dict(CFG), {"target_downforce_n": TARGET})
+    j_b = optimizer.Job(dict(CFG), {"target_downforce_n": TARGET})
+    j_b.t_created = j_a.t_created          # forced clock-tick collision
+    j_a.candidates = [{"J": 1.0}]
+    j_b.candidates = [{"J": 2.0}]
+    optimizer._jobs.clear()
+    optimizer._jobs.update({j_a.id: j_a, j_b.id: j_b})
+    picked = optimizer.last_candidate_job()
+finally:
+    optimizer._jobs.clear()
+    optimizer._jobs.update(_saved_jobs)
+check("last_candidate_job breaks t_created ties toward the newer job",
+      picked is j_b, f"(picked {picked.id if picked else None})")
+
+# ---- one interactive search at a time -------------------------------------
+# every start spawns a CPU-bound worker thread; repeated POSTs at a large
+# budget would stack them until the machine wedges. The search itself is
+# stubbed out — the registry guard is what is under test, and stubbing keeps
+# these checks instant.
+import threading  # noqa: E402
+
+GUARD_OPTS = {"target_downforce_n": TARGET, "budget": 10}
+_release = threading.Event()
+_orig_run = optimizer.Job.run
+
+
+def _stub_run(self):
+    with self._lock:
+        self.state = "running"
+    while not (_release.is_set() or self._cancel.is_set()):
+        _time.sleep(0.002)
+    with self._lock:
+        self.state = "cancelled" if self._cancel.is_set() else "done"
+
+
+def _await(job_id, states, timeout=10.0):
+    t0 = _time.time()
+    while _time.time() - t0 < timeout:
+        j = optimizer.get(job_id)
+        if j is not None and j.state in states:
+            return True
+        _time.sleep(0.002)
+    return False
+
+
+def _start_or_refusal(cfg, opts):
+    """(job_id, None) when admitted, (None, message) when refused."""
+    try:
+        return optimizer.start(cfg, opts), None
+    except RuntimeError as e:
+        return None, str(e)
+
+
+_saved_jobs = dict(optimizer._jobs)
+try:
+    optimizer.Job.run = _stub_run
+    optimizer._jobs.clear()
+
+    jid1, _ = _start_or_refusal(CFG, GUARD_OPTS)
+    running = _await(jid1, ("running",))
+    jid_x, busy = _start_or_refusal(CFG, GUARD_OPTS)
+    check("a second start while one runs is refused",
+          running and jid_x is None and busy is not None, f"({busy})")
+    check("the refusal names what is running and what to do about it",
+          busy is not None and "optimization" in busy
+          and "cancel" in busy.lower(), f"({busy})")
+    check("a refused start registers no job", len(optimizer._jobs) == 1,
+          f"({len(optimizer._jobs)} registered)")
+
+    # a finished job must not hold the slot
+    _release.set()
+    finished = _await(jid1, ("done",))
+    _release.clear()
+    jid2, refused2 = _start_or_refusal(CFG, GUARD_OPTS)
+    check("a start after the first one finishes is admitted",
+          finished and jid2 is not None and _await(jid2, ("running",)),
+          f"({refused2})")
+
+    # nor must a cancelled one — the user's way out of a wrong long run
+    optimizer.get(jid2).cancel()
+    cancelled = _await(jid2, ("cancelled",))
+    jid3, refused3 = _start_or_refusal(CFG, GUARD_OPTS)
+    check("a cancelled job frees the slot",
+          cancelled and jid3 is not None and _await(jid3, ("running",)),
+          f"({refused3})")
+finally:
+    _release.set()
+    for _j in optimizer._jobs.values():
+        _j.cancel()
+    optimizer.Job.run = _orig_run
+    optimizer._jobs.clear()
+    optimizer._jobs.update(_saved_jobs)
+
 # ---- shortlist drag slot runs at the element's working CL ----------------
 from app.core import screener  # noqa: E402
 _seen_cl = []

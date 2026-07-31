@@ -285,6 +285,9 @@ check("reveal outside exports folder -> 403", s_rv == 403, f"(got {s_rv})")
 s_rv, _ = call("POST", "/api/export/reveal",
                {"path": (sv["dir"] + "/does-not-exist.dxf") if sv else "x"})
 check("reveal missing file -> 404", s_rv == 404, f"(got {s_rv})")
+s_rv, _ = call("POST", "/api/export/reveal", {"path": "bad\x00path.dxf"})
+check("reveal with an unusable path -> 422, not a 500",
+      s_rv == 422, f"(got {s_rv})")
 
 # ---- error-path consistency: unresolvable specs are client errors ----
 
@@ -307,6 +310,19 @@ s_rf, r_rf = call("POST", "/api/optimize", {
                                 "mode": "refine"}})
 check("optimizer mode 'refine' accepted as alias for 'local'",
       s_rf == 200 and "job_id" in (r_rf or {}), f"(got {s_rf})")
+# one optimization at a time: a second start is refused while this one runs,
+# so release the slot the way the UI does before the next start
+s_busy, _ = call("POST", "/api/optimize",
+                 {"config": GOOD, "options": {"target_downforce_n": 250}})
+check("a second optimize while one runs -> 409", s_busy == 409,
+      f"(got {s_busy})")
+if r_rf and r_rf.get("job_id"):
+    call("POST", f"/api/optimize/{r_rf['job_id']}/cancel")
+    for _ in range(200):
+        s_st, r_st = call("GET", f"/api/optimize/{r_rf['job_id']}")
+        if (r_st or {}).get("state") in ("done", "failed", "cancelled"):
+            break
+        time.sleep(0.05)
 
 # malformed optimizer options are client errors, not background-job failures
 for label, opts in (("budget string", {"budget": "lots"}),
@@ -482,6 +498,18 @@ check("rans start with broken config -> 422", s_rb == 422, f"(got {s_rb})")
 s_ri, _ = call("POST", "/api/rans/start", {"config": GOOD, "max_iters": 7})
 check("rans start with out-of-range iterations -> 422", s_ri == 422,
       f"(got {s_ri})")
+# 50-99 is fluent2d-only territory: the default engine must answer an
+# actionable 422 naming its own floor, not a raw validation blob
+s_ri2, r_ri2 = call("POST", "/api/rans/start",
+                    {"config": GOOD, "max_iters": 60})
+check("rans start with a fluent2d-only iteration count -> 422 naming "
+      "the floor",
+      s_ri2 == 422 and "at least 100 iterations"
+      in str(r_ri2.get("detail", "")), f"(got {s_ri2}: {r_ri2})")
+s_qi, _ = call("POST", "/api/rans-queue/start",
+               {"items": [], "max_iters": 60})
+check("queue start keeps the 100-iteration floor", s_qi == 422,
+      f"(got {s_qi})")
 s_rm, _ = call("POST", "/api/rans/start", {"config": GOOD,
                                            "mesh_size": "ultra"})
 check("rans start with unknown mesh size -> 422", s_rm == 422,
@@ -490,6 +518,115 @@ s_rf1, _ = call("GET", "/api/rans/no-such-job/flow")
 check("flow view of unknown job -> 404", s_rf1 == 404, f"(got {s_rf1})")
 s_rf2, _ = call("GET", "/api/rans/no-such-job/flow?field=vorticity")
 check("flow view with unknown field -> 422", s_rf2 == 422, f"(got {s_rf2})")
+s_rme, _ = call("POST", "/api/rans/start", {"config": GOOD,
+                                            "mesher": "tetgen"})
+check("rans start with unknown mesher -> 422", s_rme == 422,
+      f"(got {s_rme})")
+s_rf3, _ = call("GET", "/api/rans/no-such-job/flowfield?fields=vorticity")
+check("flowfield with unknown fields -> 422", s_rf3 == 422,
+      f"(got {s_rf3})")
+s_rf4, _ = call("GET", "/api/rans/no-such-job/flowfield?fields=umag,cp")
+check("flowfield fields=umag,cp validates, then unknown job -> 404",
+      s_rf4 == 404, f"(got {s_rf4})")
+s_rex, _ = call("POST", "/api/rans/no-such-job/export/fluent")
+check("ANSYS export of unknown job -> 404", s_rex == 404,
+      f"(got {s_rex})")
+# config problems must answer BEFORE any license is touched
+s_fme, _ = call("POST", "/api/export/fluent-mesh/save",
+                {"config": {**GOOD, "elements": ["hello"]}})
+check("fluent mesh export with broken config -> 422", s_fme == 422,
+      f"(got {s_fme})")
+s_fmm, _ = call("POST", "/api/export/fluent-mesh/save",
+                {"config": GOOD, "mesh_size": "ultra"})
+check("fluent mesh export with unknown mesh size -> 422", s_fmm == 422,
+      f"(got {s_fmm})")
+
+# Fluent 2D API surface — cross-field validation fires before any job (or
+# ANSYS process) is spawned, so these stay offline like the rest
+s_2dm, r_2dm = call("POST", "/api/rans/start",
+                    {"config": GOOD, "engine": "fluent2d",
+                     "mesh_size": "coarse"})
+check("fluent2d start with a mesh preset -> 422 naming the sizing modes",
+      s_2dm == 422
+      and "studio-yplus1" in str((r_2dm or {}).get("detail", "")),
+      f"(got {s_2dm})")
+s_ofm, _ = call("POST", "/api/rans/start",
+                {"config": GOOD, "mesh_size": "default"})
+check("openfoam start with a fluent2d sizing -> 422", s_ofm == 422,
+      f"(got {s_ofm})")
+s_flm, _ = call("POST", "/api/rans/start",
+                {"config": GOOD, "engine": "fluent",
+                 "mesh_size": "studio-yplus1"})
+check("fluent start with a fluent2d sizing -> 422", s_flm == 422,
+      f"(got {s_flm})")
+s_cv, _ = call("POST", "/api/rans/start",
+               {"config": GOOD, "engine": "fluent2d", "mesh_size": "default",
+                "conventions": "racing"})
+check("bogus conventions -> 422", s_cv == 422, f"(got {s_cv})")
+s_cvt, _ = call("POST", "/api/rans/start",
+                {"config": GOOD, "engine": "fluent2d",
+                 "mesh_size": "default", "conventions": "team"})
+check("the retired conventions value is no longer accepted", s_cvt == 422,
+      f"(got {s_cvt})")
+
+# ---- ANSYS 2D settings overrides ----
+# every range boundary, over HTTP: one step outside must 422 before any
+# ANSYS process is touched. The in-range twin is NOT sent here — it would
+# start a licensed run.
+for _f, _bad in (("edge_size_mm", 0), ("edge_size_mm", -1),
+                 ("edge_size_mm", float("inf")),
+                 ("growth", float("nan")), ("first_layer_mm", 0),
+                 ("first_layer_mm", -0.5), ("n_layers", -1),
+                 ("n_layers", 101), ("growth", 1.0), ("growth", 3.0001),
+                 ("front_l", 0.49), ("front_l", 20.01),
+                 ("back_l", 0.49), ("back_l", 40.01),
+                 ("top_h", 0.49), ("top_h", 20.01),
+                 ("sc_budget_s", 29.9), ("sc_budget_s", 7200.1),
+                 ("wb_budget_s", 59.9), ("wb_budget_s", 43200.1)):
+    s_ov, _ = call("POST", "/api/rans/start",
+                   {"config": GOOD, "engine": "fluent2d",
+                    "mesh_size": "default", _f: _bad})
+    check(f"rans start with {_f}={_bad} -> 422", s_ov == 422,
+          f"(got {s_ov})")
+# the mesh export shares the same override model — only out-of-range
+# values are sent, so the request dies in validation and no ANSYS seat is
+# ever touched (an in-range one would start a real multi-minute chain)
+for _f, _bad in (("edge_size_mm", -0.05), ("n_layers", 200),
+                 ("growth", 5.0), ("sc_budget_s", 1), ("top_h", 99)):
+    s_ove, _ = call("POST", "/api/export/fluent2d-mesh/save",
+                    {"config": GOOD, "sizing": "default", _f: _bad})
+    check(f"fluent2d mesh export with {_f}={_bad} -> 422", s_ove == 422,
+          f"(got {s_ove})")
+# an override the chosen engine cannot honour must be refused by name
+s_owe, r_owe = call("POST", "/api/rans/start",
+                    {"config": GOOD, "engine": "openfoam",
+                     "mesh_size": "coarse", "first_layer_mm": 0.5})
+check("an ANSYS override on the OpenFOAM engine -> 422 naming the field",
+      s_owe == 422
+      and "first_layer_mm" in str((r_owe or {}).get("detail", "")),
+      f"(got {s_owe}: {r_owe})")
+s_owf, _ = call("POST", "/api/rans/start",
+                {"config": GOOD, "engine": "fluent", "mesh_size": "medium",
+                 "top_h": 6.0})
+check("an ANSYS override on the Fluent slab engine -> 422", s_owf == 422,
+      f"(got {s_owf})")
+s_f2a, r_f2a = call("GET", "/api/fluent2d/availability")
+check("fluent2d availability reports both halves either way",
+      s_f2a == 200 and isinstance((r_f2a or {}).get("available"), bool)
+      and "fluent" in (r_f2a or {}) and "workbench" in (r_f2a or {}),
+      f"(got {s_f2a}: {r_f2a})")
+s_f2e, _ = call("POST", "/api/export/fluent2d-mesh/save",
+                {"config": {**GOOD, "elements": ["hello"]}})
+check("fluent2d mesh export with broken config -> 422", s_f2e == 422,
+      f"(got {s_f2e})")
+s_f2s, _ = call("POST", "/api/export/fluent2d-mesh/save",
+                {"config": GOOD, "sizing": "ultra"})
+check("fluent2d mesh export with unknown sizing -> 422", s_f2s == 422,
+      f"(got {s_f2s})")
+s_f2t, _ = call("POST", "/api/export/fluent2d-mesh/save",
+                {"config": GOOD, "sizing": "team"})
+check("the retired sizing value is no longer accepted", s_f2t == 422,
+      f"(got {s_f2t})")
 
 # XFOIL engine without xfoil.exe must be a clean failed-dependency error
 if not (Path(__file__).resolve().parents[2] / "xfoil" / "xfoil.exe").exists():
@@ -547,6 +684,135 @@ finally:
     if _s_keep == 200 and isinstance(_r_keep, dict):
         call("PUT", "/api/rule-presets",
              {"presets": _r_keep.get("presets", [])})   # restore the library
+
+# ---- ANSYS settings presets ----
+# machine-level state as well (app_data/ansys_presets.json): captured and
+# restored the same way the rule library is
+
+_s_akeep, _r_akeep = call("GET", "/api/ansys-presets")
+s_a0, r_a0 = call("GET", "/api/ansys-presets")
+check("ansys presets GET on a fresh server -> empty list",
+      s_a0 == 200 and isinstance((r_a0 or {}).get("presets"), list),
+      f"(got {s_a0}: {r_a0})")
+_SETTINGS = {"sizing": "studio-yplus1", "conventions": "studio",
+             "n_iters": 800, "n_ranks": 4, "edge_size_mm": 0.35,
+             "first_layer_mm": 0.02, "n_layers": 25, "growth": 1.15,
+             "front_l": 4.0, "back_l": 9.0, "top_h": 4.0,
+             "sc_budget_s": 600, "wb_budget_s": 2400}
+try:
+    s_a1, _ = call("PUT", "/api/ansys-presets", {"presets": [
+        {"name": "Resolved wall", "settings": _SETTINGS}]})
+    s_a2, r_a2 = call("GET", "/api/ansys-presets")
+    _p = ((r_a2 or {}).get("presets") or [{}])[0]
+    check("ansys presets save + reload round-trip",
+          s_a1 == 200 and s_a2 == 200 and len(r_a2["presets"]) == 1
+          and _p.get("name") == "Resolved wall"
+          and _p.get("settings", {}).get("edge_size_mm") == 0.35
+          and _p.get("settings", {}).get("n_iters") == 800,
+          f"(got {s_a1}/{s_a2}: {r_a2})")
+    check("ansys preset: the name lives beside the settings, never inside",
+          "name" not in (_p.get("settings") or {}), f"({_p})")
+    s_a3, r_a3 = call("PUT", "/api/ansys-presets", {"presets": [
+        {"name": "sneaky", "settings": {**_SETTINGS, "name": "inside"}}]})
+    s_a3g, r_a3g = call("GET", "/api/ansys-presets")
+    check("ansys preset: a name smuggled into the settings is dropped",
+          s_a3 == 200
+          and "name" not in (r_a3g["presets"][0].get("settings") or {}),
+          f"(got {s_a3}: {r_a3g})")
+    s_a4, _ = call("PUT", "/api/ansys-presets", {"presets": [
+        {"name": "sparse", "settings": {}}]})
+    s_a4g, r_a4g = call("GET", "/api/ansys-presets")
+    _sp = r_a4g["presets"][0]["settings"]
+    check("ansys preset: an empty settings object stores the documented "
+          "defaults with null overrides",
+          s_a4 == 200 and _sp["sizing"] == "default"
+          and _sp["conventions"] == "default" and _sp["n_iters"] == 500
+          and _sp["n_ranks"] == 1 and _sp["edge_size_mm"] is None,
+          f"(got {s_a4}: {_sp})")
+    # a falsy WRONG value is a wrong value, never coerced into the
+    # default: the retired vocabulary must stay refused in every form
+    for _falsy in ({"sizing": ""}, {"sizing": 0}, {"conventions": ""},
+                   {"conventions": False}, {"n_iters": 0},
+                   {"n_ranks": 0}):
+        s_af, _ = call("PUT", "/api/ansys-presets", {"presets": [
+            {"name": "falsy", "settings": {**_SETTINGS, **_falsy}}]})
+        check(f"ansys preset with {_falsy} -> 422 (never coerced to the "
+              f"default)", s_af == 422, f"(got {s_af})")
+    for _bad_name in (["x"], 123, {"n": 1}):
+        s_anm, _ = call("PUT", "/api/ansys-presets", {"presets": [
+            {"name": _bad_name, "settings": {}}]})
+        check(f"ansys preset name {_bad_name!r} -> 422", s_anm == 422,
+              f"(got {s_anm})")
+    s_a5, _ = call("PUT", "/api/ansys-presets", {"presets": [
+        {"name": "dup", "settings": {}}, {"name": "DUP", "settings": {}}]})
+    check("ansys presets with duplicate names -> 422", s_a5 == 422,
+          f"(got {s_a5})")
+    s_a6, _ = call("PUT", "/api/ansys-presets",
+                   {"presets": [{"name": "", "settings": {}}]})
+    check("ansys preset without a name -> 422", s_a6 == 422, f"(got {s_a6})")
+    s_a7, _ = call("PUT", "/api/ansys-presets",
+                   {"presets": [{"name": "x" * 61, "settings": {}}]})
+    check("ansys preset with a 61-char name -> 422", s_a7 == 422,
+          f"(got {s_a7})")
+    s_a8, _ = call("PUT", "/api/ansys-presets", {"presets": [
+        {"name": f"p{i}", "settings": {}} for i in range(51)]})
+    check("51 ansys presets -> 422", s_a8 == 422, f"(got {s_a8})")
+    s_a9, _ = call("PUT", "/api/ansys-presets", {"presets": [
+        {"name": "n", "settings": ["not", "a", "map"]}]})
+    check("ansys preset with a non-object settings -> 422", s_a9 == 422,
+          f"(got {s_a9})")
+    for _bad in ({"sizing": "team"}, {"conventions": "team"},
+                 {"sizing": "coarse"}, {"n_iters": 49},
+                 {"n_iters": 20001}, {"n_ranks": 0}, {"n_ranks": 33},
+                 {"edge_size_mm": 0}, {"first_layer_mm": -1},
+                 {"n_layers": 101}, {"n_layers": 2.5}, {"growth": 1.0},
+                 {"growth": 3.01}, {"front_l": 0.4}, {"back_l": 41},
+                 {"top_h": 21}, {"sc_budget_s": 29},
+                 {"wb_budget_s": 43201}):
+        s_ab, _ = call("PUT", "/api/ansys-presets", {"presets": [
+            {"name": "bad", "settings": {**_SETTINGS, **_bad}}]})
+        check(f"ansys preset with {_bad} -> 422", s_ab == 422,
+              f"(got {s_ab})")
+    s_ak, r_ak = call("GET", "/api/ansys-presets")
+    check("a refused ansys PUT never replaced the stored library",
+          s_ak == 200 and len(r_ak["presets"]) == 1
+          and r_ak["presets"][0]["name"] == "sparse", f"({r_ak})")
+
+    # null means "the documented default" for EVERY settings key, not
+    # just the nine overrides — a client that spells out all thirteen
+    # keys, null for the ones the user did not touch, is the shape the
+    # contract describes
+    s_an, _ = call("PUT", "/api/ansys-presets", {"presets": [
+        {"name": "nulls", "settings": {"sizing": None, "conventions": None,
+                                       "n_iters": None, "n_ranks": None,
+                                       "edge_size_mm": None}}]})
+    s_ang, r_ang = call("GET", "/api/ansys-presets")
+    _sn = ((r_ang or {}).get("presets") or [{}])[0].get("settings") or {}
+    check("ansys preset: an explicit null is the documented default for "
+          "every key",
+          s_an == 200 and _sn.get("n_iters") == 500
+          and _sn.get("n_ranks") == 1 and _sn.get("sizing") == "default"
+          and _sn.get("conventions") == "default"
+          and _sn.get("edge_size_mm") is None, f"(got {s_an}: {_sn})")
+
+    # revision control: a library saved by another window since this one
+    # loaded it must answer 409, not be silently replaced
+    _rev = (r_ang or {}).get("rev")
+    s_ar1, r_ar1 = call("PUT", "/api/ansys-presets", {
+        "presets": [{"name": "rev a", "settings": {}}], "rev": _rev})
+    s_ar2, r_ar2 = call("PUT", "/api/ansys-presets", {
+        "presets": [{"name": "rev b", "settings": {}}], "rev": _rev})
+    s_arg, r_arg = call("GET", "/api/ansys-presets")
+    check("ansys presets: matching rev accepted, stale rev -> 409 and "
+          "never lands",
+          isinstance(_rev, int) and s_ar1 == 200
+          and (r_ar1 or {}).get("rev") == _rev + 1 and s_ar2 == 409
+          and r_arg["presets"][0]["name"] == "rev a",
+          f"(rev {_rev}, got {s_ar1}/{s_ar2}: {r_arg})")
+finally:
+    if _s_akeep == 200 and isinstance(_r_akeep, dict):
+        call("PUT", "/api/ansys-presets",
+             {"presets": _r_akeep.get("presets", [])})
 
 print(f"\n{sum(results)}/{len(results)} adversarial checks passed")
 sys.exit(0 if all(results) else 1)

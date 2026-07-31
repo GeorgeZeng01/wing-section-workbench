@@ -211,18 +211,6 @@ def list_custom() -> list[dict]:
                 for k, v in _custom.items()]
 
 
-def custom_snapshot() -> dict[str, list]:
-    """Serializable snapshot of the custom registry (for project save)."""
-    with _custom_lock:
-        return {k: v["coords"].tolist() for k, v in _custom.items()}
-
-
-def restore_custom(snapshot: dict[str, list]) -> None:
-    with _custom_lock:
-        for k, pts in snapshot.items():
-            _custom[k] = {"name": k, "coords": np.asarray(pts, float)}
-
-
 def _is_unc_path(s: str) -> bool:
     """True for a UNC share path (``\\\\host\\share\\...`` or ``//host/share/...``).
     Probing such a path with os.stat / Path.exists / Path.resolve opens an
@@ -383,7 +371,130 @@ def repaneled(spec: str, n_per_side: int = 80) -> tuple[str, np.ndarray]:
     return name, rp.copy()
 
 
-def geometry_info(coords: np.ndarray) -> dict:
+# leading-edge radius fit. LE_WINDOW_C is the nose window as a fraction of
+# chord and LE_MIN_NOSE_PTS the number of contour points required on EACH
+# surface inside it. Measured, a 70-panel side supplies 7-9 points per
+# surface inside the window and a 45-panel side — the optimizer's coarse
+# search resolution — 3-6, so the floor starts biting there; by 40 panels a
+# side half the common sections are under it and by 35 all of them are, and
+# the radius is reported unmeasured rather than fitted to four points.
+# LE_FIT_EPS softens the 1/x^2 weighting (below) at the vertex, as a fraction
+# of the window width. LE_MAX_R_GEOM is a self-consistency ceiling: a nose of
+# radius r spans 2*sqrt(2*r*d) of y over a depth d, so the window's own span
+# implies a radius, and a fit far above it is reading the parent contour
+# behind a truncated or faceted edge rather than the edge itself.
+LE_WINDOW_C = 0.02
+LE_MIN_NOSE_PTS = 4
+LE_FIT_EPS = 0.15
+LE_MAX_R_C = 0.5      # a nose rounder than half a chord is not an airfoil
+LE_MAX_R_GEOM = 2.5
+
+
+def _le_fit(c: np.ndarray) -> tuple[float | None, str | None]:
+    """Nose fit on an ALREADY NORMALIZED contour; see le_radius_fit."""
+    i_le = int(np.argmin(c[:, 0]))
+    # walk outward from the nose so the window stays one contiguous run, and
+    # stop at a y reversal: past its own y extremum a surface has left the
+    # nose, and x is no longer a function of y there. Trimming rather than
+    # discarding keeps undercambered noses — the FSAE front-wing family —
+    # measurable, since their lower-surface minimum often falls inside the
+    # window while the nose itself is monotone.
+    j0 = j1 = i_le
+    fold_u = fold_l = False
+    while j0 > 0 and c[j0 - 1, 0] - c[i_le, 0] <= LE_WINDOW_C:
+        if c[j0 - 1, 1] <= c[j0, 1]:
+            fold_u = True
+            break
+        j0 -= 1
+    while j1 < len(c) - 1 and c[j1 + 1, 0] - c[i_le, 0] <= LE_WINDOW_C:
+        if c[j1 + 1, 1] >= c[j1, 1]:
+            fold_l = True
+            break
+        j1 += 1
+    short_u = (i_le - j0) < LE_MIN_NOSE_PTS
+    short_l = (j1 - i_le) < LE_MIN_NOSE_PTS
+    if short_u or short_l:
+        # a run cut short by a reversal is a shape the contour cannot carry;
+        # one cut short by the window edge is only a resolution shortfall
+        return None, ("shape" if (short_u and fold_u) or (short_l and fold_l)
+                      else "coarse")
+    X = c[j0:j1 + 1, 0] - c[i_le, 0]
+    Y = c[j0:j1 + 1, 1] - c[i_le, 1]
+    A = np.column_stack([np.ones_like(Y), Y, Y**2])
+    w = 1.0 / (X + LE_FIT_EPS * max(float(X.max()), 1e-12)) ** 2
+    try:
+        co = np.linalg.lstsq(A * w[:, None], X * w, rcond=None)[0]
+    except np.linalg.LinAlgError:
+        return None, "shape"
+    if not np.all(np.isfinite(co)) or co[2] <= 0.0:
+        return None, "shape"
+    # x'(y) = 0 at the nose vertex, which the constant and linear terms place
+    # exactly. A vertex outside the window means the data hold no vertex at
+    # all, so the fit is describing a flank and must not be reported.
+    yv = -co[1] / (2 * co[2])
+    if not (Y.min() <= yv <= Y.max()):
+        return None, "shape"
+    r = float(1.0 / (2 * co[2]))
+    # the window's own span implies a radius of span^2/(8*depth); a fit far
+    # above it is describing the contour behind a squared-off nose, not the
+    # nose. Cross-multiplied so a zero-depth window cannot divide.
+    span = float(Y.max() - Y.min())
+    if r * 8.0 * float(X.max()) > LE_MAX_R_GEOM * span * span:
+        return None, "shape"
+    if not (0.0 < r < LE_MAX_R_C):
+        return None, "shape"
+    return r, None
+
+
+def le_radius_fit(coords: np.ndarray) -> tuple[float | None, str | None]:
+    """(radius of curvature at the leading edge in chord units, reason).
+
+    The reason is None when the radius was measured, "coarse" when the nose
+    carries too few points at this resolution, and "shape" when the contour
+    itself defeats the fit — a folded, faceted or truncated leading edge has
+    no radius to report, and the remedies for the two differ.
+
+    Near the nose the surface follows y^2 = 2*r*x, so the shape is recovered
+    by least-squares fitting x against y over the first LE_WINDOW_C of chord,
+    using BOTH surfaces: the quadratic coefficient is 1/(2r). Fitting the
+    parabola is far steadier than finite-difference curvature, which on a
+    repaneled spline differentiates the panel spacing as much as the shape.
+
+    Two refinements on the bare parabola:
+
+      * a constant and a linear term absorb the offset between the frontmost
+        contour POINT and the true nose vertex — they differ by up to one
+        panel, and on a cambered section the vertex sits off the x axis;
+      * points are weighted by 1/(x + eps)^2, so the fit is anchored where
+        the parabola is actually valid instead of by the far end of the
+        window, which is where paneling artifacts live.
+
+    Cubic terms were tried and REJECTED. A |y|^3 column carries the sqrt nose
+    and removes a systematic 4-7% underread against the analytic 4-digit NACA
+    radius of 1.1019*t^2, but over a nose window it is near-collinear with
+    y^2 (condition numbers of 1e7 to 1e8 under the nose weighting), so the
+    curvature coefficient is left unconstrained: across the library the
+    recovered radius then swung by 3-6x with panel count alone, flipping a
+    rule verdict on a knob the user changes for solver resolution. The
+    three-term fit holds panel-count spread under 10% over 45..200 panels a
+    side at the cost of that few-percent bias, which is the trade a rule
+    check wants. A y^3 term for camber asymmetry swung by up to 300% on
+    high-camber sections (s1223, e423); the linear term absorbs that
+    asymmetry to first order instead.
+    """
+    return _le_fit(normalize(coords))
+
+
+def le_radius(coords: np.ndarray) -> float | None:
+    """Radius of curvature at the leading edge, in chord units. None when the
+    contour cannot support the fit; le_radius_fit also gives the reason."""
+    return _le_fit(normalize(coords))[0]
+
+
+def geometry_info(coords: np.ndarray, *,
+                  with_le_radius: bool = True) -> dict:
+    """Section measurements in chord units. with_le_radius=False skips the
+    nose fit — the only expensive part — for callers that do not read it."""
     c = normalize(coords)
     x, y = c[:, 0], c[:, 1]
     i_le = int(np.argmin(x))
@@ -395,11 +506,16 @@ def geometry_info(coords: np.ndarray) -> dict:
     camber = 0.5 * (yu + yl)
     j = int(np.argmax(thick))
     k = int(np.argmax(np.abs(camber)))
+    r_le, why = _le_fit(c) if with_le_radius else (None, "skipped")
     return {
         "max_thickness": round(float(thick[j]), 4),
         "x_max_thickness": round(float(xs[j]), 3),
         "max_camber": round(float(camber[k]), 4),
         "x_max_camber": round(float(xs[k]), 3),
         "te_gap": round(float(np.hypot(*(c[0] - c[-1]))), 5),
+        # None when the nose is too coarse or too far from a rounded edge to
+        # measure — a rule check must say "unmeasured", never guess
+        "le_radius": None if r_le is None else round(r_le, 6),
+        "le_radius_reason": why,
         "n_points": int(len(coords)),
     }

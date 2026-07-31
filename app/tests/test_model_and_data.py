@@ -194,6 +194,91 @@ def main():
           and abs(info["x_max_camber"] - 0.40) < 0.015
           and abs(info["max_thickness"] - 0.1200) < 0.0015,
           f"(camber {info['max_camber']} @ {info['x_max_camber']})")
+    # leading-edge radius: a 4-digit NACA nose is analytically 1.1019*t^2, so
+    # the fit is checked against a known number rather than against itself.
+    # The three-term fit reads a sqrt nose systematically low (the |y|^3 term
+    # that removed that bias made the curvature coefficient unconstrained and
+    # cost 3-6x panel-count swings on real sections), so the bar is the
+    # measured 8% envelope over the family, not the fit's own repeatability.
+    for digits in ("0009", "0012", "0018", "2412"):
+        want = 1.1019 * (int(digits[2:]) / 100.0) ** 2
+        got = airfoils.geometry_info(airfoils.naca_coords(digits))["le_radius"]
+        check(f"naca{digits} LE radius matches the analytic 1.1019*t^2",
+              got is not None and abs(got / want - 1) < 0.08,
+              f"(fit {got:.6f} vs {want:.6f}, "
+              f"{(got / want - 1) * 100:+.2f}%)")
+    # the radius is a property of the shape, not of the paneling that carries
+    # it or of the attitude it is drawn at (deflection must not move it).
+    # naca0012 alone is vacuous here — it is the one nose the fit basis
+    # matches exactly; the check has to ride on real library sections, and
+    # over the range the solver and the optimizer's coarse search actually use
+    PANELS = (45, 50, 60, 70, 80, 90, 100, 120, 160, 200)
+    for spec in ("naca0012", "s6063", "sd7034", "e603", "s2091", "e174",
+                 "e403", "s1223", "e423", "fx74modsm"):
+        dens = [airfoils.le_radius(airfoils.repaneled(spec, n)[1])
+                for n in PANELS]
+        got = [v for v in dens if v is not None]
+        check(f"{spec} LE radius is independent of panel count",
+              len(got) >= len(PANELS) - 1 and max(got) / min(got) - 1 < 0.12,
+              f"(spread {max(got) / min(got) - 1:+.1%} over "
+              f"{len(got)}/{len(PANELS)}: {[None if v is None else round(v, 5) for v in dens]})")
+    base_r = airfoils.geometry_info(airfoils.naca_coords("4412"))["le_radius"]
+    rots = [airfoils.geometry_info(
+        geometry.rotate(airfoils.naca_coords("4412"), d))["le_radius"]
+        for d in (-25, -8, 8, 25)]
+    check("LE radius is a rigid-rotation invariant",
+          max(abs(r / base_r - 1) for r in rots) < 0.01,
+          f"({base_r:.6f} -> {rots})")
+    # too few nose points to fit: unknown, never a fabricated number
+    check("coarse contour degrades the LE radius to None",
+          airfoils.geometry_info(airfoils.naca_coords("0012", 6))["le_radius"]
+          is None)
+    check("a coarse nose is reported as a resolution shortfall",
+          airfoils.le_radius_fit(airfoils.naca_coords("0012", 6))
+          == (None, "coarse"))
+    # e379's lower surface turns back the moment it leaves the nose: the two
+    # causes must not be conflated, since raising the panel count fixes one
+    # and does nothing at all for the other
+    check("a folded nose is reported as a shape fault at every resolution",
+          all(airfoils.le_radius_fit(airfoils.repaneled("e379", n)[1])
+              == (None, "shape") for n in (45, 70, 120, 200)))
+    # a squared-off nose is the geometry a blunt-edge rule exists to outlaw:
+    # the fit must refuse it rather than report the parent contour's radius
+    for cut in (0.003, 0.005, 0.01, 0.02, 0.03):
+        cc = airfoils.normalize(airfoils.repaneled("naca0012", 240)[1])
+        i_le = int(np.argmin(cc[:, 0]))
+        up, lo = cc[:i_le + 1], cc[i_le:]
+        yt = float(np.interp(cut, up[::-1, 0], up[::-1, 1]))
+        yb = float(np.interp(cut, lo[:, 0], lo[:, 1]))
+        face = np.array([[cut, y] for y in np.linspace(yt, yb, 21)])
+        chop = np.vstack([up[up[:, 0] > cut], face, lo[lo[:, 0] > cut]])
+        check(f"a nose squared off at {cut*100:.1f}%c reports no radius",
+              airfoils.le_radius_fit(chop) == (None, "shape"),
+              f"({airfoils.le_radius_fit(chop)})")
+    # ...but a sharp nose that IS a nose gets a number, small and honest, so
+    # the rule check fails it instead of skipping it
+    k = np.linspace(0.0, 1.0, 30)
+    cc = airfoils.normalize(airfoils.repaneled("naca0012", 240)[1])
+    i_le = int(np.argmin(cc[:, 0]))
+    up, lo = cc[:i_le + 1], cc[i_le:]
+    yt = float(np.interp(0.06, up[::-1, 0], up[::-1, 1]))
+    yb = float(np.interp(0.06, lo[:, 0], lo[:, 1]))
+    wedge = np.vstack([up[up[:, 0] > 0.06],
+                       np.column_stack([0.06 * k, yt * k])[::-1],
+                       np.column_stack([0.06 * k, yb * k])[1:],
+                       lo[lo[:, 0] > 0.06]])
+    r_wedge = airfoils.le_radius(wedge)
+    check("a wedge nose reads as a small radius, not as unmeasurable",
+          r_wedge is not None and r_wedge < 0.005, f"({r_wedge})")
+    # an undercambered nose whose lower surface passes its own minimum inside
+    # the window is trimmed, not discarded: the drooped-nose family is the
+    # one a front-wing rule check is aimed at
+    droop = [airfoils.le_radius(airfoils.repaneled("fx74modsm", n)[1])
+             for n in (60, 70, 80, 90, 100, 160)]
+    check("an undercambered nose is measured at every panel count",
+          all(v is not None for v in droop)
+          and max(droop) / min(droop) - 1 < 0.12, f"({droop})")
+
     c = airfoils.naca_coords("4412")
     n1 = airfoils.normalize(c)
     check("normalize is a no-op for chord-aligned sections",
@@ -241,6 +326,20 @@ def main():
         check("section at exactly the thickness bound is not filtered out",
               any(abs(r["thickness_pct"] - t_at) < 1e-9 for r in kept),
               f"(bound {t_at}%, {len(kept)} kept)")
+
+        # payload hygiene: underscore-internal helpers stay inside the
+        # screener, and the returned rows must be copies — mutating one
+        # must not corrupt the per-operating-point cache
+        check("screen rows carry no underscore-internal fields",
+              not any(k.startswith("_") for r in all_rows for k in r))
+        check("public row shape is otherwise unchanged",
+              {"spec", "CL_max", "LD_max", "thickness_pct",
+               "confidence"} <= set(all_rows[0]))
+        all_rows[0]["CL_max"] = -999.0
+        again = screener.screen(3e5, 7.0, thickness_pct_min=0.0,
+                                thickness_pct_max=25.0)
+        check("returned rows are copies, not the cached dicts",
+              again[0]["CL_max"] != -999.0)
 
     # ---- 7b. model-shape regressions ----
     # cap floor: a symmetric section at zero incidence has C_free ~ 0, but
