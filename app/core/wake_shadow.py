@@ -78,6 +78,18 @@ SCOPE_HC = (0.0857, 0.1143)          # ride height / chord across the record
 SCOPE_SECTIONS = ("s1223", "as6099", "be6699")   # base specs, wrappers off
 SCOPE_CHORD_RATIO_FLAP = (0.20, 0.381)           # non-main elements
 SCOPE_N_ELEMENTS = (2, 3)
+SCOPE_STACK_AOA = (-4.0, 0.0)        # deg
+SCOPE_DEFLECTION = (0.0, 37.6)       # deg, non-main elements
+SCOPE_SLOT_GAP_PCT = (0.8, 2.0)
+SCOPE_SLOT_OVERLAP_PCT = (0.0, 3.4)
+
+# For context on how narrow that is: measured against optimizer.DEFAULT_BOUNDS
+# the record covers 25.0% of the searchable stack AoA range, 62.7% of
+# deflection, 51.7% of flap chord ratio, 44.4% of slot gap and 68.0% of slot
+# overlap. The three shipped presets all sit INSIDE every one of those spans,
+# so this does not fire on ordinary use -- it fires when a search walks out,
+# which is exactly the situation that produced a confident "ok" on a design
+# carrying 0.38 reversed flow.
 # Knife-edge skirt around the SEP/WARN cutoffs. The cutoffs were calibrated
 # against RANS wall-shear labels, and near separation onset those labels
 # themselves move with the solver's iteration path: the 2026-07-25 cross-
@@ -204,14 +216,37 @@ def scope_check(cfg) -> dict:
                     "envelope": list(SCOPE_SECTIONS),
                     "detail": f"section(s) {', '.join(unknown)} appear "
                               f"nowhere in the calibration record"})
-    lo, hi = SCOPE_CHORD_RATIO_FLAP
-    bad = [round(float(e.chord_ratio), 3) for e in cfg.elements[1:]
-           if not (lo - 1e-6 <= float(e.chord_ratio) <= hi + 1e-6)]
-    if bad:
-        out.append({"axis": "flap_chord_ratio", "value": bad,
-                    "envelope": [lo, hi],
-                    "detail": f"flap chord ratio(s) {bad} outside the "
-                              f"measured {lo:.3f}-{hi:.3f}"})
+    def _flap_axis(axis, attr, env, label, fmt="{:.3f}"):
+        lo_, hi_ = env
+        vals = []
+        for e in cfg.elements[1:]:
+            v = getattr(e, attr, None)
+            if v is None:
+                continue
+            v = float(v)
+            if not (lo_ - 1e-6 <= v <= hi_ + 1e-6):
+                vals.append(round(v, 3))
+        if vals:
+            out.append({"axis": axis, "value": vals, "envelope": [lo_, hi_],
+                        "detail": f"{label} {vals} outside the measured "
+                                  f"{fmt.format(lo_)}-{fmt.format(hi_)}"})
+
+    _flap_axis("flap_chord_ratio", "chord_ratio", SCOPE_CHORD_RATIO_FLAP,
+               "flap chord ratio(s)")
+    _flap_axis("deflection_deg", "deflection_deg", SCOPE_DEFLECTION,
+               "flap deflection(s)", "{:.1f}")
+    _flap_axis("slot_gap_pct", "slot_gap_pct", SCOPE_SLOT_GAP_PCT,
+               "slot gap(s)", "{:.2f}")
+    _flap_axis("slot_overlap_pct", "slot_overlap_pct",
+               SCOPE_SLOT_OVERLAP_PCT, "slot overlap(s)", "{:.2f}")
+
+    aoa = float(cfg.stack_aoa_deg)
+    lo_a, hi_a = SCOPE_STACK_AOA
+    if not (lo_a - 1e-6 <= aoa <= hi_a + 1e-6):
+        out.append({"axis": "stack_aoa_deg", "value": round(aoa, 3),
+                    "envelope": [lo_a, hi_a],
+                    "detail": f"stack AoA {aoa:.2f} deg outside the measured "
+                              f"{lo_a:.1f} to {hi_a:.1f}"})
     return {"in_scope": not out, "out": out}
 
 

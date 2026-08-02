@@ -583,3 +583,34 @@ the code now says so at every site.
 - **Field probe: 5/6.** Attached 0.0000 / 0.0000, separated 0.2893 / 0.3263
   / 0.3848 — a clean gap — with one miss on the boundary case whose wall
   shear was 0.217, consistent with the smearing bias noted above.
+
+## 2026-08-02 — How much of the search space the screen was ever checked on
+
+Per-variable, the calibration record against `optimizer.DEFAULT_BOUNDS`:
+
+| variable | record span | optimizer bounds | % of box inside the record |
+|---|---|---|---|
+| stack_aoa_deg | −4.0 … 0.0 | −4.0 … 12.0 | **25.0 %** |
+| deflection_deg | 0.0 … 37.6 | 0.0 … 60.0 | 62.7 % |
+| flap chord_ratio | 0.200 … 0.381 | 0.15 … 0.50 | 51.7 % |
+| slot_gap_pct | 0.80 … 2.00 | 0.80 … 3.50 | 44.4 % |
+| slot_overlap_pct | 0.00 … 3.40 | 0.00 … 5.00 | 68.0 % |
+
+Multiplying those gives **2.45 %** of the default search box. Treat that
+number as indicative only: it is a box-volume statistic assuming uniform
+independent sampling, and the optimizer runs a directed search seeded from a
+real design, so it does not sample the box uniformly. The per-axis figures
+are the defensible ones and they are stark enough on their own — the screen
+has never been checked above stack AoA 0°, and the search goes to +12°.
+
+**The three shipped presets sit inside every one of those spans**, so this
+is not a claim that ordinary use is unvalidated. It is a claim about where a
+*search* can walk to, and the design that drew a confident "ok" while
+carrying 0.38 reversed flow had walked out on three axes at once: sections
+absent from the record, a flap chord ratio of 0.5 against a 0.381 maximum,
+and slot gaps of 3.0 and 2.1 against a 2.00 maximum.
+
+`scope_check` now covers all seven axes (sections, h/c, element count, flap
+chord ratio, deflection, slot gap, slot overlap, stack AoA). Widening it left
+every calibration case in scope and two of the three presets quiet; the third
+(E423) legitimately trips on sections and overlap.
