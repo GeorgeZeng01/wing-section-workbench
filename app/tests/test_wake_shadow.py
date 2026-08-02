@@ -246,6 +246,68 @@ def main():
         check("healthy baseline: zero shadow penalty, no note",
               a3["penalty"] < 1e-9 and job3.shadow_note is None)
 
+    # ---- validated envelope -------------------------------------------
+    # The module's scope paragraph was prose that nothing enforced, and a
+    # design outside it drew a confident "ok". Measured on two converged
+    # wall-resolved Fluent solves: shadow_min 0.5471 ("ok", zero penalty)
+    # against 0.3848 reversed near-wall stations on element 2, and moving
+    # the screen to 0.5607 left the flow at 0.3895 — outside the envelope
+    # the metric is not even directional.
+    import json as _json
+    from app.core.geometry import StackConfig as _SC
+
+    _cal = Path(ROOT) / "docs" / "calibration"
+    _truth = _json.loads((_cal / "wall_truth.json").read_text(
+        encoding="utf-8"))
+    _by = {c["case_id"]: c for c in _truth["cases"]}
+    _in = True
+    for _c in _truth["cases"]:
+        _cf = _c["config"]
+        if isinstance(_cf, str) and _cf.startswith("same_as:"):
+            _cf = _by[_cf.split(":", 1)[1]]["config"]
+        _in = _in and wake_shadow.scope_check(_SC.from_dict(_cf))["in_scope"]
+    check("every case the screen was CALIBRATED on is inside the envelope "
+          "derived from it — the envelope must bound its own record", _in)
+
+    _seed = _cal.parent.parent / "app_data" / "rans" / "09c6de53265a" \
+        / "config.json"
+    if _seed.is_file():
+        _sc = wake_shadow.scope_check(
+            _SC.from_dict(_json.loads(_seed.read_text(encoding="utf-8"))))
+        _ax = {o["axis"] for o in _sc["out"]}
+        check("the design that read 'ok' while measuring 0.38 reversed is "
+              "flagged out of scope, on sections and proportions",
+              _sc["in_scope"] is False
+              and {"sections", "flap_chord_ratio"} <= _ax, f"({_ax})")
+    else:
+        print("NOTE  retained seed config absent — the out-of-scope pin did "
+              "NOT run here")
+
+    check("wrappers come off before a section is compared",
+          wake_shadow.base_section("shape:+0.0055:-0.0115:+0.0075:0.960:s1223")
+          == "s1223"
+          and wake_shadow.base_section("mfg:thicken:2:s1223") == "s1223"
+          and wake_shadow.base_section("S1223") == "s1223")
+    check("an in-scope design produces no scope warning, so the note stays "
+          "meaningful instead of becoming wallpaper",
+          wake_shadow.scope_warning(_SC.from_dict(
+              _by[_truth["cases"][0]["case_id"]]["config"]
+              if not isinstance(_truth["cases"][0]["config"], str)
+              else _by[_truth["cases"][0]["config"].split(":", 1)[1]]
+              ["config"])) is None)
+    _out_note = wake_shadow.scope_warning(_SC.from_dict({
+        "elements": [{"airfoil": "naca2412", "chord_ratio": 1.0,
+                      "deflection_deg": 0},
+                     {"airfoil": "naca2412", "chord_ratio": 0.9,
+                      "deflection_deg": 20, "slot_gap_pct": 1.5,
+                      "slot_overlap_pct": 3.0}],
+        "stack_aoa_deg": 0.0, "ride_height_mm": 30, "chord_mm": 350,
+        "span_mm": 1400, "speed_ms": 15, "n_panels_per_side": 45}))
+    check("an out-of-scope design says the reading is not evidence EITHER "
+          "way — never that it passed",
+          _out_note is not None and "not evidence" in _out_note
+          and "pass" not in _out_note.lower())
+
     print(f"\n{sum(results)}/{len(results)} wake-shadow checks passed")
     return all(results)
 

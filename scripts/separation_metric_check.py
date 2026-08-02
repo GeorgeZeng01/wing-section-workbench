@@ -432,6 +432,56 @@ def main() -> int:
 
     report_candidates(truth)
 
+    # the shipped envelope must still bound the record it was derived from
+    print("\n=== validated envelope vs the record ===")
+    hc, secs, flaps, ns = [], set(), [], set()
+    cfgs = [c["config"] for c in truth["cases"]]
+    for p in sorted(CAL.glob("*.json")):
+        if p.name == "wall_truth.json":
+            continue
+        try:
+            d = json.loads(p.read_text(encoding="utf-8"))
+        except ValueError:
+            continue
+        if isinstance(d, dict) and "elements" in d:
+            cfgs.append(d)
+    for d in cfgs:
+        hc.append(d["ride_height_mm"] / d["chord_mm"])
+        ns.add(len(d["elements"]))
+        for i, e in enumerate(d["elements"]):
+            secs.add(wake_shadow.base_section(e.get("airfoil")))
+            if i:
+                flaps.append(float(e.get("chord_ratio", 1.0)))
+    rows = [
+        ("h/c", (min(hc), max(hc)), wake_shadow.SCOPE_HC,
+         min(hc) >= wake_shadow.SCOPE_HC[0] - 1e-6
+         and max(hc) <= wake_shadow.SCOPE_HC[1] + 1e-6),
+        ("flap chord ratio", (min(flaps), max(flaps)),
+         wake_shadow.SCOPE_CHORD_RATIO_FLAP,
+         min(flaps) >= wake_shadow.SCOPE_CHORD_RATIO_FLAP[0] - 1e-6
+         and max(flaps) <= wake_shadow.SCOPE_CHORD_RATIO_FLAP[1] + 1e-6),
+        ("element count", (min(ns), max(ns)), wake_shadow.SCOPE_N_ELEMENTS,
+         min(ns) >= wake_shadow.SCOPE_N_ELEMENTS[0]
+         and max(ns) <= wake_shadow.SCOPE_N_ELEMENTS[1]),
+    ]
+    env_ok = True
+    for label, obs, env, ok in rows:
+        env_ok = env_ok and ok
+        print(f"  {label:18s} record {obs[0]:.4f}..{obs[1]:.4f}  "
+              f"envelope {env[0]}..{env[1]}  "
+              + ("bounds it" if ok else "<< ENVELOPE NO LONGER BOUNDS THE "
+                                        "RECORD"))
+    missing = sorted(secs - set(wake_shadow.SCOPE_SECTIONS))
+    env_ok = env_ok and not missing
+    print(f"  {'sections':18s} record {sorted(secs)}")
+    print(f"  {'':18s} envelope {list(wake_shadow.SCOPE_SECTIONS)}  "
+          + ("covers it" if not missing
+             else f"<< MISSING {missing}"))
+    if not env_ok:
+        print("  The record has grown past the shipped envelope. Widen "
+              "wake_shadow.SCOPE_* to match, or the scope warning will "
+              "fire on designs the screen now HAS been validated against.")
+
     print("\n=== verdict ===")
     # the march's attached pool must include the VALIDATED baseline: its
     # flap carries a nose-spill bubble the first-crossing rule reads as

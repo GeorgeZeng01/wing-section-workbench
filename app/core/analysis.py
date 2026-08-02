@@ -400,6 +400,12 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
             "apply the suggested k_g to recalibrate.")
     sig_warnings = slot_signature_warnings(design)
     warnings += sig_warnings
+    # scope FIRST: if the screen was never validated on a design like this,
+    # the reading that follows is not evidence, and the user has to know
+    # that before reading it rather than after
+    scope_note = wake_shadow.scope_warning(cfg)
+    if scope_note:
+        warnings.append(scope_note)
     warnings += shadow_warnings(shadows, design)
     if cfg.ride_height_c < HC_CHOKE_OPTIMISM:
         warnings.append(
@@ -624,6 +630,10 @@ def _sweep_point(cfg: StackConfig, design: list[dict], installed: list[dict],
     if rules is not None and not rules["ok"]:
         n_warnings += len(rules["violations"])
     n_warnings += len(slot_signature_warnings(design))
+    # the scope note is one of analyze()'s warnings, so the sweep has to
+    # count it too or the two disagree about the same design
+    if wake_shadow.scope_warning(cfg) is not None:
+        n_warnings += 1
     n_warnings += len(shadow_warnings(
         wake_shadow.stack_shadow(free, ground, r_gain), design))
 

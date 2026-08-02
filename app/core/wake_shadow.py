@@ -58,6 +58,26 @@ import numpy as np
 SHADOW_SEP = 0.50    # predicted top-side collapse below this (mid-gap of
                      # the measured classes, and half the freestream)
 SHADOW_WARN = 0.53   # penalty onset / caution band top
+
+# ---------------------------------------------------------------------------
+# Validated envelope. MEASURED over every config in docs/calibration, not
+# asserted: scripts/separation_metric_check.py re-derives these from the
+# record and fails if they stop bounding it.
+#
+# This exists because the scope paragraph above was prose that nothing
+# enforced, and a design outside it got a confident "ok". Measured on two
+# converged wall-resolved Fluent solves: a stack running sections absent from
+# the record, with a second element at chord ratio 0.5 against a 0.381
+# maximum, read shadow_min 0.5471 ("ok", zero penalty) while its second
+# element carried 0.3848 reversed near-wall stations. Moving the screen to
+# 0.5607 left the flow unchanged at 0.3895 -- outside the envelope the metric
+# is not merely mis-scaled, it is not even directional.
+#
+# A reading outside this envelope is not evidence. It is not a pass either.
+SCOPE_HC = (0.0857, 0.1143)          # ride height / chord across the record
+SCOPE_SECTIONS = ("s1223", "as6099", "be6699")   # base specs, wrappers off
+SCOPE_CHORD_RATIO_FLAP = (0.20, 0.381)           # non-main elements
+SCOPE_N_ELEMENTS = (2, 3)
 # Knife-edge skirt around the SEP/WARN cutoffs. The cutoffs were calibrated
 # against RANS wall-shear labels, and near separation onset those labels
 # themselves move with the solver's iteration path: the 2026-07-25 cross-
@@ -132,6 +152,82 @@ def element_sides(mid: np.ndarray, vt: np.ndarray, lengths: np.ndarray,
     if ya <= yb:
         return {"lower": a, "upper": b, "s_total": s_total}
     return {"lower": b, "upper": a, "s_total": s_total}
+
+
+def base_section(spec) -> str:
+    """The underlying airfoil behind any wrapper spec.
+
+    "shape:b:b:b:ts:BASE" and "mfg:mode:gap:BASE" both wrap another spec,
+    and can nest. The validated envelope is about the SECTION, so the
+    wrappers come off before the comparison."""
+    s = str(spec or "")
+    for _ in range(4):
+        if s.startswith("shape:") or s.startswith("mfg:"):
+            s = s.split(":")[-1]
+        else:
+            break
+    return s.strip().lower()
+
+
+def scope_check(cfg) -> dict:
+    """Which axes of the validated envelope this design leaves.
+
+    The screen's numbers are evidence only inside the envelope they were
+    measured in. Outside it a reading is neither a pass nor a fail: it is
+    not evidence. This reports that rather than letting a confident number
+    travel unlabelled, which is exactly what happened on the design that
+    read "ok" at shadow_min 0.5471 while carrying 0.38 reversed near-wall
+    stations on its second element.
+
+    Returns {"in_scope": bool, "out": [{axis, value, envelope, detail}]}.
+    Deliberately NOT a verdict on the design — a stack outside the envelope
+    may be perfectly healthy. It is a statement about what the screen knows.
+    """
+    out = []
+    n = len(cfg.elements)
+    if not (SCOPE_N_ELEMENTS[0] <= n <= SCOPE_N_ELEMENTS[1]):
+        out.append({"axis": "n_elements", "value": n,
+                    "envelope": list(SCOPE_N_ELEMENTS),
+                    "detail": f"{n}-element stack; the record holds "
+                              f"{SCOPE_N_ELEMENTS[0]}- to "
+                              f"{SCOPE_N_ELEMENTS[1]}-element stacks"})
+    hc = float(cfg.ride_height_c)
+    if not (SCOPE_HC[0] - 1e-6 <= hc <= SCOPE_HC[1] + 1e-6):
+        out.append({"axis": "ride_height_c", "value": round(hc, 4),
+                    "envelope": list(SCOPE_HC),
+                    "detail": f"h/c {hc:.4f} is outside the measured "
+                              f"{SCOPE_HC[0]:.4f}-{SCOPE_HC[1]:.4f}"})
+    unknown = sorted({base_section(e.airfoil) for e in cfg.elements}
+                     - set(SCOPE_SECTIONS))
+    if unknown:
+        out.append({"axis": "sections", "value": unknown,
+                    "envelope": list(SCOPE_SECTIONS),
+                    "detail": f"section(s) {', '.join(unknown)} appear "
+                              f"nowhere in the calibration record"})
+    lo, hi = SCOPE_CHORD_RATIO_FLAP
+    bad = [round(float(e.chord_ratio), 3) for e in cfg.elements[1:]
+           if not (lo - 1e-6 <= float(e.chord_ratio) <= hi + 1e-6)]
+    if bad:
+        out.append({"axis": "flap_chord_ratio", "value": bad,
+                    "envelope": [lo, hi],
+                    "detail": f"flap chord ratio(s) {bad} outside the "
+                              f"measured {lo:.3f}-{hi:.3f}"})
+    return {"in_scope": not out, "out": out}
+
+
+def scope_warning(cfg) -> str | None:
+    """One line for the user when the screen is being asked something it was
+    never validated to answer. None when the design is inside the envelope."""
+    sc = scope_check(cfg)
+    if sc["in_scope"]:
+        return None
+    return ("separation screen out of validated scope — "
+            + "; ".join(o["detail"] for o in sc["out"])
+            + ". Its reading for this design is not evidence either way "
+              "(measured: a design outside this envelope read 'ok' while "
+              "RANS found 38% reversed flow on its second element, and "
+              "moving the screen did not move the flow). Verify with RANS "
+              "rather than trusting the screen here.")
 
 
 def stack_shadow(free_sol, ground_sol, r_gain: float) -> list[dict]:
