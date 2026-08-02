@@ -11,12 +11,40 @@ returns a candidate. It does NOT verify. A repaired candidate is a
 hypothesis until a solver run measures it, and the module says so in its
 verdict rather than implying otherwise.
 
-Why searching the cheap model is sound even though the cheap screen is the
-thing that misses collapses: repair needs the screen to be DIRECTIONALLY
-right (opening a slot helps, closing it hurts), not accurate. Where the true
-line sits is a calibration question this module deliberately does not answer;
-which way to walk is a much weaker requirement, and it is the only one the
-search actually leans on.
+THE PREMISE BELOW IS MEASURED FALSE ON AT LEAST ONE DESIGN CLASS. READ THIS
+BEFORE TRUSTING A REPAIR.
+
+The design argument was: repair needs the screen to be DIRECTIONALLY right
+(opening a slot helps, closing it hurts), not accurate. Where the true line
+sits is a calibration question; which way to walk is a much weaker
+requirement, and it is the only one the search leans on.
+
+A/B against converged, wall-resolved Fluent 2D solves killed that for the
+09c6de53265a design:
+
+    seed    screen shadow_min 0.5471 -> measured e2 reversed 0.3848
+    repair  screen shadow_min 0.5607 -> measured e2 reversed 0.3895
+
+The screen moved its metric up 2.5% and past its own "ok" threshold with
+margin. The measured collapse did not move -- it is marginally worse. The
+screen is not merely miscalibrated here, it is NOT DIRECTIONAL: walking
+uphill on it does not walk uphill on the flow.
+
+So on this design class a repair verdict of "repaired" means only that the
+screen is satisfied, which has been shown to mean nothing. Two things follow.
+(1) A repair MUST be solver-verified before it is believed; the verified=False
+flag on every verdict is not a formality. (2) The search needs a screen that
+tracks the collapse before it can work here at all -- see the harvest sink
+and the drag column, which DID track it (delta_cd_pct read +442.7% and
++438.4%, correctly calling both designs badly separated, while shadow_min
+called both "ok").
+
+Untested hypothesis for WHY, worth checking before rebuilding anything: the
+wake-shadow screen scopes its own validity to "s1223-class sections", and
+this seed is s1223rtl / s1223 / mid53b at chord ratios 1 / 0.5 / 0.26, well
+away from the 1 / 0.28 / 0.2 all-s1223 stack it was calibrated on. The screen
+may not be wrong everywhere so much as silently out of scope here -- and
+nothing currently warns when a design leaves the envelope it was fitted in.
 
 WHAT IT AIMS AT. The attached band with margin, not zero reversal. The
 target is SHADOW_WARN + SHADOW_HEADROOM, both shipped constants -- the
