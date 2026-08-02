@@ -4,14 +4,23 @@ Pins cfd_run.delta_cd: measured profile Cd against the attached-flow
 estimate's CD_profile_stack, and the upper-bound flag that must ride with
 it whenever the estimate's polar lookup was capped.
 
-Why this column exists at all: separation reads far louder in drag than in
-lift. The record has a separated three-element section at a section Cd
-around 4x the estimate's capped stack value, against -14..-42% on the lift
-side, so a stack that looks only mildly off on Cl can be shouting on Cd.
+WHAT THIS COLUMN IS NOT. It was introduced believing separation reads louder
+in drag than in lift. Six converged Fluent 2D solves refuted that: an
+ATTACHED validated baseline reads +626.1% and +524.2%, while designs every
+other channel calls separated read +582.1%, +523.9%, +442.7% and +395.5%.
+The classes overlap completely and the healthiest design in the set reads
+HIGHEST. is_upper_bound came back True on all six — the polar lookup was
+capped every time — so what the column tracks is how far the capped
+attached-flow estimate falls short of a loaded ground-effect stack's real
+drag, and that gap is 4-6x regardless of what the flow is doing.
 
-What this suite deliberately does NOT pin: any threshold on the delta.
-What a given excess means for attachment is a calibration question against
-the wall-shear record, not a constant chosen in the runner.
+It is kept because a 5x gap is real information about the ESTIMATE: it says
+the estimate's drag is not usable for this design. It must never be read as
+a statement about attachment, and this suite pins the arithmetic and the
+bound semantics only.
+
+What this suite deliberately does NOT pin: any threshold on the delta. There
+is no threshold to pin — the classes do not separate.
 
 Run directly:  .venv\\Scripts\\python.exe app\\tests\\test_delta_cd.py
 """
@@ -58,7 +67,8 @@ check("exactly zero estimate -> (None, False)",
 # ---- the ratio itself ----
 
 d, b = cfd_run.delta_cd(0.4, panel(0.1))
-check("4x the estimate reads +300% (the separated-section record)",
+check("4x the estimate reads +300% — arithmetic only, NOT a verdict on "
+      "attachment (an attached baseline measured +626%)",
       d == 300.0 and b is False, f"({d}, {b})")
 d, _ = cfd_run.delta_cd(0.1, panel(0.1))
 check("measured equals estimate -> 0.0%", d == 0.0, f"({d})")

@@ -748,9 +748,13 @@ class FluentJob:
                                  if panel and abs(panel["c_est"]) > 1e-9
                                  else None),
                 "delta_cl_provisional": not converged,
-                # drag carries the separation signal far more loudly than
-                # lift does; an upper-bound flag rides with it because a
-                # capped polar lookup understates the estimate's drag
+                # NOT a separation signal: measured, an ATTACHED
+                # validated baseline reads +626% and a separated case
+                # +396%, so the classes overlap and the healthy design
+                # reads highest (see cfd_run.delta_cd). It measures the
+                # capped polar estimate's shortfall against a loaded
+                # stack's real drag -- information about the estimate,
+                # not about the flow.
                 "delta_cd_pct": d_cd,
                 "delta_cd_is_upper_bound": d_cd_bound,
                 "cl_trend_note": (

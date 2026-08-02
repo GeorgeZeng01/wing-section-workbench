@@ -365,11 +365,30 @@ def delta_cd(cd_rans: float, panel: dict | None) -> tuple:
     Returns (delta_pct, is_upper_bound); (None, False) when the estimate
     is missing or degenerate.
 
-    This is the sharper of the two comparison columns. Separation reads
-    far louder in drag than in lift: the record has a separated
-    three-element section at a section Cd around 4x the estimate's capped
-    stack value (analysis.py, fine mesh) against -14..-42% on the lift
-    side. A stack that reads only mildly off on Cl can be shouting on Cd.
+    NOT A SEPARATION DETECTOR. Measured and refuted -- read this before
+    using it as one, because the column was introduced believing it was.
+
+    Six converged Fluent 2D solves, delta_cd_pct against the measured
+    attachment state:
+
+        ATTACHED  validated baseline 30mm   +626.1%
+        separated 859e79a7486d              +582.1%
+        ATTACHED  validated baseline 40mm   +524.2%
+        separated 1c4bf2d726c3              +523.9%
+        separated 09c6de53265a              +442.7%
+        separated df1865bb82a3              +395.5%
+
+    The classes overlap completely and the healthiest design in the set
+    reads HIGHEST. What this column actually measures is how far the
+    attached-flow polar estimate falls short of a loaded ground-effect
+    stack's real drag, and that shortfall is 4-6x whatever the flow is
+    doing -- note is_upper_bound came back True on all six, i.e. the polar
+    lookup was capped every time. The cap dominates; separation does not
+    move it enough to see.
+
+    It remains worth reporting: a 5x gap says the estimate's drag is not
+    usable for this design, which is real information. It is just
+    information about the ESTIMATE, not about the flow.
 
     Basis: 2D RANS Cd is profile (pressure + friction) drag, compared
     against CD_profile_stack and never the total — induced drag is a 3D
@@ -1040,9 +1059,13 @@ class RansJob:
                 # history — the UI must not present it as the design's
                 # measured error
                 "delta_cl_provisional": not converged,
-                # drag carries the separation signal far more loudly than
-                # lift does; an upper-bound flag rides with it because a
-                # capped polar lookup understates the estimate's drag
+                # NOT a separation signal: measured, an ATTACHED
+                # validated baseline reads +626% and a separated case
+                # +396%, so the classes overlap and the healthy design
+                # reads highest (see cfd_run.delta_cd). It measures the
+                # capped polar estimate's shortfall against a loaded
+                # stack's real drag -- information about the estimate,
+                # not about the flow.
                 "delta_cd_pct": d_cd,
                 "delta_cd_is_upper_bound": d_cd_bound,
                 "cl_trend_note": trend_note,

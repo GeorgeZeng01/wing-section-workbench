@@ -542,3 +542,44 @@ to stop anyone fitting C2 on field data alone.
 every channel calls separated). No attached design has been solved on this
 engine, so the column's discrimination is untested: it flags separation
 loudly, but whether it stays quiet on a healthy stack is unmeasured.
+
+## 2026-08-02 — Negative controls kill the drag column as a detector
+
+Two more converged Fluent 2D solves, the record's own validated two-element
+baselines (30 mm ~0 %, 40 mm −1 %), same settings as the six above. Both
+read attached: screen 0.6032 / 0.6073, field probe 0.0000 on element 2.
+
+All six solves, sorted by Δ Cd:
+
+| design | truth | screen | field e2 | Δ Cd |
+|---|---|---|---|---|
+| baseline 30 mm | **attached** | 0.6032 | 0.0000 | **+626.1 %** |
+| 859e79a7486d | separated | 0.3893 | 0.2893 | +582.1 % |
+| baseline 40 mm | **attached** | 0.6073 | 0.0000 | **+524.2 %** |
+| 1c4bf2d726c3 | separated | 0.4591 | 0.0000 | +523.9 % |
+| 09c6de53265a | separated | 0.5471 | 0.3848 | +442.7 % |
+| df1865bb82a3 | separated | 0.4022 | 0.3263 | +395.5 % |
+
+**Δ Cd does not discriminate attachment.** Attached spans 524–626 %,
+separated 396–582 %; the classes overlap completely and the healthiest
+design in the set reads highest. `delta_cd_is_upper_bound` was True on all
+six — the polar lookup was capped every time — so what the column measures
+is how far the capped attached-flow estimate falls short of a loaded
+ground-effect stack's real drag, and that gap is 4–6× regardless of flow
+state. The cap dominates; separation does not move it enough to see.
+
+This retracts the claim made when the column shipped ("separation reads far
+louder in drag than in lift", "drag is ~7× the signal"). That was inferred
+from separated cases only, with no negative control. The column is kept and
+still reported — a 5× gap says the estimate's drag is unusable for this
+design — but it is information about the ESTIMATE, not about the flow, and
+the code now says so at every site.
+
+**The two channels that DO discriminate, on the same six:**
+
+- **Screen, inside its validated envelope: 5/5.** Three separated designs
+  all read collapse (< 0.50); two attached read 0.60+. Outside the
+  envelope: 0/1.
+- **Field probe: 5/6.** Attached 0.0000 / 0.0000, separated 0.2893 / 0.3263
+  / 0.3848 — a clean gap — with one miss on the boundary case whose wall
+  shear was 0.217, consistent with the smearing bias noted above.

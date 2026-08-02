@@ -34,10 +34,15 @@ So on this design class a repair verdict of "repaired" means only that the
 screen is satisfied, which has been shown to mean nothing. Two things follow.
 (1) A repair MUST be solver-verified before it is believed; the verified=False
 flag on every verdict is not a formality. (2) The search needs a screen that
-tracks the collapse before it can work here at all -- see the harvest sink
-and the drag column, which DID track it (delta_cd_pct read +442.7% and
-+438.4%, correctly calling both designs badly separated, while shadow_min
-called both "ok").
+tracks the collapse before it can work here at all.
+
+An earlier version of this note proposed delta_cd_pct as that screen,
+because it read +442.7% and +438.4% on these two while shadow_min called
+both "ok". Negative controls killed it: the validated ATTACHED baselines
+read +626.1% and +524.2%, higher than three of the four separated designs.
+The drag column does not discriminate attachment at all -- it tracks how
+far the capped polar estimate falls short of a loaded stack's real drag,
+which is 4-6x whatever the flow is doing.
 
 Untested hypothesis for WHY, worth checking before rebuilding anything: the
 wake-shadow screen scopes its own validity to "s1223-class sections", and
