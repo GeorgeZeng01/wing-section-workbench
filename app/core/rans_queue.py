@@ -336,6 +336,13 @@ class QueueJob:
                     cl_rans=cl, cd_rans=cd,
                     rans_downforce_n=dn, drag_rans_n=drag,
                     delta_cl_pct=r["delta_cl_pct"],
+                    # drag carries the separation signal far more loudly:
+                    # measured 15x the lift signal on the 3-element Fluent
+                    # case (delta_cl +27.1% vs delta_cd +413.7%). .get()
+                    # because a session restored from before the column
+                    # existed has no such key.
+                    delta_cd_pct=r.get("delta_cd_pct"),
+                    delta_cd_is_upper_bound=r.get("delta_cd_is_upper_bound"),
                     converged=r["converged"],
                     stop_reason=r["stop_reason"],
                     mesh_caution=bool(r["mesh_caution"]) or
