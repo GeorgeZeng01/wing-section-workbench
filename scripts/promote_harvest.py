@@ -73,6 +73,22 @@ def main() -> int:
     print(f"  {len(rows)} rows read"
           + (f", {bad} unparseable lines skipped" if bad else ""))
 
+    # dedupe on the case: a row written twice (a re-measured case, a driver
+    # that appended alongside the runner) would double-weight that design in
+    # any regression fitted on this file. Last write wins.
+    seen, dedup = {}, []
+    for r in rows:
+        k = (r.get("case_id"), r.get("engine"), r.get("mesh_size"))
+        if k[0] is None:
+            dedup.append(r)
+            continue
+        seen[k] = r
+    dedup.extend(seen.values())
+    if len(dedup) != len(rows):
+        print(f"  {len(rows) - len(dedup)} duplicate case rows collapsed "
+              f"(last write wins)")
+    rows = dedup
+
     keep, reasons = [], {}
     for r in rows:
         ok, why = usable(r)

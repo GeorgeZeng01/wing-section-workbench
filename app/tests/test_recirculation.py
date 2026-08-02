@@ -205,6 +205,30 @@ def main() -> bool:
         check("the grid is a pure function of the config, not of a default",
               a["grid"]["nx"] == rb["grid"]["nx"])
 
+        # ---- ORDERING: the field must exist before anything reads it --
+        # This shipped broken. On the Fluent paths _finalize assembles the
+        # result BEFORE _export_flow_fields writes C/U/p, so a recirculation
+        # report taken at result assembly found no time directory and
+        # returned None — silently, every run, on the very engine the report
+        # exists to serve. A converged verification solve is what caught it.
+        f2 = (ROOT / "app" / "core" / "fluent2d_run.py").read_text(
+            encoding="utf-8")
+        i_exp = f2.find("self._export_flow_fields(fm")
+        i_rec = f2.find("foam_post.recirculation_report(")
+        i_harv = f2.find("cfd_run.append_harvest(")
+        check("fluent2d reads the recirculation field AFTER exporting it",
+              i_exp > 0 and i_rec > i_exp, f"(export@{i_exp}, read@{i_rec})")
+        check("fluent2d harvests AFTER the export, so the row carries the "
+              "field measurement instead of a None",
+              i_harv > i_exp, f"(export@{i_exp}, harvest@{i_harv})")
+        fr = (ROOT / "app" / "core" / "fluent_run.py").read_text(
+            encoding="utf-8")
+        i_exp3 = fr.find("self._export_flow_fields(fm")
+        i_harv3 = fr.find("cfd_run.append_harvest(")
+        check("the 3D Fluent path harvests after its export too",
+              i_exp3 > 0 and i_harv3 > i_exp3,
+              f"(export@{i_exp3}, harvest@{i_harv3})")
+
         # ---- the retained record: the orthogonality pin ---------------
         # resolution independence is checked HERE, not on the synthetic
         # case: the planted lens sits off the surface, so the probe reads

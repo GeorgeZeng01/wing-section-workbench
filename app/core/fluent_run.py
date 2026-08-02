@@ -562,6 +562,15 @@ class FluentJob:
                         self.result["engine_note"] += (
                             f" — flow-field export failed ({e}); "
                             f"flow view unavailable for this run")
+                # the field exists only now, so the calibration row is
+                # written here and not at result assembly — same ordering
+                # trap the 2D path fell into
+                try:
+                    cfd_run.append_harvest(cfd_run.harvest_row(
+                        self.result or {}, self.config, "fluent",
+                        self.mesh_size))
+                except Exception:
+                    pass
                 try:
                     self._set_phase("writing case files")
                     # absolute stem: the case+data land in the RUN dir
@@ -783,10 +792,9 @@ class FluentJob:
                 "case_dir": str(self.case_dir),
             }
             # state stays "running" — the caller flips to done once the
-            # flow-field export has landed (see _run_inner)
-        # a calibration row per finished solve, outliving its case dir
-        cfd_run.append_harvest(cfd_run.harvest_row(
-            self.result, self.config, "fluent", self.mesh_size))
+            # flow-field export has landed (see _run_inner), and the
+            # harvest row is written there, because a row assembled here
+            # would predate the field it is supposed to describe
 
     # ---- API surface (mirrors RansJob) ----
 

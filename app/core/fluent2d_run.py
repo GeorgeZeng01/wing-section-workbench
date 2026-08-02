@@ -637,6 +637,31 @@ class Fluent2DJob:
                         self.result["engine_note"] += (
                             f" — flow-field export failed ({e}); "
                             f"flow view unavailable for this run")
+                # ONLY NOW does the field exist. This engine exports no wall
+                # shear, so wall_report has nothing to say and stays None;
+                # the field report reading the just-written C/U/p is how the
+                # ANSYS path gets a separation measurement at all. UNGRADED:
+                # it separates the collapse from the healthy cases by a wide
+                # margin, but the line that turns that into a verdict has to
+                # be regressed against paired wall-shear runs first.
+                try:
+                    rec = foam_post.recirculation_report(
+                        self.case_dir, self.cfg,
+                        converged=bool((self.result or {}).get("converged")),
+                        user_stopped=False, wall=None)
+                except Exception:
+                    rec = None
+                with self._lock:
+                    if self.result is not None:
+                        self.result["recirc_report"] = rec
+                # the calibration row is written here rather than at result
+                # assembly so it carries the field measurement, not a None
+                try:
+                    cfd_run.append_harvest(cfd_run.harvest_row(
+                        self.result or {}, self.config, "fluent2d",
+                        self.mesh_size))
+                except Exception:
+                    pass
                 try:
                     self._set_phase("writing case files")
                     # absolute stem: the case+data land in the RUN dir,
@@ -834,21 +859,6 @@ class Fluent2DJob:
         # learns the stack was cut — state it on the card
         bl_note = ((self.mesh or {}).get("inflation") or {}).get("note")
 
-        # This engine exports no wall shear, so wall_report has nothing to
-        # say here and stays None. The field-side report reads the C/U/p
-        # this run already writes, which is how the ANSYS path finally gets
-        # a separation measurement at all. It is UNGRADED: on the retained
-        # cases it separates the collapse (element 2 at 0.39 reversed) from
-        # the healthy ones (0.00) by a wide margin, but the line that turns
-        # that into a verdict has to be regressed against paired
-        # wall-shear runs first, and those do not exist yet.
-        try:
-            recirc = foam_post.recirculation_report(
-                self.case_dir, self.cfg, converged=converged,
-                user_stopped=False, wall=None)
-        except Exception:
-            recirc = None
-
         # chord-referenced on both sides: cdc_mean is the studio-convention
         # value, the same basis as the estimate's CD_profile_stack
         d_cd, d_cd_bound = cfd_run.delta_cd(cdc_mean, panel)
@@ -912,7 +922,12 @@ class Fluent2DJob:
                 "wall_report": None,
                 "wall_verdict": None,
                 "sep_knife_edge": None,
-                "recirc_report": recirc,
+                # filled in after the flow export lands, NOT here: this
+                # runs BEFORE _export_flow_fields writes C/U/p, so reading
+                # the field at result-assembly time finds nothing and
+                # silently reports None — which is exactly what shipped
+                # until a verification solve caught it
+                "recirc_report": None,
                 "engine_note": (("solved by ANSYS Fluent (2D, double "
                                  "precision) on the mesh from the "
                                  "documented manual ANSYS workflow — "
@@ -982,10 +997,9 @@ class Fluent2DJob:
                 "case_dir": str(self.case_dir),
             }
             # state stays "running" — the caller flips to done once the
-            # flow-field export has landed (see _run_inner)
-        # a calibration row per finished solve, outliving its case dir
-        cfd_run.append_harvest(cfd_run.harvest_row(
-            self.result, self.config, "fluent2d", self.mesh_size))
+            # flow-field export has landed (see _run_inner), and the
+            # recirculation report and the harvest row are written there
+            # too, because both need the exported field
 
     # ---- API surface (mirrors FluentJob/RansJob) ----
 
