@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import atexit
 import copy
+import json
 import math
 import os
 import re
@@ -391,6 +392,102 @@ def delta_cd(cd_rans: float, panel: dict | None) -> tuple:
         return None, False
     return (round((cd_rans / cd_est - 1) * 100, 1),
             bool(panel.get("cd_profile_is_lower_bound")))
+
+
+def worst_reversed(result: dict) -> float | None:
+    """Highest measured reversed wall-shear fraction across the elements.
+
+    One definition, shared by the queue's ranking and the harvest sink, so
+    "how separated was this run" cannot mean two things."""
+    sep = ((result.get("wall_report") or {}).get("separation") or {})
+    fracs = [p.get("reversed_frac") for p in sep.values()
+             if p.get("reversed_frac") is not None]
+    return max(fracs) if fracs else None
+
+
+def _harvest_path() -> Path:
+    """Where accumulated (design -> measured truth) rows land.
+
+    Under the data dir rather than docs/calibration: the app appends on
+    every finished solve, and a version-controlled target would dirty the
+    working tree on every run and sweep unreviewed rows into commits.
+    scripts/promote_harvest.py lifts a reviewed extract into
+    docs/calibration when it is worth keeping. Run-dir housekeeping only
+    removes case directories, so rows here outlive the cases they describe
+    -- which is the whole point: the previous calibration record had to be
+    hand-extracted precisely because the cases were already gone."""
+    explicit = os.environ.get("WSS_HARVEST_PATH")
+    if explicit:
+        return Path(explicit)
+    base = Path(os.environ.get(
+        "WSS_DATA_DIR", Path(__file__).resolve().parents[2] / "app_data"))
+    return base / "harvest.jsonl"
+
+
+def harvest_row(result: dict, config: dict, engine: str,
+                mesh_size: str | None) -> dict:
+    """One (design -> prediction -> measured truth) row.
+
+    Carries the cheap screen's prediction and the expensive measurement
+    side by side, which is the pairing a calibration needs and the thing
+    no artifact on disk currently holds. The config travels verbatim so a
+    row stays reproducible after its case directory is deleted.
+
+    Nothing is graded here. The row records what was predicted and what was
+    measured; deciding where the line between them falls is the job of a
+    regression over many such rows."""
+    recirc = result.get("recirc_report") or {}
+    r_elems = recirc.get("elements") or []
+    panel = result.get("panel") or {}
+    case_dir = result.get("case_dir")
+    return {
+        "ts_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "case_id": Path(case_dir).name if case_dir else None,
+        "engine": engine,
+        "mesh_size": mesh_size,
+        # -- run trustworthiness: a bound is not a result
+        "converged": result.get("converged"),
+        "user_stopped": result.get("user_stopped"),
+        "stop_reason": result.get("stop_reason"),
+        "n_iters_run": result.get("n_iters_run"),
+        # -- forces, and both comparison columns
+        "cl_rans": result.get("cl_rans"),
+        "cd_rans": result.get("cd_rans"),
+        "delta_cl_pct": result.get("delta_cl_pct"),
+        "delta_cd_pct": result.get("delta_cd_pct"),
+        "delta_cd_is_upper_bound": result.get("delta_cd_is_upper_bound"),
+        # -- the CHEAP screen's prediction (what the optimizer saw)
+        "shadow_mins": panel.get("shadow_mins"),
+        "c_est": panel.get("c_est"),
+        "cd_profile_est": panel.get("cd_profile"),
+        # -- the EXPENSIVE measurement (what RANS found)
+        "wall_reversed": {k: v.get("reversed_frac") for k, v in
+                          (((result.get("wall_report") or {})
+                            .get("separation") or {}).items())} or None,
+        "worst_reversed": worst_reversed(result),
+        "recirc_status": recirc.get("status"),
+        "recirc_bound": recirc.get("bound"),
+        "recirc_near_wall_frac": [e.get("near_wall_reversed_frac")
+                                  for e in r_elems] or None,
+        "recirc_closes": [[r.get("closes")
+                           for s in (e.get("sides") or {}).values()
+                           for r in s.get("runs", [])]
+                          for e in r_elems] or None,
+        "config": config,
+    }
+
+
+def append_harvest(row: dict) -> bool:
+    """Append one row. Never raises: losing a calibration row must not fail
+    a solve that already succeeded."""
+    try:
+        p = _harvest_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, allow_nan=False) + "\n")
+        return True
+    except (OSError, TypeError, ValueError):
+        return False
 
 
 # ---------- the job ----------
@@ -832,6 +929,10 @@ class RansJob:
                 "cd_profile_is_lower_bound": fo[
                     "drag_profile_is_lower_bound"],
                 "cd_capped_roles": fo["drag_capped_roles"],
+                # what the CHEAP screen predicted for this design, kept
+                # beside the expensive measurement so a calibration row can
+                # pair them without re-running the panel model
+                "shadow_mins": [e.get("shadow_min") for e in r["elements"]],
                 "k_g_used": co["k_ground_realization"],
                 "downforce_n": fo["downforce_n"],
             }
@@ -970,6 +1071,13 @@ class RansJob:
             }
             self.phase = None
             self.state = "done"
+
+        # every finished solve becomes a calibration row. The previous
+        # record had to be hand-extracted from case directories because
+        # housekeeping had already deleted most of what it described; rows
+        # written here outlive their cases by construction.
+        append_harvest(harvest_row(self.result, self.config, "openfoam",
+                                   self.mesh_size))
 
     # ---- API surface ----
 

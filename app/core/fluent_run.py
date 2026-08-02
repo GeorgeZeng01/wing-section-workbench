@@ -697,6 +697,10 @@ class FluentJob:
                 "cd_profile_is_lower_bound": fo[
                     "drag_profile_is_lower_bound"],
                 "cd_capped_roles": fo["drag_capped_roles"],
+                # what the CHEAP screen predicted for this design, kept
+                # beside the expensive measurement so a calibration row can
+                # pair them without re-running the panel model
+                "shadow_mins": [e.get("shadow_min") for e in r["elements"]],
                 "k_g_used": co["k_ground_realization"],
                 "downforce_n": fo["downforce_n"],
             }
@@ -780,6 +784,9 @@ class FluentJob:
             }
             # state stays "running" — the caller flips to done once the
             # flow-field export has landed (see _run_inner)
+        # a calibration row per finished solve, outliving its case dir
+        cfd_run.append_harvest(cfd_run.harvest_row(
+            self.result, self.config, "fluent", self.mesh_size))
 
     # ---- API surface (mirrors RansJob) ----
 

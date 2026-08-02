@@ -355,12 +355,10 @@ class QueueJob:
                 # ranking demotes on this
                 row["wall_verdict"] = r.get("wall_verdict")
                 row["sep_knife_edge"] = r.get("sep_knife_edge")
-                wall = r.get("wall_report") or {}
-                sep = wall.get("separation") or {}
-                fracs = [p.get("reversed_frac") for p in sep.values()
-                         if p.get("reversed_frac") is not None]
-                row["worst_reversed"] = (max(fracs) if fracs
-                                         else None)
+                # one definition of "how separated was this run", shared
+                # with the harvest sink so the ranking and the calibration
+                # record cannot drift apart
+                row["worst_reversed"] = cfd_run.worst_reversed(r)
             elif s["state"] == "failed":
                 row["error"] = s.get("error")
 
