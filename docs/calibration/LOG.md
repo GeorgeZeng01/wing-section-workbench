@@ -498,3 +498,47 @@ advisory + RANS remain the referees) and exempts the first element
 to 0.44). Re-run the check script after any panel-solver or geometry
 change: it exits nonzero when the thresholds stop separating this
 record.
+
+## 2026-08-02 — Scope, not weakness: why the screen missed a collapse
+
+Five converged Fluent 2D solves (studio conventions, studio-yplus1 sizing,
+3060 iterations each, force history converged). Field readings are
+`foam_post.recirculation_report`'s near-wall reversed-station fraction at
+the headline probe offset; wall-shear values are the preserved
+`wall_truth.json` record from the (now deleted) OpenFOAM cases.
+
+Element 2 in every row:
+
+| design | screen | screen says | field (Fluent) | wall shear (OpenFOAM) | Δ Cd |
+|---|---|---|---|---|---|
+| 1c4bf2d726c3 | 0.4591 | collapse | 0.0000 | 0.217 separated | +523.9 % |
+| df1865bb82a3 | 0.4022 | collapse | 0.3263 | 0.392 separated | +395.5 % |
+| 859e79a7486d | 0.3893 | collapse | 0.2893 | 0.397 separated | +582.1 % |
+| 09c6de53265a | 0.5471 | **ok** | 0.3848 | *(out of scope)* | +442.7 % |
+
+**The screen is right inside its envelope and wrong outside it — 3/3 vs
+0/1.** The first three sit inside the declared scope (h/c 0.0857–0.1143,
+sections s1223/as6099/be6699, non-main chord ratios 0.20–0.381). The fourth
+runs s1223rtl and mid53b at a 0.5 second-element chord ratio, outside on two
+axes, and drew a confident "ok" at 0.5471 — above SHADOW_WARN, so zero
+penalty — while carrying 0.3848 reversed. An A/B confirmed the metric is not
+even directional out there: repairing it to 0.5607 left the flow at 0.3895.
+
+So the metric is not weak; it was being asked questions it was never
+validated for and answering silently. `wake_shadow.scope_check()` now
+reports which axes a design leaves, with the envelope derived from this
+record and re-derived by `separation_metric_check.py` on every run.
+
+**The field probe reads low against wall shear, and near the grading line it
+reads nothing.** Wall 0.392 → field 0.326 (0.83×), wall 0.397 → 0.289
+(0.73×), but wall 0.217 → **0.0000**. The documented one-sided smearing bias
+is real and is worst exactly where a line has to live: 0.217 sits just past
+the 0.20 separated line and the probe cannot see it. A field-side grading
+line fitted on deep collapses would not transfer to the boundary. Note this
+is cross-engine and cross-mesh — suggestive, not a calibration — but enough
+to stop anyone fitting C2 on field data alone.
+
+**Δ Cd has four readings and all four are positives** (395–582 % on designs
+every channel calls separated). No attached design has been solved on this
+engine, so the column's discrimination is untested: it flags separation
+loudly, but whether it stays quiet on a healthy stack is unmeasured.
