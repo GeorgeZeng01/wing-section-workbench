@@ -754,3 +754,31 @@ Note both instruments fail here, in opposite directions. At the gate the
 field probe reads 0.0000 against a wall-shear 0.217 and the screen is right;
 at C, D and the failing design the field is right and the screen swings. No
 single channel is trustworthy alone on this family.
+
+## 2026-08-02 — On the extended record the shipped minimum overlaps; a
+## two-route compound separates it (unadjudicated)
+
+The harvest's field-labeled cases (docs/calibration/field_truth.json: the
+09c6 false negative, step C, step D — probe readings ≥ 0.385, and the probe
+reads low, so those are strong separation evidence) extend the labeled pool
+to 7 separated + 3 attached non-exempt elements. On that pool the shipped
+minimum **overlaps**: separated up to 0.547 against attached from 0.533.
+The record outgrew the threshold, which is what the harvest exists to show.
+
+Windowed profile shapes show two distinct collapse routes:
+
+| route | shape | example |
+|---|---|---|
+| 1 | enter fast (0.77–0.99), decelerate 0.38–0.47 through the window | every labeled e2 |
+| 2 | enter already buried (0.475), no deceleration (0.060) | df1865's e3 (wall 0.298) |
+
+No single statistic catches both — the minimum misses route 1's high-entry
+family (their minima land above any absolute line), any deceleration measure
+misses route 2. The compound `decel > 0.35 OR min < 0.47` reads **7/7
+separated caught, 3/3 attached clean** on this pool.
+
+**Not adjudicated, not wired**: two fitted constants on ten points, an
+attached pool of three, and field labels are weaker than wall shear. It is
+in `separation_metric_check.py` as candidate 4 so every run re-measures it
+as the harvest grows. Six further solves straddling the failure region
+(screen 0.476–0.522) are running now and will add up to 12 labeled elements.

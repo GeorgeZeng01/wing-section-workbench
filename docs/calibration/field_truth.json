@@ -1,0 +1,177 @@
+{
+ "_provenance": [
+  "Field-probe separation labels from converged ANSYS Fluent 2D solves",
+  "(studio conventions, studio-yplus1 sizing, 3060 iterations, force",
+  "history converged), recorded 2026-08-02. The label channel is",
+  "foam_post.recirculation_report near_wall_reversed_frac at the headline",
+  "offset. The probe reads LOW against wall shear (documented: it read",
+  "0.0000 on a case whose wall fraction was 0.217), so a HIGH reading is",
+  "strong evidence of separation while a zero is an UNMEASURED case,",
+  "never an attached label. Only high readings are recorded as labels",
+  "here. Separate file from wall_truth.json because the truth channel is",
+  "different and weaker; a wall-shear (OpenFOAM) solve of these configs",
+  "should supersede these rows when Docker is available.",
+  "Configs verbatim; solved case ids in app_data are transient."
+ ],
+ "cases": [
+  {
+   "case": "09c6de53265a",
+   "label": "the original false negative (screen 0.5471 ok)",
+   "field_reversed": {
+    "wing_e2": 0.3848
+   },
+   "config": {
+    "stack_aoa_deg": -1.23,
+    "ride_height_mm": 40,
+    "chord_mm": 350,
+    "span_mm": 1400,
+    "speed_ms": 20,
+    "rho": 1.225,
+    "nu": 1.5e-05,
+    "ncrit": 7,
+    "viscous_efficiency": 0.85,
+    "efficiency_3d": 0.9,
+    "span_efficiency": 0.9,
+    "n_panels_per_side": 70,
+    "elements": [
+     {
+      "airfoil": "s1223rtl",
+      "chord_ratio": 1,
+      "deflection_deg": 0,
+      "dx": -0.03,
+      "dy": -0.03
+     },
+     {
+      "airfoil": "s1223",
+      "chord_ratio": 0.5,
+      "deflection_deg": 0.8,
+      "dx": -0.03,
+      "dy": -0.03,
+      "slot_gap_pct": 3,
+      "slot_overlap_pct": 0.6
+     },
+     {
+      "airfoil": "mid53b",
+      "chord_ratio": 0.26,
+      "deflection_deg": 26.7,
+      "dx": -0.03,
+      "dy": -0.03,
+      "slot_gap_pct": 2.1,
+      "slot_overlap_pct": 3.3
+     }
+    ],
+    "manufacturing": {
+     "te_gap_mm": 2,
+     "te_mode": "thicken",
+     "min_thickness_mm": 2
+    },
+    "k_g": 0.275,
+    "rule_envelope": {
+     "max_length_mm": 600,
+     "max_height_mm": 250,
+     "min_ground_clearance_mm": null,
+     "x_offset_mm": 0,
+     "min_le_radius_mm": 5,
+     "le_radius_scope": "frontmost",
+     "min_te_thickness_mm": null,
+     "measure_ride_height_mm": null,
+     "preset_name": "FSAE 2027 draft - outboard/tip station (edited)"
+    }
+   }
+  },
+  {
+   "case": "step_C",
+   "label": "minimal reproducer: gate + e2 cr 0.50, defl 0.8, gaps 3.0/2.1, all s1223 (screen 0.5145 ok)",
+   "field_reversed": {
+    "wing_e2": 0.3872
+   },
+   "config": {
+    "stack_aoa_deg": -3.88,
+    "ride_height_mm": 40,
+    "chord_mm": 350,
+    "span_mm": 1400,
+    "speed_ms": 20,
+    "rho": 1.225,
+    "nu": 1.5e-05,
+    "ncrit": 7,
+    "viscous_efficiency": 0.85,
+    "efficiency_3d": 0.9,
+    "span_efficiency": 0.9,
+    "n_panels_per_side": 70,
+    "manufacturing": {
+     "te_gap_mm": 2,
+     "te_mode": "thicken",
+     "min_thickness_mm": 2
+    },
+    "elements": [
+     {
+      "airfoil": "s1223",
+      "chord_ratio": 1,
+      "deflection_deg": 0
+     },
+     {
+      "airfoil": "s1223",
+      "chord_ratio": 0.5,
+      "deflection_deg": 0.8,
+      "slot_gap_pct": 3.0,
+      "slot_overlap_pct": 1.2
+     },
+     {
+      "airfoil": "s1223",
+      "chord_ratio": 0.2,
+      "deflection_deg": 27,
+      "slot_gap_pct": 2.1,
+      "slot_overlap_pct": 1.3
+     }
+    ]
+   }
+  },
+  {
+   "case": "step_D",
+   "label": "step C + e3 0.26/26.7 + aoa -1.23 (screen 0.4770, correct)",
+   "field_reversed": {
+    "wing_e2": 0.4062
+   },
+   "config": {
+    "stack_aoa_deg": -1.23,
+    "ride_height_mm": 40,
+    "chord_mm": 350,
+    "span_mm": 1400,
+    "speed_ms": 20,
+    "rho": 1.225,
+    "nu": 1.5e-05,
+    "ncrit": 7,
+    "viscous_efficiency": 0.85,
+    "efficiency_3d": 0.9,
+    "span_efficiency": 0.9,
+    "n_panels_per_side": 70,
+    "manufacturing": {
+     "te_gap_mm": 2,
+     "te_mode": "thicken",
+     "min_thickness_mm": 2
+    },
+    "elements": [
+     {
+      "airfoil": "s1223",
+      "chord_ratio": 1,
+      "deflection_deg": 0
+     },
+     {
+      "airfoil": "s1223",
+      "chord_ratio": 0.5,
+      "deflection_deg": 0.8,
+      "slot_gap_pct": 3.0,
+      "slot_overlap_pct": 1.2
+     },
+     {
+      "airfoil": "s1223",
+      "chord_ratio": 0.26,
+      "deflection_deg": 26.7,
+      "slot_gap_pct": 2.1,
+      "slot_overlap_pct": 1.3
+     }
+    ]
+   }
+  }
+ ]
+}

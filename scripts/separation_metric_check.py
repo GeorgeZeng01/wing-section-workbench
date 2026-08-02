@@ -335,6 +335,114 @@ def report_candidates(truth) -> None:
             print("    exactly what the harvest sink exists to produce.")
 
 
+# ---------------------------------------------------------------------------
+# candidate 4: the two-route compound — measured on the EXTENDED record
+#
+# The harvest grew the record past wall_truth.json: docs/calibration/
+# field_truth.json holds three field-labeled separated elements (the probe
+# reads LOW, so its high readings are strong separation evidence), including
+# the false-negative family the shipped minimum misses. On that extended
+# pool the shipped minimum OVERLAPS (attached min 0.533 vs separated max
+# 0.547) — the record outgrew the threshold, which is exactly what the
+# harvest exists to reveal.
+#
+# Measured profile shapes show TWO collapse routes on the labeled record:
+#   route 1  enter the window fast, decelerate through it (every labeled
+#            e2: entry 0.77-0.99, decel 0.38-0.47)
+#   route 2  enter already buried in wake and stay there (df1865's e3:
+#            entry 0.475, decel 0.060 — no room to decelerate)
+# No single statistic catches both: the minimum misses route 1's high-entry
+# family (their minima end up above the line), and any deceleration measure
+# misses route 2 (it never decelerates). The compound flags an element when
+# EITHER its windowed deceleration exceeds D_STAR or its minimum sits under
+# M_STAR.
+# ---------------------------------------------------------------------------
+
+CAND4_DECEL = 0.35    # entry-minus-min above this -> route 1
+CAND4_MIN = 0.47      # windowed min below this -> route 2
+
+
+def curve_stats(cfg_dict):
+    """Per-element (min, entry, decel) of the windowed upper-side curve;
+    None for exempt/degenerate elements."""
+    out = []
+    for cur in shadow_curves(cfg_dict):
+        if cur is None:
+            out.append(None)
+            continue
+        s, ue = cur
+        if len(s) < 2:
+            out.append(None)
+            continue
+        out.append({"min": float(ue.min()), "entry": float(ue[0]),
+                    "decel": float(ue[0] - ue.min())})
+    return out
+
+
+def report_two_route(truth) -> None:
+    ft_path = CAL / "field_truth.json"
+    field = json.loads(ft_path.read_text(encoding="utf-8")) \
+        if ft_path.is_file() else {"cases": []}
+    labeled = []   # (name, truth, stats)
+    for c in truth["cases"]:
+        if not c["gate"]:
+            continue
+        st = curve_stats(c["config"])
+        for i, s in enumerate(st):
+            if s is None:
+                continue
+            frac = c["reversed_frac"].get(f"wing_e{i + 1}")
+            if frac is None:
+                continue
+            k = truth_class(frac)
+            if k == "partial":
+                continue
+            labeled.append((f"{c['case_id'][:8]} e{i + 1}",
+                            "SEP" if k == "separated" else "ATT", s))
+    for c in field["cases"]:
+        st = curve_stats(c["config"])
+        for patch, frac in (c.get("field_reversed") or {}).items():
+            i = int(patch.replace("wing_e", "")) - 1
+            if st[i] is not None and frac > 0.28:
+                labeled.append((f"{c['case']} e{i + 1}", "SEP", st[i]))
+    for lbl, d in (("baseline30", baseline()),
+                   ("baseline40", baseline(ride_mm=40.0))):
+        st = curve_stats(d)
+        if st[1] is not None:
+            labeled.append((f"{lbl} e2", "ATT", st[1]))
+
+    print("\n=== candidate 4: two-route compound, EXTENDED record ===")
+    n_sep = sum(1 for _, t, _ in labeled if t == "SEP")
+    n_att = sum(1 for _, t, _ in labeled if t == "ATT")
+    print(f"    pools: {n_sep} separated, {n_att} attached "
+          f"(wall_truth + field_truth + validated baselines)")
+    ship_sep = [s["min"] for _, t, s in labeled if t == "SEP"]
+    ship_att = [s["min"] for _, t, s in labeled if t == "ATT"]
+    print(f"    shipped min:  SEP {min(ship_sep):.3f}..{max(ship_sep):.3f}"
+          f"  ATT {min(ship_att):.3f}..{max(ship_att):.3f}"
+          f"  gap {min(ship_att) - max(ship_sep):+.3f}"
+          + ("" if min(ship_att) > max(ship_sep) else "   OVERLAPS"))
+    miss = fa = 0
+    for name, t, s in labeled:
+        flag = s["decel"] > CAND4_DECEL or s["min"] < CAND4_MIN
+        if t == "SEP" and not flag:
+            miss += 1
+            print(f"    MISS  {name}: decel {s['decel']:.3f}, "
+                  f"min {s['min']:.3f}")
+        if t == "ATT" and flag:
+            fa += 1
+            print(f"    FALSE ALARM  {name}: decel {s['decel']:.3f}, "
+                  f"min {s['min']:.3f}")
+    print(f"    compound (decel>{CAND4_DECEL} OR min<{CAND4_MIN}): "
+          f"{n_sep - miss}/{n_sep} separated caught, "
+          f"{n_att - fa}/{n_att} attached clean")
+    print("    NOT ADJUDICATED and NOT WIRED: two fitted constants on "
+          f"{len(labeled)} points, an attached pool of {n_att}, and the "
+          "field labels are a weaker channel than wall shear. This is a "
+          "hypothesis the growing harvest can test, recorded so it is "
+          "re-measured on every run.")
+
+
 def baseline(ride_mm=30.0, aoa=0.0, defl=12.0, gap=1.5, ovl=3.0):
     return {
         "elements": [
@@ -431,6 +539,7 @@ def main() -> int:
                                    else min(worst_clean, s["shadow_min"]))
 
     report_candidates(truth)
+    report_two_route(truth)
 
     # the shipped envelope must still bound the record it was derived from
     print("\n=== validated envelope vs the record ===")
