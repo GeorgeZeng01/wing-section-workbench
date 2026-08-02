@@ -312,6 +312,18 @@ def stack_shadow(free_sol, ground_sol, r_gain: float) -> list[dict]:
         i_rel = int(np.argmin(ue[m]))
         i_abs = int(np.nonzero(m)[0][i_rel])
         v = float(ue[i_abs])
+        # a minimum sitting ON the window's nose-side edge means the profile
+        # is still falling as it enters the window -- a deceleration shape no
+        # calibrated case has (their minima sit at arc 0.40-0.91, entering
+        # high and slowing down). The value is then the window's edge, not a
+        # physical minimum, and it is not comparable to the calibrated
+        # thresholds. Measured: every invalid-route reading found so far
+        # (the deflection-45 alarm at arc 0.153, the failing family's third
+        # elements at 0.163-0.164) pins here, and no calibrated element
+        # does. The high edge is NOT flagged -- the record itself contains a
+        # legitimate minimum at arc 0.912 (TE recompression side).
+        arc_frac = float(s[i_abs] / st)
+        arc_pinned = bool(arc_frac <= ARC_LO + 0.02)
         # map back to the source panel midpoint (s/ue carry a prepended
         # stagnation station; idx aligns with s[1:])
         mid_sel = free_sol.midpoints[sel]
@@ -320,7 +332,8 @@ def stack_shadow(free_sol, ground_sol, r_gain: float) -> list[dict]:
                   else "warn" if v < SHADOW_WARN else "ok")
         out.append({
             "shadow_min": round(v, 4),
-            "arc_at_min": round(float(s[i_abs] / st), 3),
+            "arc_at_min": round(arc_frac, 3),
+            "arc_pinned": arc_pinned,
             "x_min": round(float(mid_sel[i_panel, 0]), 5),
             "y_min": round(float(mid_sel[i_panel, 1]), 5),
             "status": status,

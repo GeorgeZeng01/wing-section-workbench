@@ -308,6 +308,40 @@ def main():
           _out_note is not None and "not evidence" in _out_note
           and "pass" not in _out_note.lower())
 
+    # ---- arc pinning: the metric must say when it read its own window --
+    _p512 = _cal.parent.parent / "app_data" / "rans" / "512df696f4bd" \
+        / "config.json"
+    if _p512.is_file():
+        import glob as _glob
+        from app.core import analysis as _an, geometry as _geo, panel as _pn
+
+        def _shadows(cfg_d):
+            _c = _SC.from_dict(cfg_d)
+            _i = _geo.install_stack(_geo.build_stack(_c), _c.ride_height_c)
+            _f, _g = _pn.solve_pair([e["coords"] for e in _i], 0.0)
+            _, _, _r = _an.realized_gain(-_f.Cl, -_g.Cl, _c)
+            return wake_shadow.stack_shadow(_f, _g, _r)
+
+        _sh = _shadows(_json.loads(_p512.read_text(encoding="utf-8")))
+        check("the invalid-route alarm (deflection-45, min at arc 0.153) "
+              "is flagged arc_pinned",
+              _sh[1]["arc_pinned"] is True
+              and abs(_sh[1]["arc_at_min"] - 0.153) < 0.01,
+              f"({_sh[1]['arc_at_min']})")
+        _none_pinned = True
+        for _c in _truth["cases"]:
+            _cf = _c["config"]
+            if isinstance(_cf, str) and _cf.startswith("same_as:"):
+                _cf = _by[_cf.split(":", 1)[1]]["config"]
+            for _s in _shadows(_cf):
+                if _s["shadow_min"] is not None and _s["arc_pinned"]:
+                    _none_pinned = False
+        check("no calibrated element pins at the window's nose edge — the "
+              "flag marks out-of-family profiles, not the record",
+              _none_pinned)
+    else:
+        print("NOTE  512df696f4bd absent — the arc-pinning pin did NOT run")
+
     print(f"\n{sum(results)}/{len(results)} wake-shadow checks passed")
     return all(results)
 
