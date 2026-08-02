@@ -28,6 +28,25 @@ Candidates measured here, in the order they were built:
    45-70/side and realization 0 -> 0.35. This script is the gate: it
    exits nonzero if the shipped thresholds stop separating the record.
 
+3. Integral deficits (NOT SHIPPED, NOT ADJUDICATED). The hypothesis was
+   that shadow_min is the wrong SHAPE of statistic: it is one number
+   from one station, so two flaps that both dip to 0.48 read alike even
+   if one recovers at once and the other holds it for 40% of the arc,
+   and separation ought to depend on how long the layer stays slow.
+   Six reductions of the same windowed curve were measured against the
+   record - a 10th percentile, the arc mean, arc fraction below 0.50
+   and 0.55, and mean deficit below 0.50 and 0.55.
+   MEASURED: the shipped minimum holds the widest normalized class gap
+   (+0.514) and every integral reduction scores lower (+0.116 to
+   +0.307). So the hypothesis is not supported here.
+   BUT THAT IS NOT A RESULT EITHER: the gate pools are 4 separated and
+   1 attached element, and a class gap measured against a single
+   attached point is arithmetic, not evidence. It can neither rank the
+   candidates nor confirm the shipped one. The comparison is kept and
+   re-run on every invocation so it sharpens as labelled elements
+   accumulate (see cfd_run.append_harvest, which now writes one row per
+   finished solve for exactly this reason).
+
 Run:
     .venv\\Scripts\\python.exe scripts\\separation_metric_check.py
 """
@@ -165,6 +184,157 @@ def shadow_mins(cfg_dict):
     return wake_shadow.stack_shadow(free, ground, r)
 
 
+# ---------------------------------------------------------------------------
+# candidate 3: integral deficits — is a POINT statistic the right shape?
+#
+# shadow_min is the minimum realized upper-side Ue over the arc window: one
+# number from one station. Two flaps can both dip to 0.48 with one recovering
+# immediately and the other holding it for 40% of the arc, and the minimum
+# cannot tell them apart — but separation depends on how LONG the layer stays
+# slow, not on how slow it briefly gets. These candidates keep everything else
+# about the shipped screen (same solve, same realized field, same arc window,
+# same upper side, first element exempt) and change only the reduction.
+#
+# Every score below is oriented so HIGHER = WORSE, so the classes can be
+# compared on one convention. Threshold-referenced candidates carry the level
+# in their name; the level is a REFERENCE for an integral, not a decision
+# line — where any of these would cut is a separate calibration.
+# ---------------------------------------------------------------------------
+
+def shadow_curves(cfg_dict):
+    """Per-element windowed (arc fraction, Ue/V_inf) on the upper side —
+    the array stack_shadow reduces to a single minimum. None for the first
+    element (exempt) and for degenerate solutions, matching the shipped
+    screen's own exemptions exactly."""
+    cfg = StackConfig.from_dict(cfg_dict)
+    inst = geometry.install_stack(geometry.build_stack(cfg),
+                                  cfg.ride_height_c)
+    free, ground = panel.solve_pair([e["coords"] for e in inst], 0.0)
+    _, _, r = analysis.realized_gain(-free.Cl, -ground.Cl, cfg)
+    r = float(np.clip(r, 0.0, 1.0))
+    vt_eff = free.vt + r * (ground.vt - free.vt)
+    n = int(free.element_index.max()) + 1 if len(free.element_index) else 0
+    out = []
+    for k in range(n):
+        if k == 0:
+            out.append(None)
+            continue
+        sel = free.element_index == k
+        sides = wake_shadow.element_sides(free.midpoints[sel], vt_eff[sel],
+                                          free.panel_lengths[sel])
+        if sides is None:
+            out.append(None)
+            continue
+        up = sides["upper"]
+        s, ue = np.asarray(up["s"], float), np.asarray(up["ue"], float)
+        st = float(s[-1])
+        m = (s >= wake_shadow.ARC_LO * st) & (s <= wake_shadow.ARC_HI * st)
+        out.append((s[m] / st, ue[m]) if m.any() else None)
+    return out
+
+
+def integral_scores(curve):
+    """Badness scores for one element's windowed curve. Higher = worse."""
+    s, ue = curve
+    if len(s) < 2:
+        return None
+    span = float(s[-1] - s[0])
+    if span <= 0:
+        return None
+
+    def arc_mean(y):
+        return float(np.trapezoid(y, s) / span)
+
+    return {
+        "min (SHIPPED)": -float(ue.min()),
+        "p10": -float(np.percentile(ue, 10)),
+        "mean_ue": -arc_mean(ue),
+        "frac_below_0.50": arc_mean((ue < 0.50).astype(float)),
+        "frac_below_0.55": arc_mean((ue < 0.55).astype(float)),
+        "deficit_0.50": arc_mean(np.maximum(0.0, 0.50 - ue)),
+        "deficit_0.55": arc_mean(np.maximum(0.0, 0.55 - ue)),
+    }
+
+
+def report_candidates(truth) -> None:
+    """Measure every candidate against the wall-shear record and report the
+    class gap. A candidate earns nothing by looking clever: it has to put
+    the separated-measured elements strictly worse than the attached ones,
+    and the margin is reported normalized so metrics on different scales
+    can be compared at all."""
+    pools = {}
+    for c in truth["cases"]:
+        if not c["gate"]:
+            continue
+        curves = shadow_curves(c["config"])
+        for i, cur in enumerate(curves):
+            if i == 0 or cur is None:
+                continue
+            frac = c["reversed_frac"].get(f"wing_e{i + 1}")
+            if frac is None:
+                continue
+            klass = truth_class(frac)
+            if klass == "partial":
+                continue          # the band the record cannot adjudicate
+            sc = integral_scores(cur)
+            if sc is None:
+                continue
+            for name, v in sc.items():
+                pools.setdefault(name, {"sep": [], "att": []})[
+                    "sep" if klass == "separated" else "att"].append(v)
+
+    print("\n=== candidate 3: integral deficits vs the shipped minimum ===")
+    print("    (higher = worse for every score; gap = worst attached to "
+          "best separated,")
+    print("     normalized by the full spread so different scales compare)")
+    n_sep = len(next(iter(pools.values()))["sep"]) if pools else 0
+    n_att = len(next(iter(pools.values()))["att"]) if pools else 0
+    print(f"    pools: {n_sep} separated-measured, {n_att} "
+          f"attached-measured elements\n")
+    print(f"    {'candidate':18s} {'separated':>18s} {'attached':>18s} "
+          f"{'gap':>9s} {'norm':>8s}")
+    ranked = []
+    for name, p in pools.items():
+        if not p["sep"] or not p["att"]:
+            continue
+        gap = min(p["sep"]) - max(p["att"])
+        spread = max(p["sep"] + p["att"]) - min(p["sep"] + p["att"])
+        norm = gap / spread if spread > 1e-12 else 0.0
+        ranked.append((norm, gap, name, p))
+        print(f"    {name:18s} "
+              f"{min(p['sep']):8.4f}..{max(p['sep']):<8.4f} "
+              f"{min(p['att']):8.4f}..{max(p['att']):<8.4f} "
+              f"{gap:+9.4f} {norm:+8.3f}"
+              + ("" if gap > 0 else "   OVERLAPS"))
+    ranked.sort(reverse=True)
+    if ranked:
+        best = ranked[0]
+        shipped = next((r for r in ranked if r[2] == "min (SHIPPED)"), None)
+        print()
+        if shipped and best[2] != "min (SHIPPED)" and best[0] > shipped[0]:
+            print(f"    Best margin: {best[2]} (norm {best[0]:+.3f}) beats "
+                  f"the shipped minimum (norm {shipped[0]:+.3f}).")
+        elif shipped:
+            print(f"    Ordering on this record: the shipped minimum holds "
+                  f"the best margin (norm {shipped[0]:+.3f}); every integral "
+                  f"reduction scores lower.")
+        # data sufficiency comes AFTER the ordering and outranks it: a gap
+        # measured against one element is arithmetic, not evidence
+        if min(n_sep, n_att) < 3:
+            print()
+            print(f"    *** NOT ADJUDICATED: {n_sep} separated and {n_att} "
+                  f"attached elements. A class")
+            print("    gap computed against a pool this small is arithmetic, "
+                  "not evidence — it")
+            print("    cannot rank these candidates and it cannot confirm "
+                  "the shipped one either.")
+            print("    The ordering above is recorded so it can be re-run "
+                  "as rows accumulate;")
+            print("    it is not a result. What this needs is labelled "
+                  "elements, which is")
+            print("    exactly what the harvest sink exists to produce.")
+
+
 def baseline(ride_mm=30.0, aoa=0.0, defl=12.0, gap=1.5, ovl=3.0):
     return {
         "elements": [
@@ -259,6 +429,8 @@ def main() -> int:
                 if s["shadow_min"] is not None:
                     worst_clean = (s["shadow_min"] if worst_clean is None
                                    else min(worst_clean, s["shadow_min"]))
+
+    report_candidates(truth)
 
     print("\n=== verdict ===")
     # the march's attached pool must include the VALIDATED baseline: its
