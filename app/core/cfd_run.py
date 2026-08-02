@@ -899,6 +899,18 @@ class RansJob:
                              f"{', knife-edge' if near else ''})")
             wall_verdict = ", ".join(parts)
 
+        # field-side recirculation structure, from the same solved field the
+        # flow view draws. Ungraded by construction (see foam_post): it says
+        # how much and where, and the line that would turn that into a
+        # verdict does not exist yet. Costs about one flow_png, so it runs
+        # once here at result assembly and never on a UI poll.
+        try:
+            recirc = foam_post.recirculation_report(
+                self.case_dir, self.cfg, converged=converged,
+                user_stopped=user_applied, wall=wall)
+        except Exception:
+            recirc = None
+
         d_cd, d_cd_bound = delta_cd(cd_mean, panel)
 
         q = self.cfg.q_pa
@@ -936,6 +948,7 @@ class RansJob:
                 "wall_report": wall,
                 "wall_verdict": wall_verdict,
                 "sep_knife_edge": sep_knife_edge,
+                "recirc_report": recirc,
                 "n_ranks": self.n_ranks,
                 "estimate_scope_note": (
                     "the estimate's k_g realization curve is calibrated on "

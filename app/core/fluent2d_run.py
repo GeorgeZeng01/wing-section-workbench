@@ -70,7 +70,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import analysis, cfd, cfd_run
+from . import analysis, cfd, cfd_run, foam_post
 from .geometry import StackConfig
 
 # solve in chunks so the chart updates and (in studio mode) the drift
@@ -830,6 +830,21 @@ class Fluent2DJob:
         # learns the stack was cut — state it on the card
         bl_note = ((self.mesh or {}).get("inflation") or {}).get("note")
 
+        # This engine exports no wall shear, so wall_report has nothing to
+        # say here and stays None. The field-side report reads the C/U/p
+        # this run already writes, which is how the ANSYS path finally gets
+        # a separation measurement at all. It is UNGRADED: on the retained
+        # cases it separates the collapse (element 2 at 0.39 reversed) from
+        # the healthy ones (0.00) by a wide margin, but the line that turns
+        # that into a verdict has to be regressed against paired
+        # wall-shear runs first, and those do not exist yet.
+        try:
+            recirc = foam_post.recirculation_report(
+                self.case_dir, self.cfg, converged=converged,
+                user_stopped=False, wall=None)
+        except Exception:
+            recirc = None
+
         # chord-referenced on both sides: cdc_mean is the studio-convention
         # value, the same basis as the estimate's CD_profile_stack
         d_cd, d_cd_bound = cfd_run.delta_cd(cdc_mean, panel)
@@ -893,6 +908,7 @@ class Fluent2DJob:
                 "wall_report": None,
                 "wall_verdict": None,
                 "sep_knife_edge": None,
+                "recirc_report": recirc,
                 "engine_note": (("solved by ANSYS Fluent (2D, double "
                                  "precision) on the mesh from the "
                                  "documented manual ANSYS workflow — "

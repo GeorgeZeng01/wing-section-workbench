@@ -411,6 +411,7 @@ FLUENT_RESULT_KEYS = {"engine", "cl_rans", "cl_rans_std", "cd_rans",
                       "delta_cl_provisional", "delta_cd_pct",
                       "delta_cd_is_upper_bound", "cl_trend_note",
                       "wall_report", "wall_verdict", "sep_knife_edge",
+                      "recirc_report",
                       "engine_note", "suggested_k_g", "mesh_caution",
                       "mesher", "n_ranks", "user_stopped", "case_dir"}
 check("result mirrors the FluentJob surface plus the 2D additions",
