@@ -614,3 +614,143 @@ and slot gaps of 3.0 and 2.1 against a 2.00 maximum.
 chord ratio, deflection, slot gap, slot overlap, stack AoA). Widening it left
 every calibration case in scope and two of the three presets quiet; the third
 (E423) legitimately trips on sections and overlap.
+
+## 2026-08-02 — Seven one-factor probes: no single axis explains the failure
+
+Base = the validated 30 mm two-element baseline, measured ATTACHED (screen
+0.6032, field 0.0000, cl 3.5089). Each probe moved **exactly one** variable
+outside the record's span, everything else held inside it. All seven came
+back `clean_probe=True`, converged at 3060 iterations, Fluent 2D studio
+settings.
+
+| probe | screen e2 | field e2 | cl |
+|---|---|---|---|
+| stack AoA 0 → +6 | 0.5680 | 0.0546 | 3.097 |
+| deflection 12 → 45 | **0.2736** | 0.0000 | 4.440 |
+| chord ratio 0.35 → 0.45 | 0.6027 | 0.0000 | 4.209 |
+| slot gap 1.5 → 3.0 | 0.6002 | 0.0000 | 3.730 |
+| main → s1223rtl | 0.6029 | 0.0000 | 3.261 |
+| flap → mid53b | 0.7727 | 0.0000 | 3.245 |
+| flap → e423 | 0.6965 | 0.0000 | 3.486 |
+
+**Six of seven agree with the flow. No single-axis excursion reproduces the
+false negative** found on 09c6de53265a (screen 0.5471 "ok" against field
+0.3848). The working hypothesis that sections was the culprit "by
+elimination" is refuted by its own three probes: s1223rtl, mid53b and e423
+all leave the screen reading healthy on a flow that is healthy.
+
+The deflection-45 row is the exception and points the other way — a possible
+**false positive**. 0.2736 is deeper than any design ever measured separated
+and carries a penalty near 513 (~1700 N at dscale 200), which would ban the
+design, while the field reads zero and cl is the highest in the set. Held as
+unconfirmed: the field probe read 0.0000 on a case whose wall shear was
+0.217, so zero is not proof of attachment, and a 45° flap is where a
+thin-reversal miss is most plausible.
+
+**Where this leaves the cause.** Walking the gate case the screen gets right
+toward the design it gets wrong, changing one thing at a time (panel model,
+no solve needed for the screen readings):
+
+| step | screen e2 |
+|---|---|
+| gate 1c4bf2d726c3 | 0.4591 collapse (correct; wall 0.217) |
+| A: e2 chord 0.28 → 0.50 | 0.4764 |
+| B: A + e2 deflection 8.9 → 0.8 | 0.4953 |
+| C: B + slot gaps 3.0 / 2.1 | **0.5145** (first step above SHADOW_SEP) |
+| D: C + e3 0.26 / 26.7° + aoa −1.23 | 0.4770 |
+| the failing design (D + sections) | **0.5471** |
+
+D and the failing design differ **only in sections**, and that difference
+alone lifts the reading 0.4770 → 0.5471, across the line. So sections do
+matter here — but only inside the three-element topology, which the
+two-element section probes could not reach. That is an interaction, not an
+axis. C and D are being solved to see whether the flow moves with the screen
+or stays put.
+
+## 2026-08-02 — Adversarial review: the probe round was invalid, and the
+## false negative reproduces without sections
+
+An adversarial pass over the previous entry's conclusions refuted all three,
+with measurements the original reading did not have. Recording the
+refutations, because the entry above is wrong in ways worth knowing.
+
+**A zero from the near-wall probe is not "attached".** The Fluent 2D path
+writes no wall shear at all, so every "attached" label in the probe round was
+a field-probe `0.0000` — the same reading already documented wrong on the
+design whose wall-shear fraction was 0.217. Under the project's own doctrine
+those are unmeasurable cases, and an unmeasurable case is never a pass. Six
+of the seven probes were graded on that mistake.
+
+**The probes were run on a 2-element base, where the screen's mechanism
+cannot occur.** The wake-shadow screen models an element sitting in its
+neighbours' circulation shadow. On a 2-element stack, element 2 has nothing
+behind it. Every 2-element solve on record reads element 2 attached (8/8);
+every 3-element solve reads it separated (4/4). Element count is a perfect
+confound, and no 2-element probe could have reproduced a confluence failure.
+
+**Two of the probed axes have almost no leverage on the screen at all.**
+Swept over the geometry validator's full range on the panel model: flap chord
+ratio 0.20 → 0.90 moves `shadow_min` by **0.0039**; slot gap 0.8 → 10.0 moves
+it by **0.0184**. Both are inside the module's own `SHADOW_KNIFE_BAND` of
+0.03, and the status string is a constant `"ok"` across both entire ranges.
+Those probes measured specificity where no positive was possible. This also
+bears on the scope check shipped earlier: flagging chord ratio as
+out-of-envelope is true but nearly irrelevant to the screen's answer.
+
+**The deflection-45 probe was NOT a false positive — the screen was right.**
+Its field carries one reversed region of 7531 cells, 0.190 c², 1.30 chords
+long, `reattaches: False`, anchored on the **main element's** suction side.
+The near-wall probe read 0.0000 on element 2 and 0.0609 on element 1 and saw
+none of it, because the separation is off-body in extent and on a different
+element. The screen raised a correct alarm — though by an invalid route: on
+that design the inviscid window minimum is pinned at the window's lower edge
+(arc 0.153) against arc 0.47–0.91 for every calibrated case, so the 0.2736
+and its ~513 penalty are not calibrated quantities.
+
+**And the false negative reproduces with in-record sections.** Walking the
+gate case toward the failing design, step C (e2 chord ratio 0.50, e2
+deflection 0.8°, slot gaps 3.0/2.1 — **s1223 throughout**) measures:
+
+| | screen e2 | field e2 |
+|---|---|---|
+| step C | **0.5145** (above SHADOW_SEP; ~0.1 N penalty) | **0.3872** |
+
+That is the same failure as 09c6de53265a, reached without changing a single
+section. **Sections are not the cause.** It is a three-element geometry
+effect — a large, nearly-undeflected second element with wide slot gaps — and
+step C is now a reproducible test case for it.
+
+**Consequence for the two field channels.** The near-wall probe and the
+region census fail in opposite directions: the probe caught the confluence
+collapses the census was silent on, and the census caught the large off-body
+separation the probe read as 0.0000. Neither is primary; `foam_post`'s
+module comment previously said Channel A was, and no longer does.
+
+### The path, solved: the screen swings across its line while the flow sits still
+
+Four converged 3-element solves, Fluent 2D studio settings, element 2:
+
+| design | sections | screen e2 | field e2 | screen verdict |
+|---|---|---|---|---|
+| gate 1c4bf2d726c3 | s1223 ×3 | 0.4591 | 0.0000 | collapse — correct (wall 0.217; the *field* missed it) |
+| step C | s1223 ×3 | **0.5145** | **0.3872** | ok — **false negative** |
+| step D | s1223 ×3 | 0.4770 | 0.4062 | collapse — correct |
+| 09c6de53265a | rtl/s1223/mid53b | **0.5471** | 0.3848 | ok — **false negative** |
+
+**The measured collapse is flat at 0.385–0.406 across C, D and the failing
+design. The screen moves 0.4770 → 0.5471 over the same three, crossing
+SHADOW_SEP twice.** In this corner of the space the screen is not tracking
+the flow; it is responding to geometry changes the separation is indifferent
+to. That is a sharper statement than "it is miscalibrated" and a different
+problem from "it is out of scope" — step C sits inside the record on
+sections and is still wrong.
+
+Step C is the minimal reproducer: gate case, all in-record sections, three
+changes (e2 chord ratio 0.28 → 0.50, e2 deflection 8.9 → 0.8°, slot gaps
+1.3/1.3 → 3.0/2.1). It should be added to the wall-truth record once an
+OpenFOAM solve can give it a wall-shear label.
+
+Note both instruments fail here, in opposite directions. At the gate the
+field probe reads 0.0000 against a wall-shear 0.217 and the screen is right;
+at C, D and the failing design the field is right and the screen swings. No
+single channel is trustworthy alone on this family.

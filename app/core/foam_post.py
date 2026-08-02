@@ -195,9 +195,28 @@ def wall_report(case_dir: Path) -> dict | None:
 # Two channels with a strict division of labour:
 #   A. an equal-arc near-wall probe    -> MAGNITUDE (the wall_report analogue)
 #   B. a connected reversed-region census -> STRUCTURE (where, how big, cove)
-# Channel A is primary: measured on the retained cases, the region census is
-# near-silent (30-32 reversed cells in the whole window) on four of five
-# cases where the probe reads correctly.
+#
+# NEITHER IS PRIMARY. This module originally called Channel A primary,
+# because on the first five retained cases the census was near-silent (30-32
+# reversed cells in the whole window) where the probe read correctly. A later
+# probe refuted that: a 45-degree-flap design read near_wall_reversed_frac
+# 0.0000 on element 2 and 0.0609 on element 1 -- i.e. Channel A saw
+# essentially nothing -- while the census found a SINGLE 7521-cell region,
+# 0.19 c^2, 1.30 chords long, reattaches=False, anchored on the MAIN
+# element's suction side. The flow was massively separated and the near-wall
+# probe missed it, because that separation is off-body in extent and sits on
+# a different element than the one being read.
+#
+# So the two channels fail in opposite directions and both must be consulted:
+# the probe catches confluence collapses hugging a flap; the census catches
+# large off-body separations the probe walks straight past.
+#
+# AND: A ZERO FROM CHANNEL A IS NOT "ATTACHED". On an engine with no wall
+# shear -- which is every Fluent run, see fluent2d_run -- a 0.0000 is an
+# unmeasured case, not a measured attachment. The probe already reads 0.0000
+# on a design whose preserved wall-shear fraction was 0.217. Treating that
+# zero as attachment is the mistake this comment exists to prevent; it was
+# made, in analysis, and it invalidated a round of probes.
 #
 # CLOSURE IS A SHAPE STATEMENT, NEVER A SEVERITY STATEMENT. This is measured,
 # not assumed: on the retained collapse case the dead element reattaches 13%
