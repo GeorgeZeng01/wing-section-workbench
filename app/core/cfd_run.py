@@ -358,6 +358,41 @@ def suggested_k_g(cl_rans: float, c_free: float, c_ground: float,
     return round(k, 3) if 0.0 < k <= 1.0 else None
 
 
+def delta_cd(cd_rans: float, panel: dict | None) -> tuple:
+    """Measured profile drag against the attached-flow estimate.
+
+    Returns (delta_pct, is_upper_bound); (None, False) when the estimate
+    is missing or degenerate.
+
+    This is the sharper of the two comparison columns. Separation reads
+    far louder in drag than in lift: the record has a separated
+    three-element section at a section Cd around 4x the estimate's capped
+    stack value (analysis.py, fine mesh) against -14..-42% on the lift
+    side. A stack that reads only mildly off on Cl can be shouting on Cd.
+
+    Basis: 2D RANS Cd is profile (pressure + friction) drag, compared
+    against CD_profile_stack and never the total — induced drag is a 3D
+    effect the case cannot see (module docstring).
+
+    Bound semantics: when the estimate's polar lookup is capped, an
+    element carried past its isolated CL_max has no honest drag on that
+    polar at all, so the estimate UNDERSTATES drag and the ratio
+    OVERSTATES the excess. The delta is then an upper bound on the true
+    excess, not a result, and the caller must label it as one.
+
+    No verdict is derived here. What excess means for attachment is a
+    calibration question against the wall-shear record, not a constant to
+    guess in the runner.
+    """
+    if not panel:
+        return None, False
+    cd_est = panel.get("cd_profile")
+    if cd_est is None or abs(cd_est) < 1e-9:
+        return None, False
+    return (round((cd_rans / cd_est - 1) * 100, 1),
+            bool(panel.get("cd_profile_is_lower_bound")))
+
+
 # ---------- the job ----------
 
 class RansJob:
@@ -792,6 +827,11 @@ class RansJob:
                 "c_free": co["C_downforce_inviscid_free"],
                 "c_ground": co["C_downforce_inviscid_ground"],
                 "cd_profile": co["CD_profile_stack"],
+                # the drag comparison is only as honest as the polar
+                # lookup behind it — carry the cap flag with the number
+                "cd_profile_is_lower_bound": fo[
+                    "drag_profile_is_lower_bound"],
+                "cd_capped_roles": fo["drag_capped_roles"],
                 "k_g_used": co["k_ground_realization"],
                 "downforce_n": fo["downforce_n"],
             }
@@ -859,6 +899,8 @@ class RansJob:
                              f"{', knife-edge' if near else ''})")
             wall_verdict = ", ".join(parts)
 
+        d_cd, d_cd_bound = delta_cd(cd_mean, panel)
+
         q = self.cfg.q_pa
         area = self.cfg.chord_m * (self.cfg.span_mm / 1000.0)
         with self._lock:
@@ -885,6 +927,11 @@ class RansJob:
                 # history — the UI must not present it as the design's
                 # measured error
                 "delta_cl_provisional": not converged,
+                # drag carries the separation signal far more loudly than
+                # lift does; an upper-bound flag rides with it because a
+                # capped polar lookup understates the estimate's drag
+                "delta_cd_pct": d_cd,
+                "delta_cd_is_upper_bound": d_cd_bound,
                 "cl_trend_note": trend_note,
                 "wall_report": wall,
                 "wall_verdict": wall_verdict,

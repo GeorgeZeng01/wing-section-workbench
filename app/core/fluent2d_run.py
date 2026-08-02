@@ -795,6 +795,11 @@ class Fluent2DJob:
                 "c_free": co["C_downforce_inviscid_free"],
                 "c_ground": co["C_downforce_inviscid_ground"],
                 "cd_profile": co["CD_profile_stack"],
+                # the drag comparison is only as honest as the polar
+                # lookup behind it — carry the cap flag with the number
+                "cd_profile_is_lower_bound": fo[
+                    "drag_profile_is_lower_bound"],
+                "cd_capped_roles": fo["drag_capped_roles"],
                 "k_g_used": co["k_ground_realization"],
                 "downforce_n": fo["downforce_n"],
             }
@@ -824,6 +829,10 @@ class Fluent2DJob:
         # the cap/degrade note the chain wrote is the only place a user
         # learns the stack was cut — state it on the card
         bl_note = ((self.mesh or {}).get("inflation") or {}).get("note")
+
+        # chord-referenced on both sides: cdc_mean is the studio-convention
+        # value, the same basis as the estimate's CD_profile_stack
+        d_cd, d_cd_bound = cfd_run.delta_cd(cdc_mean, panel)
 
         q = self.cfg.q_pa
         area = self.cfg.chord_m * (self.cfg.span_mm / 1000.0)
@@ -869,6 +878,11 @@ class Fluent2DJob:
                                  if panel and abs(panel["c_est"]) > 1e-9
                                  else None),
                 "delta_cl_provisional": not converged,
+                # drag carries the separation signal far more loudly than
+                # lift does; an upper-bound flag rides with it because a
+                # capped polar lookup understates the estimate's drag
+                "delta_cd_pct": d_cd,
+                "delta_cd_is_upper_bound": d_cd_bound,
                 "cl_trend_note": (
                     None if converged else
                     f"history not flat at stop (drift "
