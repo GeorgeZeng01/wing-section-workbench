@@ -357,9 +357,9 @@
               </select><i></i></span></label>
             <label class="field" id="opt-target-field"><span class="f-label">Target</span>
               <span class="f-wrap"><input id="opt-target" type="number" step="10" value="250"><i>N</i></span></label>
-            <label class="field" title="How strongly drag counts against a design. 0 = ignore drag; higher values trade downforce accuracy for cleaner, lower-drag settings.">
-              <span class="f-label">Drag penalty</span>
-              <span class="f-wrap"><input id="opt-drag-w" type="number" step="0.05" min="0" max="2" value="0.1"><i></i></span></label>
+            <label class="field" title="The trade the search actually makes: newtons of downforce given up to remove one newton of drag. 0.25 (the default) is the FSAE rule of thumb that aero pays when its L/D beats about 4. 1.0 is an even trade. 0.017 reproduces the old 'Drag penalty 0.1' behaviour, where drag was nearly free and the search maximized downforce at any drag cost. Set it from what your car wants — a lap-time sensitivity beats a guess.">
+              <span class="f-label">Drag exchange rate</span>
+              <span class="f-wrap"><input id="opt-drag-k" type="number" step="0.05" min="0" max="10" value="0.25"><i>N/N</i></span></label>
             <label class="field"
                    title="Optional efficiency floor: candidates must hold at least this downforce/drag ratio. Blank = off. Useful with Maximize downforce — pure maximization otherwise pays any drag price for the last newton.">
               <span class="f-label">Min L/D</span>

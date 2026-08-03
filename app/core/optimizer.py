@@ -89,6 +89,31 @@ DEFAULT_BOUNDS = {
 }
 SLOT_DEFAULTS = {"slot_gap_pct": 1.5, "slot_overlap_pct": 3.0}
 
+# drag_weight is the objective's internal weight; the panel asks instead for
+# the EXCHANGE RATE k, the newtons of downforce a design may give up to
+# remove one newton of drag. The objective's terms are 60*(1 - D/scale) and
+# 10w*drag/scale, so a neutral trade sits at dD/ddrag = 10w/60, i.e.
+#
+#     k = w / 6        w = 6k
+#
+# The old default w = 0.10 is k = 0.017: drag was very nearly free, which is
+# why "maximize downforce" behaved as pure maximization and would pay any
+# drag price for the last newton. The default is now w = 1.5 (k = 0.25), the
+# FSAE rule of thumb that aero pays when its own L/D beats about 4. A caller
+# that pins drag_weight explicitly is unaffected; the range widened to 60 so
+# k up to 10 (heavily drag-averse) stays reachable.
+DRAG_WEIGHT_PER_K = 6.0
+
+
+def drag_weight_from_k(k: float) -> float:
+    """Exchange rate (N downforce per N drag) -> objective weight."""
+    return DRAG_WEIGHT_PER_K * float(k)
+
+
+def k_from_drag_weight(w: float) -> float:
+    """Objective weight -> exchange rate, for display and reports."""
+    return float(w) / DRAG_WEIGHT_PER_K
+
 
 class _Cancelled(Exception):
     pass
@@ -549,7 +574,7 @@ class Job:
         import math as _math
         for key, default, lo, hi in (
                 ("target_downforce_n", 200.0, -1e6, 1e6),
-                ("drag_weight", 0.10, 0.0, 10.0)):
+                ("drag_weight", 0.10, 0.0, 60.0)):
             try:
                 v = float(options.get(key, default))
             except (TypeError, ValueError):

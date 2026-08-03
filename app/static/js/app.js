@@ -1788,7 +1788,7 @@ function syncOptimizerVars() {
 /* a running job snapshots its options at launch — lock the controls so
    mid-run edits are not silently ignored */
 const OPT_CONTROLS = ["opt-objective", "opt-target", "opt-mode", "opt-budget",
-  "opt-drag-w", "opt-minld", "opt-minconf", "ov-aoa", "ov-defl", "ov-pos",
+  "opt-drag-k", "opt-minld", "opt-minconf", "ov-aoa", "ov-defl", "ov-pos",
   "ov-chord", "ov-af", "ov-shape", "ov-af-pool"];
 
 function setOptControlsLocked(on) {
@@ -1853,7 +1853,22 @@ async function launchOptimization() {
   if ($("btn-opt-run").disabled || optLaunching) return;
   optLaunching = true;
   $("btn-opt-run").disabled = true;
-  const dragW = parseFloat($("opt-drag-w").value);
+  // the panel asks for the physical exchange rate k (newtons of downforce
+  // traded per newton of drag); the objective's stored weight is w = 6k,
+  // because its terms are 60*(1 - D/scale) and 10w*drag/scale, so a neutral
+  // trade sits at dD/ddrag = 10w/60. drag_weight stays the wire field, so
+  // saved automations and older sessions keep working unchanged.
+  //
+  // The rate drives MAX mode, where balance was missing — the old 0.10
+  // default made drag cost 1/60 N of downforce, pure maximization in
+  // practice. TARGET mode keeps the legacy weight: it balances by
+  // construction (attain the level, then the descend phase spends the
+  // remaining freedom on drag at that level), and rate-scale drag pressure
+  // there fights the target spring and pulls designs off the level the
+  // user explicitly asked for (measured: the target suites miss).
+  const dragK = parseFloat($("opt-drag-k").value);
+  const isMax = $("opt-objective").value === "max_downforce";
+  const dragW = isMax ? (Number.isFinite(dragK) ? 6 * dragK : 1.5) : 0.1;
   // snapshot the target: charts and hints must describe THIS run even if
   // the target field is edited while it searches
   const target = state.target;
@@ -1864,8 +1879,8 @@ async function launchOptimization() {
     min_confidence: Number.isFinite(minConf) ? minConf : 0.5,
     mode: $("opt-mode").value,
     budget: parseInt($("opt-budget").value, 10),
-    // 0 is a legal weight ("ignore drag") — don't || it away
-    drag_weight: Number.isFinite(dragW) ? dragW : 0.1,
+    // 0 is a legal rate ("ignore drag") — don't || it away
+    drag_weight: dragW,
     opt_stack_aoa: $("ov-aoa").checked,
     opt_deflections: $("ov-defl").checked,
     opt_positions: $("ov-pos").checked,
