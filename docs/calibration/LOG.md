@@ -880,3 +880,44 @@ opposite direction and its output still reads FLAGGED on the compound.
 Three bracket solves are running to test candidate 4's thresholds with
 stated predictions: defl 5.0 (−0.052, SEP), 6.5 (−0.009, knife-edge SEP),
 16.0 (−0.002, SEP via the route-2 min term — incipient-stall if real).
+
+## 2026-08-02 — Bracket solves: two predictions confirmed, one hair-width
+## miss, and the deflection map is monotone
+
+Three solves with predictions registered before solving (step-C family, e2
+deflection only):
+
+| defl | compound (pre-registered) | field e2 | census | scored |
+|---|---|---|---|---|
+| 5.0 | −0.052 → SEP | **0.3349** | 322c on e2 | **CONFIRMED** |
+| 6.5 | −0.009 → knife-edge | 0.1259 | 109c | **faithful** — "on the line" landed on a genuinely transitional flow |
+| 16.0 | −0.002 → SEP via route-2 min | 0.0000 | 26c (quiet) | **miss by −0.002** |
+
+The defl-16 miss is the route-2 term at its exact edge: min 0.468 against
+the 0.47 constant, on a heavily loaded but attached design whose window
+minimum drifts down with loading. Two honest readings: `CAND4_MIN` is a few
+thousandths too high on this family, or margins within ~±0.02 of zero should
+carry a knife-edge band rather than a side — under which both 6.5 and 16.0
+were called correctly. Either is a calibration choice, not the designer's.
+
+The full deflection map on this family is **monotone in the flow and rising
+in lift** while the screen drifts the wrong way:
+
+| e2 defl | field e2 | cl | screen e2 |
+|---|---|---|---|
+| 0.8 | 0.387 | 5.86 | 0.5145 |
+| 5.0 | 0.335 | 7.37 | 0.5097 |
+| 6.5 | 0.126 | 8.03 | 0.5075 |
+| 8.9 | 0.002 | 8.88 | 0.5034 |
+| 16.0 | 0.000 | **9.50** | 0.4678 |
+
+The flow transition sits between 6.5° and 8.4°. The screen's reading falls
+as the flow improves — anti-correlated across the entire physical
+transition. defl-16 at cl 9.502 is the highest lift measured this session,
+and the shipped screen would penalize it as a deep collapse (0.4678 →
+penalty ~14) while flagging nothing at 0.8° where the flow is dead.
+
+Candidate 4 on the grown pool: **11/11 separated, 3/3 attached** (defl-5's
+label is its fourth consecutive out-of-sample confirmation). Unadjudicated
+as ever: attached pool still 3, and the defl-16 edge case is exactly the
+kind of point the attached pool needs.

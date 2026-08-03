@@ -331,6 +331,53 @@
      "preset_name": "FSAE 2027 draft - outboard/tip station (edited)"
     }
    }
+  },
+  {
+   "case": "bracket_defl5",
+   "label": "step C with e2 defl 5.0 (screen 0.5097 ok; pre-registered compound prediction SEP -0.052, CONFIRMED)",
+   "field_reversed": {
+    "wing_e2": 0.3349
+   },
+   "config": {
+    "stack_aoa_deg": -3.88,
+    "ride_height_mm": 40,
+    "chord_mm": 350,
+    "span_mm": 1400,
+    "speed_ms": 20,
+    "rho": 1.225,
+    "nu": 1.5e-05,
+    "ncrit": 7,
+    "viscous_efficiency": 0.85,
+    "efficiency_3d": 0.9,
+    "span_efficiency": 0.9,
+    "n_panels_per_side": 70,
+    "manufacturing": {
+     "te_gap_mm": 2,
+     "te_mode": "thicken",
+     "min_thickness_mm": 2
+    },
+    "elements": [
+     {
+      "airfoil": "s1223",
+      "chord_ratio": 1,
+      "deflection_deg": 0
+     },
+     {
+      "airfoil": "s1223",
+      "chord_ratio": 0.5,
+      "deflection_deg": 5.0,
+      "slot_gap_pct": 3.0,
+      "slot_overlap_pct": 1.2
+     },
+     {
+      "airfoil": "s1223",
+      "chord_ratio": 0.2,
+      "deflection_deg": 27,
+      "slot_gap_pct": 2.1,
+      "slot_overlap_pct": 1.3
+     }
+    ]
+   }
   }
  ]
 }
