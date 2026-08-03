@@ -1202,3 +1202,37 @@ repair objective walks the right direction on the truth channel; and the
 engine-state disagreement (Fluent attached vs OF separated on identical
 designs) is the standing open question that no further solve on this
 machine can settle — it is a physical-validation question.
+
+## 2026-08-03 — Final: on wall labels, no panel statistic separates
+
+Re-fitting on the wall-labeled record only (11 converged non-exempt
+elements, partial band excluded): the shipped minimum overlaps by −0.135,
+raw deceleration by −0.273, and candidate 4's compound by −0.027. The
+in-scope false negative bl30 e2 (wall 0.437) reads healthier than every
+attached element on every panel statistic; the repair candidate's e2 (wall
+0.241) reads +0.019.
+
+**Candidate 4 predicted the Fluent field, not the wall.** Its 14/14 + 3/3
+record was real — against Fluent-field labels — and both channels' labels
+are internally consistent; they simply disagree with each other, and the
+wall is the declared truth. Conclusion: the panel model cannot grade
+attachment against wall truth with any statistic measured this session.
+Re-thresholding is not the fix; the screen's job on wall truth requires a
+solver-side channel.
+
+**What this leaves standing, by proposal:**
+1. RANS-side two-mode flag — SURVIVES and is now wall-verified on both
+   modes (probe ≥ 0.28 always wall-separated; census term tracks the main's
+   wall fraction). This is the adoptable piece.
+2. Panel-side screen replacement — DOES NOT SURVIVE wall labels. The
+   optimizer's cheap screen cannot be fixed by any measured re-weighting;
+   its honest role is candidate generation with RANS as the gate, which is
+   what the queue demotion already implements on the OpenFOAM engine.
+3. Repair objective — the compound walks the wall-verified direction
+   (e2 wall 0.291 → 0.050 along its gradient) and found defl ≈ 11° which
+   IS wall-attached at cl 8.63; usable as a search direction, never as a
+   verification. Verification is a solve.
+
+Open and outside this machine: which engine's near-wall physics is right
+(Fluent attached vs OF separated on identical converged designs — a
+physical-validation question), and every adoption decision above.
