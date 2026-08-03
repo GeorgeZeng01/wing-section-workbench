@@ -782,3 +782,43 @@ attached pool of three, and field labels are weaker than wall shear. It is
 in `separation_metric_check.py` as candidate 4 so every run re-measures it
 as the harvest grows. Six further solves straddling the failure region
 (screen 0.476–0.522) are running now and will add up to 12 labeled elements.
+
+## 2026-08-02 — Failure-region batch: the repair axis is e2 deflection, and
+## candidate 4 survives out-of-sample
+
+Six converged solves straddling the screen's failure region (screen e2
+0.4764–0.5224), element 2:
+
+| design | screen e2 | probe e2 | census | reading |
+|---|---|---|---|---|
+| A: gate + e2 cr 0.50 | 0.4764 collapse | 0.0214 | **869c on e2**, reatt None | census-flagged; screen plausibly right, probe missed it |
+| B: A + defl 0.8 | 0.4953 collapse | 0.0024 | 542c on main | ambiguous |
+| Cmid: B + gaps 2.0/1.7 | 0.5052 **ok** | **0.3729** | 489c | **false negative** |
+| Ccr42: C, e2 cr 0.42 | 0.5094 **ok** | **0.3588** | 351c | **false negative** |
+| Cdefl9: C, e2 defl 8.9 | 0.5034 ok | 0.0024 | **25c** | genuinely quiet |
+| FAILtight: fail, gaps 1.3 | 0.5224 **ok** | **0.4086** | 815c spans e2+e3 | **false negative** |
+
+**The repair axis for this family is e2 deflection, not gaps.** Re-deflecting
+e2 from 0.8° to 8.9° (Cdefl9) is the only change that recovers the flow —
+25 reversed cells, baseline-quiet — and it lands at **cl 8.878, the highest
+lift measured this session**. Tightening the gaps back to 1.3/1.3
+(FAILtight) does *not* recover the failing design: still 0.4086 reversed.
+The collapse follows the nearly-undeflected oversized second element, and
+fixing it costs nothing — it *gains* lift. (The screen cannot see any of
+this: C reads 0.5145 and Cdefl9 reads 0.5034, nearly identical, while the
+flow goes 0.387 → 0.002.)
+
+The gap transition sits between 1.3 and 2.0 in the step family (B 0.0024 →
+Cmid 0.3729) but gaps alone cannot recover the failing design — interaction
+again.
+
+**Candidate 4 survives out-of-sample.** The three new false negatives were
+not used to fit its constants; re-measured on the grown pool it reads
+**10/10 separated caught, 3/3 attached clean** (shipped minimum still
+overlaps, gap −0.014). Still two fitted constants, still an attached pool
+of three, still unadjudicated — but it has now predicted unseen cases.
+
+A and B are recorded as census-flagged and UNLABELED: the probe read near
+zero while the census saw 869/542-cell regions, the same probe blind spot
+the deflection-45 case exposed. No label channel for census evidence exists
+yet; defining one needs wall-shear truth (blocked on Docker).

@@ -172,6 +172,165 @@
      }
     ]
    }
+  },
+  {
+   "case": "step_Cmid",
+   "label": "Cmid: B + gaps 2.0/1.7 (screen e2 0.5052 = ok, false negative)",
+   "field_reversed": {
+    "wing_e2": 0.3729
+   },
+   "config": {
+    "stack_aoa_deg": -3.88,
+    "ride_height_mm": 40,
+    "chord_mm": 350,
+    "span_mm": 1400,
+    "speed_ms": 20,
+    "rho": 1.225,
+    "nu": 1.5e-05,
+    "ncrit": 7,
+    "viscous_efficiency": 0.85,
+    "efficiency_3d": 0.9,
+    "span_efficiency": 0.9,
+    "n_panels_per_side": 70,
+    "manufacturing": {
+     "te_gap_mm": 2,
+     "te_mode": "thicken",
+     "min_thickness_mm": 2
+    },
+    "elements": [
+     {
+      "airfoil": "s1223",
+      "chord_ratio": 1,
+      "deflection_deg": 0
+     },
+     {
+      "airfoil": "s1223",
+      "chord_ratio": 0.5,
+      "deflection_deg": 0.8,
+      "slot_gap_pct": 2.0,
+      "slot_overlap_pct": 1.2
+     },
+     {
+      "airfoil": "s1223",
+      "chord_ratio": 0.2,
+      "deflection_deg": 27,
+      "slot_gap_pct": 1.7,
+      "slot_overlap_pct": 1.3
+     }
+    ]
+   }
+  },
+  {
+   "case": "step_Ccr42",
+   "label": "Ccr42: C with e2 cr 0.42 (screen e2 0.5094 = ok, false negative)",
+   "field_reversed": {
+    "wing_e2": 0.3588
+   },
+   "config": {
+    "stack_aoa_deg": -3.88,
+    "ride_height_mm": 40,
+    "chord_mm": 350,
+    "span_mm": 1400,
+    "speed_ms": 20,
+    "rho": 1.225,
+    "nu": 1.5e-05,
+    "ncrit": 7,
+    "viscous_efficiency": 0.85,
+    "efficiency_3d": 0.9,
+    "span_efficiency": 0.9,
+    "n_panels_per_side": 70,
+    "manufacturing": {
+     "te_gap_mm": 2,
+     "te_mode": "thicken",
+     "min_thickness_mm": 2
+    },
+    "elements": [
+     {
+      "airfoil": "s1223",
+      "chord_ratio": 1,
+      "deflection_deg": 0
+     },
+     {
+      "airfoil": "s1223",
+      "chord_ratio": 0.42,
+      "deflection_deg": 0.8,
+      "slot_gap_pct": 3.0,
+      "slot_overlap_pct": 1.2
+     },
+     {
+      "airfoil": "s1223",
+      "chord_ratio": 0.2,
+      "deflection_deg": 27,
+      "slot_gap_pct": 2.1,
+      "slot_overlap_pct": 1.3
+     }
+    ]
+   }
+  },
+  {
+   "case": "FAILtight",
+   "label": "FAILtight: failing design, gaps 1.3/1.3 (screen e2 0.5224 = ok, false negative)",
+   "field_reversed": {
+    "wing_e2": 0.4086
+   },
+   "config": {
+    "stack_aoa_deg": -1.23,
+    "ride_height_mm": 40,
+    "chord_mm": 350,
+    "span_mm": 1400,
+    "speed_ms": 20,
+    "rho": 1.225,
+    "nu": 1.5e-05,
+    "ncrit": 7,
+    "viscous_efficiency": 0.85,
+    "efficiency_3d": 0.9,
+    "span_efficiency": 0.9,
+    "n_panels_per_side": 70,
+    "elements": [
+     {
+      "airfoil": "s1223rtl",
+      "chord_ratio": 1,
+      "deflection_deg": 0,
+      "dx": -0.03,
+      "dy": -0.03
+     },
+     {
+      "airfoil": "s1223",
+      "chord_ratio": 0.5,
+      "deflection_deg": 0.8,
+      "dx": -0.03,
+      "dy": -0.03,
+      "slot_gap_pct": 1.3,
+      "slot_overlap_pct": 0.6
+     },
+     {
+      "airfoil": "mid53b",
+      "chord_ratio": 0.26,
+      "deflection_deg": 26.7,
+      "dx": -0.03,
+      "dy": -0.03,
+      "slot_gap_pct": 1.3,
+      "slot_overlap_pct": 3.3
+     }
+    ],
+    "manufacturing": {
+     "te_gap_mm": 2,
+     "te_mode": "thicken",
+     "min_thickness_mm": 2
+    },
+    "k_g": 0.275,
+    "rule_envelope": {
+     "max_length_mm": 600,
+     "max_height_mm": 250,
+     "min_ground_clearance_mm": null,
+     "x_offset_mm": 0,
+     "min_le_radius_mm": 5,
+     "le_radius_scope": "frontmost",
+     "min_te_thickness_mm": null,
+     "measure_ride_height_mm": null,
+     "preset_name": "FSAE 2027 draft - outboard/tip station (edited)"
+    }
+   }
   }
  ]
 }
