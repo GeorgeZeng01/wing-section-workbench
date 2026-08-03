@@ -957,3 +957,38 @@ Candidate 4 on the grown pool: **14/14 separated, 3/3 attached** — seven
 consecutive out-of-sample confirmations. The attached pool remains 3 by
 doctrine (no wall shear on this engine, so quiet cases stay unlabeled);
 the quiet confirmations are recorded here as evidence, not labels.
+
+## 2026-08-02 — Second repair test: transitional, and the knife band becomes
+## a measured object
+
+Compound-repair of FAIL_aoa0 (the aoa-break, a different break mode from the
+step-C deflection break). The search again found deflection (e2 0.8° → 6.86°)
+and also restored the broken axis (aoa 0 → −1.26). Pre-registered ATT at
+margin **+0.020**, with the registered caution that 6.86° sits in the
+deflection map's transitional zone.
+
+Solved: **field e2 0.1591 — transitional.** The repair improved the flow by
+60 % (0.3967 → 0.1591) and gained 9.4 % lift (cl 7.208 → 7.888) but did not
+fully attach. Scored as a knife-zone miss for the ATT call.
+
+### The margin → measured-flow curve, all solved cases
+
+| compound margin (pre-computed) | field e2 (solved) | case |
+|---|---|---|
+| −0.124 | 0.387 | step C |
+| −0.066 | 0.397 | FAIL_aoa0 |
+| −0.052 | 0.335 | bracket defl 5 |
+| −0.031 | 0.318 / 0.397 | gate_aoa0 / FAIL_e3d35 |
+| −0.009 | 0.126 | bracket defl 6.5 |
+| −0.002 | 0.000 | bracket defl 16 |
+| **+0.020** | **0.159** | repair2 (this entry) |
+| +0.026 | 0.000 | stepC defl 11 |
+| +0.027 | 0.002 | Cdefl9 |
+| +0.053 | 0.000 | FAIL + defl 8.9 |
+
+Near-monotone: margins below −0.03 always read 0.32–0.40; margins above
++0.026 always read ≤ 0.002; the band between −0.01 and +0.02 produces
+0.000–0.159 — genuinely transitional flows. One inversion (+0.020 → 0.159 vs
+−0.002 → 0.000) sizes the band's noise. **An empirical knife band of ±0.02
+to ±0.03 around zero margin is now supported by five points, not asserted.**
+Two probes inside the band (+0.017, +0.009, 2-element family) are solving.
