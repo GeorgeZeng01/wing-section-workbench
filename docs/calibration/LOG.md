@@ -1027,3 +1027,52 @@ Scoring the knife probes themselves: the e2-margin band behaved (probe 0.0
 inside the band), but the DESIGN verdict "marginal-healthy" was wrong for
 both — by the exempted element. A margin on the flap says nothing about the
 main, and the session now has three measured cases proving it.
+
+## 2026-08-02 — PROPOSED field-side grading, awaiting adoption (session deliverable)
+
+Consolidates ~30 converged Fluent 2D solves (studio conventions,
+studio-yplus1, 3060 iters each). Every number below is measured in the
+entries above; nothing is wired. **Adoption is George's decision.**
+
+### Proposal 1 — RANS-side separation flag (per solved case)
+
+Flag a design as separated when **either** mode fires:
+
+| mode | term | proposed line | evidence |
+|---|---|---|---|
+| confluence collapse | worst per-element `near_wall_reversed_frac` | **≥ 0.28** | separated labels span 0.318–0.409; attached/quiet read ≤ 0.176; the 0.28 line sits in the measured gap |
+| main/open separation | total census cells in `reattaches=False` regions | **≥ 1000** | failing tier 3459–8272; everything else ≤ 377 (10× gap); catches the mode the probe reads 0.0 on |
+
+Falsified by: a wall-shear-verified attached case above either line, or a
+verified separated case under both. The three 216–377 open-cell cases are
+unlabeled — wall-shear solves of those three are the sharpest adoption test.
+
+### Proposal 2 — optimizer screen (panel-side, replaces bare shadow_min)
+
+Candidate 4's compound margin `min(0.35 − decel, min − 0.47)` on the
+windowed upper-side curve, with a **knife band of ±0.02**: negative margin
+below the band = predicted separated; positive above = predicted clean;
+inside = knife-edge, not evidence either way. Evidence: 14/14 + 3/3 on the
+labeled pool, 7 consecutive pre-registered out-of-sample confirmations, and
+a 10-point margin→flow curve that is monotone outside the band. Known
+limits, all measured: says nothing about the exempt first element (proposal
+1 mode 2 covers it), constants fitted on 17 points, field labels are the
+weaker channel.
+
+### Proposal 3 — repair objective
+
+The compound margin as the repair search's margin term (pattern in LOG
+above): it rediscovered the deflection fix the screen walks away from,
+verified attached at cl 7.54, and repaired the original failing design
+(cl 8.106, +14 %). Margins landing inside the knife band should be treated
+as unverified candidates requiring a solve — the +0.020 repair came back
+transitional.
+
+### What stays blocked, and on what
+
+- **Wall-shear pairing** (adjudicates everything above): needs Docker up
+  and one image pull, then OpenFOAM re-solves of the calibration configs
+  plus the three unlabeled open-cell cases.
+- **Adoption of any line above**: George.
+- **First-element exemption fix** in wake_shadow: design decision, needs
+  the census channel wired first — which needs proposal 1 adopted.
