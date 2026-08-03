@@ -992,3 +992,38 @@ Near-monotone: margins below −0.03 always read 0.32–0.40; margins above
 −0.002 → 0.000) sizes the band's noise. **An empirical knife band of ±0.02
 to ±0.03 around zero margin is now supported by five points, not asserted.**
 Two probes inside the band (+0.017, +0.009, 2-element family) are solving.
+
+## 2026-08-02 — Knife probes expose the first-element exemption; census term
+## measured across all 40 solved cases
+
+The two 2-element knife-band probes (+0.017, +0.009) read **e2 probe 0.0** —
+the e2-margin knife-band prediction holds — but the census found **3489 and
+8274 cells** of `reattaches=False` separation anchored on the **main
+element**, which the entire screen family (shadow_min, candidate 4) exempts
+by construction. The 8274-cell case is the session's largest reversed
+structure. The first-element exemption ("mains measured attached") was
+calibrated on 3-element stacks with moderate flaps; under a hot 2-element
+flap in ground effect it does not hold.
+
+**Candidate 5 — open-region census cells, measured on all 40 solved cases:**
+
+| tier | open (reatt=False) cells | cases |
+|---|---|---|
+| main-separation mode | **3459–8272** | defl-45, defl-30, aoa6/defl25 (all 2-elem hot-flap) |
+| small open structures | 216–377 | three single-axis probes (flow state unknown) |
+| everything else | ≤ 40 | including every 3-element e2 collapse — their bubbles close (`reatt=True`), consistent with the closure-orthogonality finding |
+
+The two failure modes have disjoint sensors: the near-wall probe catches the
+3-element confluence collapse (0.28–0.41) and reads ≤ 0.063 on the
+main-separation cases; the open-census catches main separation (≥ 3459) and
+reads ≤ 40 on the confluence collapses. A two-mode flag — `worst_probe ≥
+~0.28 OR open_cells ≥ ~1000` (the line placed in a 377 → 3459 gap) — covers
+every labeled failure on the record with no false alarm among the quiet
+cases. Same status as candidate 4: measured, re-runnable, NOT adjudicated
+(the open-cells line sits in a 10× gap with nothing between, and the
+216–377 tier's flow state is unlabeled).
+
+Scoring the knife probes themselves: the e2-margin band behaved (probe 0.0
+inside the band), but the DESIGN verdict "marginal-healthy" was wrong for
+both — by the exempted element. A margin on the flap says nothing about the
+main, and the session now has three measured cases proving it.
