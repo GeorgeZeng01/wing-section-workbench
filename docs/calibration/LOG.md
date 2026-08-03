@@ -1121,3 +1121,46 @@ under-separates (engine/wall treatment), or the baseline genuinely runs
 separated while matching the panel Cl. Every ATT label in the pools rides on
 this. A FINE-mesh OpenFOAM solve of bl30 is running as the discriminator;
 until it lands, the attached pool is SUSPENDED as evidence.
+
+## 2026-08-03 — The discriminator: fine agrees with medium, and the attached
+## pool dissolves
+
+bl30 FINE, converged at 14 000 iterations: **e2 wall 0.437 separated** (vs
+medium's 0.458 — agreement within 0.02 across mesh grades), e1 0.155
+knife-partial, cl 3.4969.
+
+The tell: fine's cl matches Fluent's (3.497 vs 3.509) almost exactly —
+which is why the July record "validated" this design. **Cl-validation never
+meant attached flow.** The validated baseline runs its flap 44 % reversed
+while producing the validated lift, the same lesson as July's 3-element
+finding (22–40 % reversed under a clean optimizer read), now on the
+2-element baseline itself.
+
+**Engine-level disagreement on flow state.** OpenFOAM reads e2 separated on
+both mesh grades; Fluent studio-yplus1's exported field reads the same
+design attached (probe 0.000, census ~35 cells). This is not a probe
+artifact — the exported near-wall velocities genuinely differ. Which engine
+is closer to physical truth is not determinable inside this toolchain;
+Fluent owns absolute coefficients by the July reference flip, but
+attachment class now disagrees between engines and neither has tunnel
+validation. Every conclusion in this log built on a single channel inherits
+that uncertainty, and the wall-shear channel is the declared truth channel
+by long-standing doctrine, so:
+
+- **All Fluent-zero "attached" evidence is dissolved** — including the
+  session's 3/3 ATT leg for candidate 4 and both "validated baseline"
+  labels.
+- **All SEP findings survive** (wall-verified in six cases; the probe's
+  high readings were confirmed, its zeros were not).
+- **A new in-scope false negative**: bl30 sits fully inside the screen's
+  validated envelope on every axis, reads 0.6032 — the healthiest-looking
+  reading of the session — and is wall-separated at 0.437. The "scope, not
+  weakness" story was scored with the field probe and is now overstated:
+  scope violations correlate with failures, but in-scope does not imply
+  correct.
+
+**Candidate 4's ledger after dissolution**: SEP leg intact (wall-verified),
+ATT leg = one solid point (gate e3: wall 0.027, margin +0.063, correct) plus
+one knife on the correct side (defl30 e2: wall 0.055, +0.017). The ATT side
+must be rebuilt from wall labels; an OpenFOAM batch of compound-ATT-predicted
+designs is the direct way and is queued.
