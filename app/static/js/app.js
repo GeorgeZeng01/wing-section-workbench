@@ -4476,8 +4476,12 @@ function renderFl2dResult(s, { provenance = "fresh" } = {}) {
     ["Iterations", `${esc(r.n_iters_run)} (${esc(r.stop_reason)}; ` +
       `tail mean of ${esc(r.tail_rows)})`],
   ];
-  // the adopted field-channel attachment grading — on this engine the only
-  // attachment channel there is (Fluent writes no wall shear)
+  // attachment, both channels: the wall verdict reads this run's own
+  // exported wall shear (since 2026-08), the field verdict grades the
+  // solved flow by the adopted lines — wall outranks field
+  if (r.wall_verdict) {
+    head.push(["Attachment (wall shear)", esc(r.wall_verdict)]);
+  }
   if (r.field_verdict) {
     head.push(["Attachment (field)", esc(r.field_verdict.verdict)]);
   }
@@ -4980,6 +4984,8 @@ async function buildReport() {
         ? `${rs.delta_cl_pct > 0 ? "+" : ""}${fmtN(rs.delta_cl_pct, 1)}%${prov}` : "–"],
       ["Downforce at RANS Cl", `${rs.downforce_n_at_rans_cl} N`],
       ["Attachment (wall shear)", rs.wall_verdict || ""],
+      ["Attachment (field)", rs.field_verdict
+        ? rs.field_verdict.verdict : ""],
       ["Converged", rs.converged ? "yes" : (rs.user_stopped
         ? "stopped by user (preview)" : "NO — mid-transient snapshot")],
       ["Iterations", `${rs.n_iters_run} (${rs.stop_reason})`],
