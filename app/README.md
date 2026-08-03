@@ -227,9 +227,13 @@ finishes with the RANS coefficients side by side with the studio estimate —
 including the pinned `k_g` that would make the estimate reproduce the RANS
 sectional load, applied with one click (offered only from a run whose force
 history actually converged). Each run also reports its measured y+ and a
-per-element attachment verdict read from the wall shear field, so a high
-load can be told apart from a separated one; a run still trending labels
-its own mean a bound rather than a result. The shortlist verification
+per-element attachment verdict read from the wall shear field, plus a
+field-channel verdict graded from the solved flow itself (near-wall
+reversed fraction and non-reattaching reversed regions, adopted lines in
+`docs/calibration/LOG.md`), so a high load can be told apart from a
+separated one; a run still trending labels its own mean a bound rather
+than a result. The field channel's clean reading says "no separation
+evidence", never "attached" — it under-reads the wall and says so. The shortlist verification
 queue carries the same verdict per row and demotes any design measuring
 an element separated below every attached one — a separated flow state's
 forces cannot buy it a podium. Entirely opt-in: the button only
@@ -275,7 +279,13 @@ headlines the chord-referenced downforce-positive coefficient with
 Fluent's own raw values alongside and the reference noted, flags
 runs Fluent's residual criteria stopped early, offers the same
 one-click `k_g` apply as the OpenFOAM tab, and feeds the same live
-convergence chart and the same flow views, animation included. This tab's own *Solver cores*
+convergence chart and the same flow views, animation included. Since
+2026-08 a finished run also grades attachment from its own solution:
+a per-element wall verdict read from the run's exported wall shear
+(`wall_shear.csv`, the same grading lines as the OpenFOAM engine) and
+the adopted field verdict beside it, so a separated Fluent design
+demotes in the verification queue exactly like a separated OpenFOAM
+one. This tab's own *Solver cores*
 field (any count from 1 to 32) sets Fluent's parallel processor count and is unrelated to the
 OpenFOAM engine's MPI/queue machinery above. A solver session holds an
 ANSYS license only while the run is live; cancel releases it. The

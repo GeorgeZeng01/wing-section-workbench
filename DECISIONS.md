@@ -2450,3 +2450,83 @@ without a refit, because a config-blind curve cannot be honestly fitted to
 configuration-dependent error. The curve's shape is a two-element
 artifact; treat estimates on three-plus-element stacks as lower bounds
 until RANS says otherwise.
+
+## The separation loop: detection on both engines, an adopted field verdict, and the screen's honest role (2026-08-02/03)
+
+The user kept finding recirculation in the ANSYS flow images that the
+optimizer had called clean, and asked for an autonomous loop: detect it
+properly, repair it, and teach the optimizer to stop producing it. Building
+that loop surfaced the round's central lesson twice over — a verdict is only
+as good as the channel it was calibrated on, and channels disagree.
+
+**Every solve now leaves a calibration row.** The shipped separation screen
+had been calibrated on five hand-extracted cases because run-dir
+housekeeping deletes case directories. `cfd_run.append_harvest` writes one
+row per finished solve on every engine — the cheap screen's prediction
+beside the expensive measurement, config verbatim — to the data dir (a
+tracked target would dirty the tree on every run);
+`scripts/promote_harvest.py` is the reviewed step into `docs/calibration/`.
+The round accumulated ~50 solves of labeled record where five existed.
+
+**The field topology sensor** (`foam_post.recirculation_report`) reads the
+same solved C/U/p the flow view draws, on both engines: an equal-arc
+near-wall probe (magnitude) and a connected reversed-region census
+(structure). Neither channel is primary — measured, each catches a failure
+mode the other misses: the probe caught confluence collapses the census was
+silent on, the census caught a 7500-cell main-element separation the probe
+read as 0.000. Closure is a shape statement, never severity: the record's
+collapsed element reattaches ahead of its trailing edge while a healthy
+element's thin reversal runs onto it.
+
+**The adopted field verdict** (`cfd_run.field_verdict`, adopted 2026-08-03):
+separated when the worst per-element near-wall fraction reaches 0.28 (knife
+band 0.26–0.30) or when non-reattaching reversed regions total 1000 cells
+(knife 500–1500) — each line in a measured gap of the wall-labeled record,
+each mode covering the other's blind spot. Its clean wording is "no
+separation evidence", never "attached": paired same-solve measurements show
+the probe under-reads the wall everywhere, worst in the partial band, where
+wall fractions of 0.11–0.17 read as probe zeros. The queue demotes on
+either channel, wall outranking field.
+
+**The Fluent engine grades attachment from its own wall shear.** The ASCII
+export accepts x/y-wall-shear on the profile zone (per-node rows); the 2D
+engine writes `wall_shear.csv` beside the flow field,
+`foam_post.fluent_wall_report` attributes nodes to elements, and one shared
+grading (`cfd_run.wall_verdict_text`, extracted from the OpenFOAM runner so
+a single implementation exists) produces identical verdict prose on both
+engines. Sign conventions are opposite and both correct — Fluent exports
+shear on the wall, OpenFOAM traction on the fluid.
+
+**The engines disagree on flow state in the partial band, and that is
+recorded, not resolved.** The record's own "validated" two-element baseline
+measures its flap at wall 0.437–0.458 on two OpenFOAM mesh grades while
+matching the validated Cl almost exactly — Cl-validation never meant
+attached flow — yet the same design's Fluent wall channel reads 0.102.
+Mains agree across engines everywhere measured. Per the user's ruling ANSYS
+is the accuracy reference where they disagree; both engines remain options,
+and the disagreement lives exactly in the partial band where every channel
+is hardest. Tunnel data remains the referee.
+
+**The wake-shadow screen keeps its job and loses its authority.** Measured
+against wall labels, no panel statistic separates the classes — the shipped
+minimum overlaps by −0.135, and the best fitted alternative (a two-route
+compound that went 14/14 + 3/3 against Fluent-field labels, seven
+consecutive pre-registered out-of-sample confirmations) overlaps by −0.027,
+because it predicted the Fluent field, not the wall. Rejected alternatives
+are recorded in `scripts/separation_metric_check.py` (integral deficits:
+the shipped point-minimum beat all six reductions; the compound: right
+channel-internally, wrong channel). The screen's honest role is candidate
+generation with RANS as the gate; it now declares its validated envelope
+(`wake_shadow.scope_check`, seven axes derived from the record and
+re-derived by the check script) and flags minima pinned on its own window
+edge. The record shows designs inside the envelope can still read wrong —
+scope violations correlate with failures; in-scope does not imply correct.
+
+**Repair is a direction, never a verification.** The compound-margin search
+walks the wall-verified recovery direction (a nearly-undeflected oversized
+second element re-deflects: e2 wall 0.291 → 0.050 along the gradient,
+optimum ~11° at cl 8.63, wall-attached, with the third element degrading
+beyond it) and found the fix the shipped screen walks away from. Its
+margins verify nothing — the one repair "verified attached" by the Fluent
+field probe measured wall 0.241. `repair.py`'s docstring leads with the
+falsification of its own founding premise.
