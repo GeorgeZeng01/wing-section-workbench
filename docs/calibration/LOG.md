@@ -1076,3 +1076,48 @@ transitional.
 - **Adoption of any line above**: George.
 - **First-element exemption fix** in wake_shadow: design decision, needs
   the census channel wired first — which needs proposal 1 adopted.
+
+## 2026-08-02 — The wall-shear pairing batch: five OpenFOAM solves, and the
+## probe's bias is now measured same-solve
+
+Docker returned; five OpenFOAM medium-mesh solves (n_ranks 1, force-stop),
+each writing wallShearStress + C/U/p + a harvest row on the SAME case — the
+pairing every proposal was waiting for.
+
+| case | conv | wall e1 / e2 / e3 | OF probe e1 / e2 / e3 | screen e2 |
+|---|---|---|---|---|
+| step C | no (cap) | 0.076 / **0.291** / **0.282** | 0.014 / 0.273 / 0.055 | 0.5145 "ok" |
+| baseline30 | **yes** | 0.192 / **0.458** | 0.081 / 0.263 | 0.6032 "ok" |
+| aoa6/defl25 | **yes** | **0.287** / 0.127 | 0.220 / 0.0 | 0.4787 |
+| defl30 | no | 0.174 / 0.055 | 0.087 / 0.0 | 0.4869 |
+| bl30+mid53b | **yes** | 0.207 / 0.113 | 0.086 / 0.0 | 0.7727 "ok" |
+
+**Same-solve probe bias (C1/C2 data at last).** The probe under-reads the
+wall on every element of every solve. Ratios probe/wall: e2 0.94 (step C)
+but 0.57 (bl30); e1 0.42–0.77; step C's e3 0.20 — and four elements at
+partial-band wall fractions (0.113–0.174) read 0.0. The bias is real,
+element-dependent, and worst exactly in the partial band. **A field-side
+grading line cannot replace wall shear; the probe is a screen, not a
+truth channel.** Proposal 1's 0.28 line survives as a high-confidence
+SEPARATED flag (everything the probe reads ≥ 0.26 is wall-separated) but a
+probe zero says nothing — as doctrine already held.
+
+**Wall-verified findings:**
+- Step C's false negative confirmed on the truth channel (e2 0.291), plus a
+  third screen miss on the same design (e3 0.282, screen 0.5092 "ok").
+- The first-element exemption is broken on a converged solve: aoa6/defl25's
+  main at **0.287 separated**, which candidate 5's census term (8272 cells)
+  called and everything in the screen family exempts. Census scale tracks
+  the wall (8272→0.287, 3459→0.174, 377→0.207/0.113 across the pair).
+- The small-open tier is real separation, not benign structure.
+
+**And the anomaly that outranks all of it: the record's validated baseline
+measures e2 wall 0.458 SEPARATED, converged**, while every Fluent
+studio-yplus1 solve of the same design read attached (field 0.000, census
+~35 cells) and the July record "validated" it at delta_cl ~0 on fine mesh.
+"Validated" only ever meant Cl-accurate — this is the design's first wall
+measurement. Either OF-medium over-separates (mesh grade), or Fluent
+under-separates (engine/wall treatment), or the baseline genuinely runs
+separated while matching the panel Cl. Every ATT label in the pools rides on
+this. A FINE-mesh OpenFOAM solve of bl30 is running as the discriminator;
+until it lands, the attached pool is SUSPENDED as evidence.
