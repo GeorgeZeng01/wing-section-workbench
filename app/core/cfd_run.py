@@ -380,6 +380,31 @@ FIELD_SEP_OPEN_CELLS = 1000
 FIELD_OPEN_KNIFE = (500, 1500)
 
 
+def wall_verdict_text(wall: dict | None) -> tuple:
+    """(verdict prose, knife flag) from a wall report — ONE grading for
+    every engine that produces the wall channel, so the OpenFOAM parser
+    and the Fluent x-wall-shear export cannot drift apart on what the
+    fractions mean. Returns (None, None) when there is nothing to grade."""
+    if not (wall and wall.get("separation")):
+        return None, None
+    parts = []
+    knife = False
+    for patch in sorted(wall["separation"]):
+        frac = wall["separation"][patch]["reversed_frac"]
+        state = ("attached" if frac <= SEP_ATTACHED_MAX
+                 else "partial separation" if frac <= SEP_PARTIAL_MAX
+                 else "separated")
+        # within the band of either line the side it landed on is
+        # rank-count luck, not a stable classification — say so
+        near = (abs(frac - SEP_ATTACHED_MAX) <= SEP_KNIFE_BAND_ATTACHED
+                or abs(frac - SEP_PARTIAL_MAX) <= SEP_KNIFE_BAND)
+        knife = knife or near
+        parts.append(f"{patch.replace('wing_', '')} {state} "
+                     f"({frac * 100:.0f}% reversed"
+                     f"{', knife-edge' if near else ''})")
+    return ", ".join(parts), knife
+
+
 def field_verdict(recirc: dict | None) -> dict | None:
     """Grade a recirculation report with the adopted two-mode lines.
 
@@ -1069,24 +1094,7 @@ class RansJob:
             wall = foam_post.wall_report(self.case_dir)
         except Exception:
             wall = None
-        if wall and wall.get("separation"):
-            parts = []
-            sep_knife_edge = False
-            for patch in sorted(wall["separation"]):
-                frac = wall["separation"][patch]["reversed_frac"]
-                state = ("attached" if frac <= SEP_ATTACHED_MAX
-                         else "partial separation" if frac <= SEP_PARTIAL_MAX
-                         else "separated")
-                # within the band of either line the side it landed on is
-                # rank-count luck, not a stable classification — say so
-                near = (abs(frac - SEP_ATTACHED_MAX)
-                        <= SEP_KNIFE_BAND_ATTACHED
-                        or abs(frac - SEP_PARTIAL_MAX) <= SEP_KNIFE_BAND)
-                sep_knife_edge = sep_knife_edge or near
-                parts.append(f"{patch.replace('wing_', '')} {state} "
-                             f"({frac * 100:.0f}% reversed"
-                             f"{', knife-edge' if near else ''})")
-            wall_verdict = ", ".join(parts)
+        wall_verdict, sep_knife_edge = wall_verdict_text(wall)
 
         # field-side recirculation structure, from the same solved field the
         # flow view draws. Ungraded by construction (see foam_post): it says

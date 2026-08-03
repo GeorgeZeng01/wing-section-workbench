@@ -360,7 +360,10 @@ check("mesh caution always on (no 2D sizing is calibration grade)",
 check("engine note is honest about conventions and limits",
       r and "chord-referenced" in r["engine_note"]
       and "downforce-positive" in r["engine_note"]
-      and "OpenFOAM-engine feature" in r["engine_note"]
+      # since 2026-08-03 the attachment verdicts come from this run's OWN
+      # wall shear and field — the note must claim that, not the old
+      # OpenFOAM-only limitation
+      and "own wall shear" in r["engine_note"]
       and "screening" in r["engine_note"]
       and "app/" not in r["engine_note"]
       and "scripts/" not in r["engine_note"])

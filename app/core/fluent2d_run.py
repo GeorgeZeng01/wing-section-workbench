@@ -53,8 +53,12 @@ The flow view and the animated view work on 2D runs: the solved
 cell-centre field is exported from the live session — 2D exports carry
 no z column — and written as OpenFOAM-format C/U/p files with z = 0
 and w = 0, so foam_post reads a 2D Fluent run exactly like every other
-engine. Wall-shear attachment verdicts remain an OpenFOAM-engine
-feature; the result says so. One job at a time across ALL engines:
+engine. Wall-shear attachment verdicts come from this engine's OWN
+solution since 2026-08-03: the export also writes per-node x-wall-shear
+on the profile zone (wall_shear.csv), foam_post.fluent_wall_report
+attributes nodes to elements, and the shared cfd_run grading turns the
+fractions into the same verdict prose the OpenFOAM engine carries. The
+adopted field verdict rides beside it. One job at a time across ALL engines:
 2D jobs register in cfd_run's registry, so the existing guard covers
 them.
 """
@@ -651,14 +655,26 @@ class Fluent2DJob:
                         user_stopped=False, wall=None)
                 except Exception:
                     rec = None
+                # the wall channel from this engine's OWN solution (the
+                # accuracy reference per the 2026-08-03 ruling): graded by
+                # the same shared lines as the OpenFOAM parser
+                try:
+                    fwall = foam_post.fluent_wall_report(self.case_dir,
+                                                         self.cfg)
+                except Exception:
+                    fwall = None
+                fverdict, fknife = cfd_run.wall_verdict_text(fwall)
                 with self._lock:
                     if self.result is not None:
                         self.result["recirc_report"] = rec
-                        # the ADOPTED field grading: on this engine it is
-                        # the only attachment channel, so it also drives
-                        # the queue's demotion
+                        # the ADOPTED field grading rides beside the wall
+                        # channel; both demote in the queue, wall first
                         self.result["field_verdict"] = \
                             cfd_run.field_verdict(rec)
+                        if fwall is not None:
+                            self.result["wall_report"] = fwall
+                            self.result["wall_verdict"] = fverdict
+                            self.result["sep_knife_edge"] = fknife
                 # the calibration row is written here rather than at result
                 # assembly so it carries the field measurement, not a None
                 try:
@@ -702,6 +718,16 @@ class Fluent2DJob:
                         quantities=["x-velocity", "y-velocity",
                                     "pressure"],
                         location="cell-center")
+        # the wall attachment channel, from this engine's own solution:
+        # per-node wall shear on the profile zone (spiked 2026-08-03).
+        # Best-effort — a run without it degrades to the field channel,
+        # never to a silent pass
+        try:
+            fm.export_ascii(filename=str(self.case_dir / "wall_shear.csv"),
+                            quantities=["x-wall-shear", "y-wall-shear"],
+                            location="node", surfaces=["profile"])
+        except Exception:
+            pass
         header: list[str] = []
         cols: list[list[float]] = []
         with open(csv, errors="replace") as fh:
@@ -961,9 +987,9 @@ class Fluent2DJob:
                                  "downforce-positive at the source. ")
                                 + "The flow "
                                 "view and animation read the exported "
-                                "Fluent field; wall-shear attachment "
-                                "verdicts remain an OpenFOAM-engine "
-                                "feature. This 2D mesh is not the "
+                                "Fluent field; the attachment verdicts "
+                                "read this run's own wall shear and "
+                                "solved field. This 2D mesh is not the "
                                 "studio's calibration-grade preset — "
                                 "treat a pinned k_g as a screening "
                                 "value. "

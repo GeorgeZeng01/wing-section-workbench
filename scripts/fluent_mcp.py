@@ -785,18 +785,22 @@ def scheme(expr: str) -> str:
 def export_ascii(filename: str = "solution.csv",
                  quantities: list[str] = ["x-velocity", "y-velocity",
                                           "pressure"],
-                 location: str = "cell-center") -> dict:
+                 location: str = "cell-center",
+                 surfaces: list[str] | None = None) -> dict:
     """Solution export from the live session as comma-separated text
     with a header row (cellnumber/x/y/z + the requested quantities).
     location: "cell-center" or "node". The in-app Fluent engine uses
-    this to feed the studio's flow view and animation."""
+    this to feed the studio's flow view and animation; with
+    surfaces=["profile"] and wall-shear quantities it also feeds the
+    wall attachment channel (spiked 2026-08-03: the export accepts
+    x-wall-shear/y-wall-shear on wall zones and writes per-node rows)."""
     s = _require()
     path = Path(filename)
     if not path.is_absolute():
         path = (_session_dir or WORK) / filename
     s.settings.file.export.ascii(
         file_name=str(path).replace("\\", "/"),
-        surface_name_list=[], delimiter="comma",
+        surface_name_list=list(surfaces or []), delimiter="comma",
         quantities=list(quantities), location=location)
     if not path.is_file():
         raise RuntimeError("Fluent wrote no export file")

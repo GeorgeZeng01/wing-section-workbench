@@ -1236,3 +1236,41 @@ solver-side channel.
 Open and outside this machine: which engine's near-wall physics is right
 (Fluent attached vs OF separated on identical converged designs — a
 physical-validation question), and every adoption decision above.
+
+## 2026-08-03 — The accuracy reference gets the truth channel, and the
+## engine disagreement is measured at wall level
+
+George's rulings (recorded): both engines remain options; ANSYS is the
+accuracy reference where they disagree; nothing merges or publishes until he
+says. Delegated decisions (mine, reported): the two-mode field verdict is
+adopted and wired; the panel-screen replacement is retired; the compound
+repair objective is direction-only.
+
+**The Fluent wall-shear channel exists.** Spiked on the retained collapse
+case (the ASCII export accepts x/y-wall-shear on the profile zone, per-node
+rows), then productionized: the 2D engine exports `wall_shear.csv` beside
+C/U/p, `foam_post.fluent_wall_report` attributes nodes to elements (same
+cKDTree pattern as the recirculation report), and the shared
+`cfd_run.wall_verdict_text` grading produces identical verdict prose on
+both engines. Sign conventions are opposite and both correct: Fluent
+exports shear ON the wall (attached = +x), OpenFOAM traction on the fluid
+(attached = −x).
+
+**Measured, wall vs wall, per engine:**
+
+| design | element | Fluent wall | OpenFOAM wall | field probe |
+|---|---|---|---|---|
+| collapse case | e2 | **0.378** | (class: separated) | 0.385 |
+| collapse case | e1 / e3 | 0.090 / 0.141 | — | 0.014 / 0.005 |
+| bl30 baseline | e1 | **0.153** | 0.155–0.192 | 0.065 |
+| bl30 baseline | e2 | **0.102** | **0.437–0.458** | 0.000 |
+
+The picture sharpens: on the collapse case every channel agrees
+(separated); on bl30 the engines agree on the main and genuinely differ on
+the flap at wall level — 0.102 (knife-edge partial, per the reference
+engine) against 0.437 (deep separated, OpenFOAM). The dissolution entry's
+"Fluent under-reads" was half right: its FIELD probe under-read badly
+(0.000), but its own WALL channel reads 0.102 — the baseline flap is
+knife-partial per the accuracy reference, not attached and not deeply
+separated. The remaining engine gap on this flap is a real modeling
+difference, in the partial band where everything is hardest.

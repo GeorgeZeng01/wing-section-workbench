@@ -183,6 +183,66 @@ def wall_report(case_dir: Path) -> dict | None:
             "time": sep_time if separation else None}
 
 
+def fluent_wall_report(case_dir: Path, cfg: StackConfig) -> dict | None:
+    """The wall attachment channel from a Fluent run's own solution.
+
+    Reads wall_shear.csv (per-node x/y + x-wall-shear/y-wall-shear on the
+    profile zone, written by the 2D engine beside C/U/p) and attributes
+    each node to its element by nearest installed-polygon vertex — the same
+    cKDTree pattern the recirculation report uses, so the two channels
+    cannot disagree about which element a point belongs to.
+
+    SIGN CONVENTION, opposite of the OpenFOAM parser and both are correct:
+    Fluent exports the shear exerted ON THE WALL, which points WITH the
+    near-wall flow, so attached left-to-right flow reads x-shear > 0 and
+    reversed flow reads x-shear < 0. OpenFOAM's wallShearStress is the
+    traction on the FLUID, so attached reads tau_x < 0 there. Validated on
+    the retained collapse case: e2 reads 0.378 here against its own field
+    probe's 0.385, and on the 2026-08 OF pairing record the engines agree
+    on every main element while genuinely differing on the baseline flap
+    (0.102 here vs 0.437 there) — a physics difference, not a parser one.
+
+    None when the case carries no wall_shear.csv (runs from before the
+    channel existed) — absence, never a pass."""
+    import numpy as np
+
+    path = Path(case_dir) / "wall_shear.csv"
+    if not path.is_file():
+        return None
+    try:
+        rows = np.genfromtxt(path, delimiter=",", skip_header=1)
+    except (OSError, ValueError):
+        return None
+    if rows.ndim != 2 or rows.shape[1] < 4 or not len(rows):
+        return None
+    finite = np.isfinite(rows[:, 1:4]).all(axis=1)
+    rows = rows[finite]
+    if not len(rows):
+        return None
+    xy, tx = rows[:, 1:3], rows[:, 3]
+
+    from scipy.spatial import cKDTree
+    polys = _installed_polys_m(cfg)
+    pts = np.vstack(polys)
+    owner = np.concatenate([np.full(len(p), k)
+                            for k, p in enumerate(polys)])
+    _, idx = cKDTree(pts).query(xy)
+    own = owner[idx]
+    separation = {}
+    for k in range(len(polys)):
+        m = own == k
+        if not m.any():
+            continue
+        separation[f"wing_e{k + 1}"] = {
+            "reversed_frac": round(float((tx[m] < 0).mean()), 3),
+            "n_faces": int(m.sum()),
+        }
+    if not separation:
+        return None
+    return {"yplus": None, "separation": separation, "time": None,
+            "source": "fluent-x-wall-shear"}
+
+
 # ---------- recirculation topology (both engines) ----------
 #
 # wall_report answers HOW MUCH, on the OpenFOAM engine only, as one scalar
