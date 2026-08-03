@@ -921,3 +921,39 @@ Candidate 4 on the grown pool: **11/11 separated, 3/3 attached** (defl-5's
 label is its fourth consecutive out-of-sample confirmation). Unadjudicated
 as ever: attached pool still 3, and the defl-16 edge case is exactly the
 kind of point the attached pool needs.
+
+## 2026-08-02 — Generalization batch: 5/6 pre-registered predictions
+## confirmed, and the deflection fix works on the original failing design
+
+Six solves across three families, every prediction registered before
+solving. Element 2:
+
+| design | pre-registered | field e2 | census | scored |
+|---|---|---|---|---|
+| stepC defl 11 | ATT +0.026 | 0.0000 | 32c (quiet) | **CONFIRMED** — cl 9.098 |
+| FAIL + e2 defl 8.9 | ATT +0.053 | 0.0000 | 104c (near-quiet, on main) | **confirmed** |
+| gate aoa 0 | SEP −0.031 | **0.3178** | 1467c | **CONFIRMED** |
+| FAIL e3 defl 35 | SEP −0.031 | **0.3967** | 707c | **CONFIRMED** |
+| FAIL aoa 0 | SEP −0.066 | **0.3967** | 748c | **CONFIRMED** |
+| gate e2 defl 20 | SEP −0.071 (route-2) | 0.0000 | **387c, touches no element** | ambiguous — census-flagged, unlabeled |
+
+**The deflection repair generalizes to the original failing design.**
+`09c6de53265a` with e2 deflection raised 0.8° → 8.9°: attached (field
+0.0000, census 104c) at **cl 8.106** against the broken original's 7.104.
+The design that started this investigation has a measured fix: deflect its
+second element, gain 14 % lift, kill the separation.
+
+The gate-defl-20 ambiguity is the same shape as steps A/B: probe zero,
+census sees a moderate detached reversed region (346c touching no surface).
+The route-2 term fired on something real, but not surface separation the
+probe can read. Unlabeled pending a census label channel (needs wall shear).
+
+Shipped-screen scorecard on the same six: two more **false negatives**
+(FAIL e3 35 reads 0.522 "ok" at field 0.397; FAIL aoa 0 reads 0.540 "ok" at
+0.397) and one more effective **false positive** (stepC defl 11 reads 0.496
+"collapse" on a quiet flow at cl 9.098).
+
+Candidate 4 on the grown pool: **14/14 separated, 3/3 attached** — seven
+consecutive out-of-sample confirmations. The attached pool remains 3 by
+doctrine (no wall shear on this engine, so quiet cases stay unlabeled);
+the quiet confirmations are recorded here as evidence, not labels.
