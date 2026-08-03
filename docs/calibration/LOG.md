@@ -822,3 +822,43 @@ A and B are recorded as census-flagged and UNLABELED: the probe read near
 zero while the census saw 869/542-cell regions, the same probe blind spot
 the deflection-45 case exposed. No label channel for census evidence exists
 yet; defining one needs wall-shear truth (blocked on Docker).
+
+## 2026-08-02 — The A/B that matters: screen-driven repair walks backwards,
+## compound-driven repair finds the solved fix
+
+Seed = step C (the minimal false-negative reproducer; field 0.387, screen
+0.5145 "ok"). The solves already established the fix: e2 deflection 0.8° →
+8.9° recovers the flow (field 0.002) and raises cl 5.86 → 8.88. The screen
+reads that fix at 0.5034 — *worse* than the broken seed.
+
+**Screen-driven `repair.repair()`** (853 evals): moved e2 deflection to
+**0.00** — the opposite direction — flattened e3 27° → 15.1°, paid 4.9 %
+downforce, and declared "repaired" at screen 0.5601. Its output's compound
+reading is unchanged from the seed (decel 0.474, margin −0.124): it raised
+the window *entry* to 1.034, lifting the minimum without touching the
+deceleration. The true fix sits *below* the repair target, so the search
+structurally cannot return it.
+
+**The three-way ranking test.** shadow_min vs the compound margin
+`min(0.35 − decel, min − 0.47)`:
+
+| design | shadow_min | compound | flow truth |
+|---|---|---|---|
+| step C (broken) | 0.5145 ✗ | −0.124 FLAGGED ✓ | separated 0.387 |
+| Cdefl9 (fixed) | 0.5034 ✗ | **+0.027 healthy** ✓ | attached 0.002 |
+| repair()'s output | 0.5601 ✗ | −0.124 FLAGGED ✓ | (unsolved; predicted bad) |
+
+The shipped metric ranks all three exactly backwards; the compound gets all
+three right.
+
+**Compound-driven search** (same seed, same knobs, same Nelder-Mead
+multi-start, 750 evals, margin term = the compound, downforce floor 95 %):
+found **e2 deflection 8.37°** (solved fix: 8.9°) at **+18.4 % downforce** —
+it rediscovered the fix without being told, and the fix pays for itself.
+Its candidate (defl 8.37, gap 3.5, e3 17.4°, aoa −1.68) is being solved for
+verification.
+
+Honesty: step C's label is IN candidate 4's fitting pool, so this is not a
+fully independent test of the compound — but Cdefl9's attachment was never a
+label, and the search was never shown it. Directional success on this
+family; generalization stands on 13 labeled points and stays open.
