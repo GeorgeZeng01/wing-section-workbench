@@ -862,3 +862,21 @@ Honesty: step C's label is IN candidate 4's fitting pool, so this is not a
 fully independent test of the compound — but Cdefl9's attachment was never a
 label, and the search was never shown it. Directional success on this
 family; generalization stands on 13 labeled points and stays open.
+
+### Verified: the compound-driven repair is real
+
+The compound-repair candidate (e2 deflection 8.37°, gap 3.5, e3 17.4°, aoa
+−1.68 — found by the search, not by hand) solved converged at 3060
+iterations: **field 0.000 on every element** (probe; census pending), screen
+0.5389/0.5674, **cl 7.5366** against the broken seed's 5.864.
+
+The loop closed end-to-end with solver verification: a design the screen
+called healthy was measured separated; a statistic measured from the record
+flagged it; a repair search driven by that statistic found the fix on its
+own (deflection up, not down); and the solver confirms the fix — separation
+gone, +29 % lift. The screen-driven repair on the same seed walked the
+opposite direction and its output still reads FLAGGED on the compound.
+
+Three bracket solves are running to test candidate 4's thresholds with
+stated predictions: defl 5.0 (−0.052, SEP), 6.5 (−0.009, knife-edge SEP),
+16.0 (−0.002, SEP via the route-2 min term — incipient-stall if real).
