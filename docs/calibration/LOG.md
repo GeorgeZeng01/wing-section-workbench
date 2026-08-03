@@ -1164,3 +1164,41 @@ ATT leg = one solid point (gate e3: wall 0.027, margin +0.063, correct) plus
 one knife on the correct side (defl30 e2: wall 0.055, +0.017). The ATT side
 must be rebuilt from wall labels; an OpenFOAM batch of compound-ATT-predicted
 designs is the direct way and is queued.
+
+## 2026-08-03 — Wall check of the repairs: the direction is real, the
+## absolute claims were channel artifacts, and defl ~11° is the wall optimum
+
+Four converged OF-medium solves of the Fluent-attached designs:
+
+| design | wall e1 / e2 / e3 | e2 class | cl (OF) | compound margin |
+|---|---|---|---|---|
+| step C (ref) | 0.076 / 0.291 / 0.282 | separated | 6.22 | −0.124 |
+| Cdefl9 (the "fix") | 0.076 / **0.148** / 0.093 | **partial** | 8.50 | +0.027 |
+| repair candidate | 0.104 / **0.241** / 0.036 | knife-separated | 6.20 | +0.017 |
+| stepC defl 11 | 0.065 / **0.076** / 0.161 | **ATTACHED** | 8.63 | +0.026 |
+| stepC defl 16 | 0.070 / **0.050** / 0.232 | ATTACHED (e3 knife-sep) | 8.02 | −0.002 |
+
+- **The deflection recovery is real on the truth channel** — e2 wall falls
+  monotonically 0.291 → 0.050 with deflection, agreeing with Fluent's trend.
+  The engines agree on direction and disagree on absolute class throughout.
+- **The Fluent verifications do not transfer**: the 8.9° fix is partial
+  (0.148), and the "verified attached, cl 7.54" repair candidate is
+  knife-separated (0.241) on the wall.
+- **The wall-clean optimum is defl ≈ 11°**: e2 0.076 attached at cl 8.63 —
+  the first wall-verified attached flap in the step-C family. e3 rises with
+  e2 deflection (0.093 → 0.232), so more deflection is not free; 11° is the
+  measured sweet spot of this 1-D slice.
+- **Candidate 4's fine ordering is channel-specific**: on the wall, its
+  margin does not rank these four (the −0.002 sits most-attached). Its
+  coarse direction (strongly negative = separated) holds on every wall
+  label; its knife band and fine ordering were fitted to Fluent fields and
+  should be re-fitted on wall labels before any adoption.
+
+Session verdict on the loop George asked for: detection, repair and
+verification all work end-to-end, and the wall channel now grades each
+piece. The optimizer-facing screen replacement (candidate 4) needs its
+constants re-fitted on the wall-labeled record accumulated today; the
+repair objective walks the right direction on the truth channel; and the
+engine-state disagreement (Fluent attached vs OF separated on identical
+designs) is the standing open question that no further solve on this
+machine can settle — it is a physical-validation question.
