@@ -130,8 +130,10 @@ def main() -> bool:
         check("the config travels verbatim so the row outlives its case",
               row["config"] == CFG and row["case_id"] == "abc123def456"
               and row["engine"] == "openfoam" and row["mesh_size"] == "fine")
-        check("nothing in a row is graded",
-              not any("verdict" in k or "grade" in k for k in row))
+        check("no grading in a row beyond the ADOPTED field verdict "
+              "(2026-08-03 adoption; ad-hoc grades stay forbidden)",
+              not any(("verdict" in k or "grade" in k)
+                      and k != "field_verdict" for k in row))
 
         # ---- a sparse result must not raise ------------------------------
         thin = cfd_run.harvest_row({}, CFG, "fluent2d", None)

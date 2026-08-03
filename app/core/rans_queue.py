@@ -359,6 +359,9 @@ class QueueJob:
                 # ranking demotes on this
                 row["wall_verdict"] = r.get("wall_verdict")
                 row["sep_knife_edge"] = r.get("sep_knife_edge")
+                # the adopted field grading: the demotion channel for
+                # engines that write no wall shear
+                row["field_verdict"] = r.get("field_verdict")
                 # one definition of "how separated was this run", shared
                 # with the harvest sink so the ranking and the calibration
                 # record cannot drift apart
@@ -387,8 +390,15 @@ class QueueJob:
                 if r["converged"] and r["rans_downforce_n"] is not None]
 
         def sep_tier(r):
+            # either channel's separated demotes: wall shear where it
+            # exists (OpenFOAM), the adopted field verdict where it is the
+            # only channel (Fluent). A row with neither stays tier 0 —
+            # missing data is not a verdict.
             w = r.get("worst_reversed")
-            return 1 if w is not None and w > cfd_run.SEP_PARTIAL_MAX else 0
+            if w is not None and w > cfd_run.SEP_PARTIAL_MAX:
+                return 1
+            fv = r.get("field_verdict")
+            return 1 if fv and fv.get("separated") else 0
 
         t = self.target_downforce_n
         if self.objective == "target" and t:

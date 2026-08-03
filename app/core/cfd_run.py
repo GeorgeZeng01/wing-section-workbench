@@ -359,6 +359,74 @@ def suggested_k_g(cl_rans: float, c_free: float, c_ground: float,
     return round(k, 3) if 0.0 < k <= 1.0 else None
 
 
+# Field-channel attachment verdict — ADOPTED 2026-08-03 after the wall-
+# pairing rounds (docs/calibration/LOG.md). Two modes with disjoint sensors,
+# each line sitting in a measured gap of the wall-labeled record:
+#   mode A (confluence collapse): worst per-element near-wall reversed
+#     fraction. Every probe reading >= 0.26 was wall-separated; quiet
+#     elements read <= 0.22. Line at 0.28, knife band 0.26-0.30.
+#   mode B (main/open separation): total cells in reattaches=False regions.
+#     The failing tier reads 3459-8272 cells, everything else <= 377; the
+#     probe reads near zero on exactly these (the mode it cannot see).
+#     Line at 1000, knife band 500-1500.
+# A verdict from this channel is a FIELD reading: the probe under-reads the
+# wall everywhere (worst in the partial band), so "clean" here means "no
+# field evidence of separation", never "attached". Wall shear, where it
+# exists, outranks it; the queue treats either channel's separated as
+# grounds for demotion.
+FIELD_SEP_PROBE = 0.28
+FIELD_PROBE_KNIFE = (0.26, 0.30)
+FIELD_SEP_OPEN_CELLS = 1000
+FIELD_OPEN_KNIFE = (500, 1500)
+
+
+def field_verdict(recirc: dict | None) -> dict | None:
+    """Grade a recirculation report with the adopted two-mode lines.
+
+    Returns {"verdict": str, "separated": bool, "knife_edge": bool,
+    "worst_probe": float|None, "open_cells": int, "mode": "probe"|"census"|
+    "both"|None} — or None when there is no measured report to grade (an
+    unmeasurable case is never a pass, so its absence must read as absence).
+    """
+    if not recirc or recirc.get("status") != "measured":
+        return None
+    probes = [e.get("near_wall_reversed_frac")
+              for e in (recirc.get("elements") or [])]
+    probes = [p for p in probes if p is not None]
+    worst = max(probes) if probes else None
+    open_cells = sum(g["n_cells"] for g in (recirc.get("regions") or [])
+                     if g.get("reattaches") is False)
+
+    probe_sep = worst is not None and worst >= FIELD_SEP_PROBE
+    open_sep = open_cells >= FIELD_SEP_OPEN_CELLS
+    knife = ((worst is not None
+              and FIELD_PROBE_KNIFE[0] <= worst < FIELD_PROBE_KNIFE[1])
+             or FIELD_OPEN_KNIFE[0] <= open_cells < FIELD_OPEN_KNIFE[1])
+
+    mode = ("both" if probe_sep and open_sep else
+            "probe" if probe_sep else "census" if open_sep else None)
+    if probe_sep or open_sep:
+        parts = []
+        if probe_sep:
+            parts.append(f"near-wall reversal {worst * 100:.0f}%")
+        if open_sep:
+            parts.append(f"{open_cells} cells of non-reattaching "
+                         f"reversed flow")
+        verdict = ("field: separated (" + ", ".join(parts)
+                   + (", knife-edge)" if knife else ")"))
+    elif knife:
+        verdict = ("field: knife-edge (near the "
+                   + ("census" if open_cells >= FIELD_OPEN_KNIFE[0]
+                      else "probe") + " line — not a stable side)")
+    else:
+        verdict = ("field: no separation evidence (the field channel "
+                   "under-reads the wall; this is not 'attached')")
+    return {"verdict": verdict, "separated": bool(probe_sep or open_sep),
+            "knife_edge": bool(knife),
+            "worst_probe": None if worst is None else round(worst, 4),
+            "open_cells": int(open_cells), "mode": mode}
+
+
 def delta_cd(cd_rans: float, panel: dict | None) -> tuple:
     """Measured profile drag against the attached-flow estimate.
 
@@ -486,6 +554,7 @@ def harvest_row(result: dict, config: dict, engine: str,
         "worst_reversed": worst_reversed(result),
         "recirc_status": recirc.get("status"),
         "recirc_bound": recirc.get("bound"),
+        "field_verdict": result.get("field_verdict"),
         "recirc_near_wall_frac": [e.get("near_wall_reversed_frac")
                                   for e in r_elems] or None,
         "recirc_closes": [[r.get("closes")
@@ -1073,6 +1142,9 @@ class RansJob:
                 "wall_verdict": wall_verdict,
                 "sep_knife_edge": sep_knife_edge,
                 "recirc_report": recirc,
+                # the ADOPTED field grading rides beside the wall channel;
+                # on this engine both exist and wall outranks field
+                "field_verdict": field_verdict(recirc),
                 "n_ranks": self.n_ranks,
                 "estimate_scope_note": (
                     "the estimate's k_g realization curve is calibrated on "

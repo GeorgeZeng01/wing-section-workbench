@@ -654,6 +654,11 @@ class Fluent2DJob:
                 with self._lock:
                     if self.result is not None:
                         self.result["recirc_report"] = rec
+                        # the ADOPTED field grading: on this engine it is
+                        # the only attachment channel, so it also drives
+                        # the queue's demotion
+                        self.result["field_verdict"] = \
+                            cfd_run.field_verdict(rec)
                 # the calibration row is written here rather than at result
                 # assembly so it carries the field measurement, not a None
                 try:
@@ -932,6 +937,7 @@ class Fluent2DJob:
                 # silently reports None — which is exactly what shipped
                 # until a verification solve caught it
                 "recirc_report": None,
+                "field_verdict": None,   # graded after the export, with it
                 "engine_note": (("solved by ANSYS Fluent (2D, double "
                                  "precision) on the mesh from the "
                                  "documented manual ANSYS workflow — "

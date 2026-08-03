@@ -2239,9 +2239,15 @@ function renderRerank(q) {
     if (!r.converged) tr.className = "dim";
     // measured attachment, compact (full per-element verdict as tooltip);
     // a separated row is demoted in rank by the server for the same reason
-    const flow = r.worst_reversed == null ? "–"
-      : r.worst_reversed > 0.20 ? "separated"
-      : r.worst_reversed > 0.10 ? "partial" : "attached";
+    // wall channel first; the adopted field verdict covers engines that
+    // write no wall shear ("*" marks the field channel, which under-reads)
+    const fv = r.field_verdict;
+    const flow = r.worst_reversed != null
+      ? (r.worst_reversed > 0.20 ? "separated"
+        : r.worst_reversed > 0.10 ? "partial" : "attached")
+      : fv ? (fv.separated ? "separated*"
+        : fv.knife_edge ? "knife*" : "no evidence*")
+      : "–";
     const cells = [
       r.rank ?? "–", r.label,
       r.panel_downforce_n != null ? fmtN(r.panel_downforce_n, 0) : "–",
@@ -2262,7 +2268,8 @@ function renderRerank(q) {
     }
     const fd = tr.cells[5];
     if (r.wall_verdict) fd.title = r.wall_verdict;
-    if (flow === "separated") fd.style.color = "var(--warning)";
+    else if (fv) fd.title = fv.verdict;
+    if (flow.startsWith("separated")) fd.style.color = "var(--warning)";
     else if (flow === "attached") fd.style.color = "var(--good)";
     const td = tr.insertCell();
     if (r.config) {
@@ -3342,6 +3349,11 @@ function renderRansResult(s, { provenance = "fresh" } = {}) {
   // steady verdict is a band, and either way the user should see which
   if (r.wall_verdict) {
     rows.push(["Attachment (wall shear)", esc(r.wall_verdict)]);
+  }
+  // the field channel beside the wall channel; wall outranks it, but a
+  // census-mode hit can fire where wall faces read clean (off-body flow)
+  if (r.field_verdict) {
+    rows.push(["Attachment (field)", esc(r.field_verdict.verdict)]);
   }
   if (r.wall_report && typeof r.wall_report.yplus === "object"
       && r.wall_report.yplus) {
@@ -4464,6 +4476,11 @@ function renderFl2dResult(s, { provenance = "fresh" } = {}) {
     ["Iterations", `${esc(r.n_iters_run)} (${esc(r.stop_reason)}; ` +
       `tail mean of ${esc(r.tail_rows)})`],
   ];
+  // the adopted field-channel attachment grading — on this engine the only
+  // attachment channel there is (Fluent writes no wall shear)
+  if (r.field_verdict) {
+    head.push(["Attachment (field)", esc(r.field_verdict.verdict)]);
+  }
   // The panel unlocks the moment a run ends, so the boxes on screen need
   // not describe the run beside them — the card states the RESOLVED set the
   // run carried. A result saved before this surface existed has no settings
