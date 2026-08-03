@@ -59,6 +59,7 @@
   --viz-ref:          #1c2433;   /* reference/current markers   */
   --viz-cloud:        #9aa5b8;   /* evaluation clouds           */
   --viz-flag:         #8f5f00;   /* flagged / peak markers      */
+  --viz-pick:         #1a7f4e;   /* the exchange-rate pick on the front */
   --viz-optimistic:   #bc3a32;   /* calibration: optimistic band */
   --viz-conservative: #2a78d6;   /* calibration: conservative band */
 
@@ -100,6 +101,7 @@
   --viz-ref:          #e9edf6;
   --viz-cloud:        #5a6a8a;
   --viz-flag:         #f2b544;
+  --viz-pick:         #3ecf8e;
   --viz-optimistic:   #ec6a60;
   --viz-conservative: #57b6f0;
 

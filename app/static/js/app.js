@@ -2078,11 +2078,26 @@ function renderPareto(s) {
   if (s.pareto && s.pareto.length) {
     // finalized front: full-fidelity numbers, clickable, trust-colored
     const pts = s.pareto.slice().sort((a, b) => a.drag_n - b.drag_n);
+    // where the CHOSEN exchange rate lands on the front: the point
+    // maximizing D − k·drag. This is the picture of what the rate means —
+    // moving the k field moves this marker along the front, so the trade
+    // is chosen by eye instead of by faith in a weight.
+    const kNow = parseFloat($("opt-drag-k").value);
+    let kBest = -1;
+    if (Number.isFinite(kNow)) {
+      let bestV = -Infinity;
+      pts.forEach((p, i) => {
+        const v = p.downforce_n - kNow * p.drag_n;
+        if (v > bestV) { bestV = v; kBest = i; }
+      });
+    }
     lineChart(host, {
       series: [{
         name: "front", color: SERIES[0], markers: "only",
         x: pts.map(p => p.drag_n), y: pts.map(p => p.downforce_n),
-        pointColors: pts.map(p => (flagged(p) ? ink("--viz-flag", "#f2b544") : SERIES[0])),
+        pointColors: pts.map((p, i) => (i === kBest
+          ? ink("--viz-pick", "#3ecf8e")
+          : flagged(p) ? ink("--viz-flag", "#f2b544") : SERIES[0])),
         onPointClick: (i) => {
           applyDesign(pts[i].config);
           toast(`Pareto design applied — ${fmtN(pts[i].downforce_n, 0)} N ` +
@@ -2094,7 +2109,9 @@ function renderPareto(s) {
     note.hidden = false;
     host.title = "Every clean design the search evaluated, as the " +
       "downforce–drag trade-off. Blue points are trusted; amber points " +
-      "carry a trust flag. Click a front point to apply that design.";
+      "carry a trust flag; the green point is where your drag exchange " +
+      "rate lands on this front (max of D − k·drag). Click a front point " +
+      "to apply that design.";
   } else if (s.cloud && s.cloud.length
              && (s.state === "running" || s.state === "finalizing")) {
     // live evaluation cloud while the search runs (not clickable — these
