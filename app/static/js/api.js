@@ -66,6 +66,14 @@ export const api = {
   ansysPresets: () => request("GET", "/api/ansys-presets"),
   ansysPresetsSave: (presets) =>
     request("PUT", "/api/ansys-presets", { presets }),
+  pinnedDesigns: () => request("GET", "/api/pinned-designs"),
+  // the first wrapper to carry the rev token: auto-mirrored pins race
+  // across windows far more than manual preset saves do, and the client
+  // resolves a 409 by re-GET + re-apply rather than by parsing the body
+  // (detailOf flattens object details to a string)
+  pinnedDesignsSave: (pins, rev) =>
+    request("PUT", "/api/pinned-designs",
+            rev == null ? { pins } : { pins, rev }),
   session: () => request("GET", "/api/session"),
   sessionSave: (state) => request("POST", "/api/session", { state }),
   exportSave: (fmt, config, options = {}) =>

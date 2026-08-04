@@ -860,6 +860,38 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
              white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .pin-actions { display: flex; gap: 5px; flex: none; }
 
+/* pinned-designs library tab: card grid + N-way compare */
+.pinned-grid { display: grid; gap: 8px;
+               grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); }
+.pin-card { margin: 0; display: flex; flex-direction: column; gap: 5px; }
+.pin-thumb { min-height: 34px; }
+.pin-thumb img { display: block; max-width: 100%; max-height: 120px;
+                 border-radius: var(--r-s); border: 1px solid var(--hairline); }
+.pin-cmp-sel { display: flex; align-items: center; gap: 4px; flex: none;
+               font: var(--fs-0) var(--sans); color: var(--ink-3);
+               cursor: pointer; }
+.pin-meta { color: var(--ink-3); }
+.pin-rename { font: 600 var(--fs-1) var(--mono); width: 12ch; }
+.pin-card .pin-actions { margin-top: auto; }
+.pin-cmp-outline { min-height: 0; }
+.pin-legend { display: flex; gap: 12px; flex-wrap: wrap; padding: 4px 2px;
+              font: var(--fs-0) var(--mono); color: var(--ink-2); }
+.pin-legend-dot { display: inline-block; width: 8px; height: 8px;
+                  border-radius: 2px; vertical-align: baseline; }
+/* the images strip scrolls sideways rather than wrapping: columns stay
+   aligned so the same field reads across pins */
+.pin-cmp-images { display: flex; gap: 12px; overflow-x: auto;
+                  padding: 6px 0; }
+.pin-img-col { flex: 0 0 auto; max-width: 340px; }
+.pin-img-cap { font: 600 var(--fs-1) var(--mono); color: var(--ink);
+               padding: 2px 0; }
+.pin-img-col figure { margin: 4px 0; }
+.pin-img-col img { display: block; max-width: 100%;
+                   border-radius: var(--r-s);
+                   border: 1px solid var(--hairline); }
+.pin-img-col figcaption { font: var(--fs-0) var(--sans);
+                          color: var(--ink-3); padding: 2px 0; }
+
 /* unsaved-changes dot on the Save button */
 .btn.dirty::after {
   content: "";

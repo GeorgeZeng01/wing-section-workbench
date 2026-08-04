@@ -1621,9 +1621,11 @@ def session_put(body: SessionBody):
 _presets_lock = threading.Lock()
 
 
-def _presets_read(path: Path) -> tuple[int, list]:
-    """Stored (rev, presets); (0, []) when the library does not exist or
-    cannot be read. A pre-rev file is a bare list, at rev 0."""
+def _presets_read(path: Path, key: str = "presets") -> tuple[int, list]:
+    """Stored (rev, entries); (0, []) when the library does not exist or
+    cannot be read. A pre-rev file is a bare list, at rev 0. `key` is the
+    on-disk (and 409-payload) name of the entry list, so a library of pins
+    is not stored under a misnamed field forever."""
     import json as _json
     try:
         raw = path.read_text(encoding="utf-8")
@@ -1635,14 +1637,15 @@ def _presets_read(path: Path) -> tuple[int, list]:
         data = _json.loads(raw)
     except ValueError:
         return 0, []
-    if (isinstance(data, dict) and set(data) == {"rev", "presets"}
+    if (isinstance(data, dict) and set(data) == {"rev", key}
             and isinstance(data["rev"], int)
-            and isinstance(data["presets"], list)):
-        return data["rev"], data["presets"]
+            and isinstance(data[key], list)):
+        return data["rev"], data[key]
     return 0, data if isinstance(data, list) else []
 
 
-def _presets_write(path: Path, presets: list, rev: int, stem: str) -> None:
+def _presets_write(path: Path, entries: list, rev: int, stem: str,
+                   key: str = "presets") -> None:
     """The library at its new rev, atomically. Unique tmp per writer, and
     os.replace on Windows can transiently fail under an outside reader."""
     import json as _json
@@ -1652,7 +1655,7 @@ def _presets_write(path: Path, presets: list, rev: int, stem: str) -> None:
     tmp = path.with_name(
         f".{stem}.{_os.getpid()}.{threading.get_ident()}.tmp")
     try:
-        tmp.write_text(_json.dumps({"rev": rev, "presets": presets},
+        tmp.write_text(_json.dumps({"rev": rev, key: entries},
                                    indent=1), encoding="utf-8")
         for attempt in range(4):
             try:
@@ -1664,6 +1667,16 @@ def _presets_write(path: Path, presets: list, rev: int, stem: str) -> None:
                 _time.sleep(0.05 * (attempt + 1))
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def _clean_text(v, what: str, lo: int = 1, hi: int = 60) -> str:
+    """Validated text — never coerced: str(["x"]) would store a repr."""
+    if not isinstance(v, str):
+        raise HTTPException(422, detail=f"{what} must be text")
+    v = v.strip()
+    if not (lo <= len(v) <= hi):
+        raise HTTPException(422, detail=f"{what} must be {lo}..{hi} chars")
+    return v
 
 
 def _preset_name(p: dict, seen: set) -> str:
@@ -1682,13 +1695,14 @@ def _preset_name(p: dict, seen: set) -> str:
     return name
 
 
-def _presets_stale(rev, cur_rev: int, cur_presets: list, what: str) -> None:
+def _presets_stale(rev, cur_rev: int, cur_entries: list, what: str,
+                   key: str = "presets") -> None:
     """409 when the client echoes a rev the library has moved past."""
     if rev is not None and rev != cur_rev:
         raise HTTPException(409, detail={
-            "message": f"the {what} presets were saved by another window "
+            "message": f"the {what} were saved by another window "
                        f"since this one loaded them",
-            "rev": cur_rev, "presets": cur_presets})
+            "rev": cur_rev, key: cur_entries})
 
 
 # ---------- rule presets ----------
@@ -1735,7 +1749,7 @@ def rule_presets_put(body: RulePresetsBody):
     # another writer can land between it and the replace
     with _presets_lock:
         cur_rev, cur = _presets_read(RULE_PRESETS_FILE)
-        _presets_stale(body.rev, cur_rev, cur, "rule")
+        _presets_stale(body.rev, cur_rev, cur, "rule presets")
         rev = cur_rev + 1
         _presets_write(RULE_PRESETS_FILE, cleaned, rev, "rule_presets")
     return {"ok": True, "count": len(cleaned), "rev": rev}
@@ -1782,9 +1796,182 @@ def ansys_presets_put(body: AnsysPresetsBody):
         cleaned.append({"name": name, "settings": st})
     with _presets_lock:
         cur_rev, cur = _presets_read(ANSYS_PRESETS_FILE)
-        _presets_stale(body.rev, cur_rev, cur, "ANSYS")
+        _presets_stale(body.rev, cur_rev, cur, "ANSYS presets")
         rev = cur_rev + 1
         _presets_write(ANSYS_PRESETS_FILE, cleaned, rev, "ansys_presets")
+    return {"ok": True, "count": len(cleaned), "rev": rev}
+
+
+# ---------- pinned designs library ----------
+#
+# The durable, machine-level record of pinned designs. Workspace pins are
+# deliberately project-scoped (wiped on preset switch, replaced on project
+# open — they belong to their design context and feed that project's
+# report); every pin is ALSO mirrored here, and this library survives all
+# of it. Same storage discipline as the preset libraries above: one JSON
+# file beside the session, optimistic rev token, atomic replace,
+# read-check-write under the shared lock. A pin embeds everything a later
+# session needs to rebuild the design — including uploaded airfoil .dat
+# text, because uploads live in server memory and die with the process —
+# so a pin whose upload is gone is still restorable, and a config
+# referencing an unregistered custom: spec must PASS validation here.
+
+PINNED_FILE = SESSION_FILE.parent / "pinned_designs.json"
+PINNED_MAX = 48                  # 4x the workspace cap of 12
+PINNED_MAX_BYTES = 8_000_000     # its own file; the session cap is untouched
+_PIN_ID_RE = re.compile(r"^[0-9a-f]{8,32}$")
+_PIN_CUSTOM_RE = re.compile(r"^custom:[a-z0-9_-]+$")
+# flow thumbnails: the same shape safeFlow() accepts client-side, with a
+# per-field byte cap (a downscaled ~320px JPEG runs 10-30 KB)
+_PIN_THUMB_KEYS = ("rans_umag", "rans_cp", "fl2d_umag", "fl2d_cp")
+_PIN_THUMB_RE = re.compile(
+    r"^data:image/(png|jpe?g|webp);base64,[A-Za-z0-9+/=]+$")
+_PIN_THUMB_MAX = 120_000
+_PIN_DAT_MAX = 120_000           # an 800-pt .dat (the upload cap) is ~25 KB
+
+
+def _pin_clean(p, seen_ids: set) -> dict:
+    """One pin, validated field by field; unknown keys are dropped so junk
+    cannot accumulate in the library. The config itself travels VERBATIM
+    (harvest philosophy) — parse-validated, never round-tripped through the
+    dataclass, which would materialize defaults the user never set."""
+    if not isinstance(p, dict):
+        raise HTTPException(422, detail="each pin must be an object")
+    pid = p.get("id")
+    if not (isinstance(pid, str) and _PIN_ID_RE.match(pid)):
+        raise HTTPException(422, detail="each pin needs a hex id (8..32)")
+    if pid in seen_ids:
+        raise HTTPException(422, detail=f"duplicate pin id {pid!r}")
+    seen_ids.add(pid)
+    label = _clean_text(p.get("label"), "each pin's label")
+    out = {"id": pid, "v": 1, "label": label}
+    if p.get("t") is not None:
+        out["t"] = _clean_text(p["t"], f"pin {label!r}: timestamp", 1, 40)
+    if p.get("note") is not None:
+        out["note"] = _clean_text(p["note"], f"pin {label!r}: note", 0, 500)
+    ctx = p.get("context")
+    if isinstance(ctx, dict):
+        c = {}
+        if isinstance(ctx.get("rule_preset_name"), str):
+            c["rule_preset_name"] = ctx["rule_preset_name"][:60]
+        if isinstance(ctx.get("project_hint"), str):
+            c["project_hint"] = ctx["project_hint"][:120]
+        out["context"] = c
+    tgt = p.get("target")
+    if tgt is not None:
+        if isinstance(tgt, bool) or not isinstance(tgt, (int, float)) \
+                or not math.isfinite(float(tgt)):
+            raise HTTPException(
+                422, detail=f"pin {label!r}: target must be a finite number")
+        out["target"] = float(tgt)
+    cfg = p.get("config")
+    if not isinstance(cfg, dict):
+        raise HTTPException(422, detail=f"pin {label!r}: config must be an "
+                                        f"object")
+    try:
+        StackConfig.from_dict(cfg)
+    except (ValueError, TypeError, KeyError) as e:
+        raise HTTPException(422, detail=f"pin {label!r}: {e}")
+    out["config"] = cfg
+    ca = p.get("custom_airfoils")
+    if ca is not None:
+        if not isinstance(ca, dict) or len(ca) > 8:
+            raise HTTPException(
+                422, detail=f"pin {label!r}: custom_airfoils must be an "
+                            f"object with at most 8 entries")
+        for k, v in ca.items():
+            if not (isinstance(k, str) and _PIN_CUSTOM_RE.match(k)):
+                raise HTTPException(
+                    422, detail=f"pin {label!r}: bad custom airfoil key")
+            if not (isinstance(v, str) and 0 < len(v) <= _PIN_DAT_MAX):
+                raise HTTPException(
+                    422, detail=f"pin {label!r}: custom airfoil data must "
+                                f"be text up to {_PIN_DAT_MAX} chars")
+        out["custom_airfoils"] = ca
+    an = p.get("airfoil_names")
+    if an is not None:
+        if (not isinstance(an, dict) or len(an) > 16
+                or not all(isinstance(k, str) and len(k) <= 200
+                           and isinstance(v, str) and len(v) <= 120
+                           for k, v in an.items())):
+            raise HTTPException(
+                422, detail=f"pin {label!r}: airfoil_names must map short "
+                            f"text to short text (at most 16)")
+        out["airfoil_names"] = an
+    hl = p.get("headline")
+    if hl is not None:
+        if not isinstance(hl, dict):
+            raise HTTPException(
+                422, detail=f"pin {label!r}: headline must be an object")
+        out["headline"] = hl   # rendered via textContent/numf client-side;
+                               # the whole-payload byte cap bounds it
+    ol = p.get("outline")
+    if ol is not None:
+        ok = (isinstance(ol, list) and len(ol) <= 4
+              and all(isinstance(poly, list) and len(poly) <= 120
+                      and all(isinstance(pt, list) and len(pt) == 2
+                              and all(isinstance(c, (int, float))
+                                      and not isinstance(c, bool)
+                                      and math.isfinite(float(c))
+                                      for c in pt)
+                              for pt in poly)
+                      for poly in ol))
+        if not ok:
+            raise HTTPException(
+                422, detail=f"pin {label!r}: outline must be up to 4 "
+                            f"polylines of up to 120 finite [x, y] points")
+        out["outline"] = ol
+    th = p.get("flow_thumbs")
+    if th is not None:
+        if not isinstance(th, dict) \
+                or any(k not in _PIN_THUMB_KEYS for k in th):
+            raise HTTPException(
+                422, detail=f"pin {label!r}: flow_thumbs allows only "
+                            f"{', '.join(_PIN_THUMB_KEYS)}")
+        for k, v in th.items():
+            if not (isinstance(v, str) and len(v) <= _PIN_THUMB_MAX
+                    and _PIN_THUMB_RE.match(v)):
+                raise HTTPException(
+                    422, detail=f"pin {label!r}: {k} must be a data-URI "
+                                f"image up to {_PIN_THUMB_MAX} bytes")
+        out["flow_thumbs"] = th
+    return out
+
+
+class PinnedDesignsBody(BaseModel):
+    pins: list[dict]
+    rev: int | None = None   # optimistic-concurrency token; see presets
+
+
+@app.get("/api/pinned-designs")
+def pinned_designs_get():
+    rev, pins = _presets_read(PINNED_FILE, key="pins")
+    return {"pins": pins, "rev": rev}
+
+
+@app.put("/api/pinned-designs")
+def pinned_designs_put(body: PinnedDesignsBody):
+    import json as _json
+    if len(body.pins) > PINNED_MAX:
+        raise HTTPException(422,
+                            detail=f"at most {PINNED_MAX} pinned designs")
+    cleaned, seen_ids = [], set()
+    for p in body.pins:
+        cleaned.append(_pin_clean(p, seen_ids))
+    try:
+        size = len(_json.dumps(cleaned, allow_nan=False).encode("utf-8"))
+    except (TypeError, ValueError):
+        raise HTTPException(
+            422, detail="pinned designs must be JSON-serializable")
+    if size > PINNED_MAX_BYTES:
+        raise HTTPException(422, detail="pinned library too large to "
+                                        "persist — delete some pins")
+    with _presets_lock:
+        cur_rev, cur = _presets_read(PINNED_FILE, key="pins")
+        _presets_stale(body.rev, cur_rev, cur, "pinned designs", key="pins")
+        rev = cur_rev + 1
+        _presets_write(PINNED_FILE, cleaned, rev, "pinned_designs",
+                       key="pins")
     return {"ok": True, "count": len(cleaned), "rev": rev}
 
 

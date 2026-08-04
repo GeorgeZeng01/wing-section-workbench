@@ -814,5 +814,38 @@ finally:
         call("PUT", "/api/ansys-presets",
              {"presets": _r_akeep.get("presets", [])})
 
+# ---- pinned designs ----
+# machine-level state as well (app_data/pinned_designs.json): captured and
+# restored like the preset libraries. The store's own suite covers the
+# field-by-field hostility; here the API surface only.
+_s_pkeep, _r_pkeep = call("GET", "/api/pinned-designs")
+try:
+    s_pn, _ = call("PUT", "/api/pinned-designs", {"pins": 123})
+    check("pinned designs: pins not a list -> 422", s_pn == 422,
+          f"(got {s_pn})")
+    _marker = {"id": "adba5eadbeef", "v": 1, "label": "adversarial marker",
+               "config": dict(GOOD), "target": 200.0}
+    s_pm, r_pm = call("PUT", "/api/pinned-designs", {"pins": [_marker]})
+    s_pg, r_pg = call("GET", "/api/pinned-designs")
+    check("pinned designs: marker pin round-trips with a verbatim config",
+          s_pm == 200 and s_pg == 200
+          and (r_pg.get("pins") or [{}])[0].get("config") == GOOD,
+          f"(got {s_pm}/{s_pg})")
+    s_pb, r_pb = call("PUT", "/api/pinned-designs", {"pins": [
+        {**_marker, "id": f"{i:012x}", "label": f"big {i}",
+         "custom_airfoils": {f"custom:pad{i}": "x" * 119_000}}
+        for i in range(48)]})
+    check("pinned designs: an over-bytes library -> 422 before it lands",
+          s_pb == 422 and "too large" in str((r_pb or {}).get("detail")),
+          f"(got {s_pb})")
+    s_pg2, r_pg2 = call("GET", "/api/pinned-designs")
+    check("pinned designs: the refused write never replaced the library",
+          s_pg2 == 200 and len(r_pg2.get("pins") or []) == 1,
+          f"({len(r_pg2.get('pins') or [])} pins)")
+finally:
+    if _s_pkeep == 200 and isinstance(_r_pkeep, dict):
+        call("PUT", "/api/pinned-designs",
+             {"pins": _r_pkeep.get("pins", [])})
+
 print(f"\n{sum(results)}/{len(results)} adversarial checks passed")
 sys.exit(0 if all(results) else 1)

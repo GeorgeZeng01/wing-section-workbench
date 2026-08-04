@@ -1,7 +1,8 @@
 /* Wing Section Studio — application wiring. */
 
 import { api, downloadExport } from "./api.js";
-import { lineChart, airfoilPreview, redrawStaleCharts } from "./charts.js";
+import { lineChart, airfoilPreview, stackPreview,
+         redrawStaleCharts } from "./charts.js";
 import { Viewport, SERIES } from "./viewport.js";
 import { mountFlowAnim } from "./flowanim.js";
 
@@ -69,6 +70,9 @@ const state = {
   screenMeta: null,           // {elem, re, ncrit, count} the table was screened at
   lastSweep: null,            // last operating-map response
   pins: [],                   // pinned designs [{t, label, config, target, headline}]
+  // durable machine-level pin library (its own store + rev token) — NEVER
+  // part of sessionSnapshot or project files, like the preset libraries
+  pinnedLib: { pins: [], rev: 0, loaded: false },
   geoValid: true,             // last geometry refresh succeeded
   queueActive: false,         // a re-rank queue owns the RANS solver
 };
@@ -1417,7 +1421,9 @@ function syncPinButton() {
 function pinCurrent() {
   if (!state.analysis) return;
   const f = state.analysis.forces;
-  state.pins.push({
+  const els = state.analysis.elements || [];
+  const pin = {
+    id: randId(),
     t: new Date().toISOString(),
     label: `#${state.pins.length + 1}`,
     config: structuredClone(state.config),
@@ -1425,16 +1431,27 @@ function pinCurrent() {
     headline: {
       downforce_n: f.downforce_n,
       drag_n: f.drag_total_n,
+      // the bound mark and trust context travel with the pin — a compare
+      // view must not present a floored drag as a measurement
+      drag_is_lower_bound: !!f.drag_profile_is_lower_bound,
       ld: f.efficiency_ld,
       warnings: (state.analysis.warnings || []).length,
       elements: state.config.elements.length,
+      frac_max: els.length
+        ? Math.max(...els.map((e) => +e.loading_fraction || 0)) : null,
+      confidence_min: els.length
+        ? Math.min(...els.map((e) => +e.nf_confidence || 1)) : null,
     },
-  });
+  };
+  state.pins.push(pin);
   renderPins();
   syncPinButton();
   markDirty();
   persistSession();
   toast(`Design pinned (${fmtN(f.downforce_n, 0)} N).`, "good", 3000);
+  // fire-and-forget: the durable library copy; the workspace pin above is
+  // already committed either way
+  mirrorPinToLibrary(pin);
 }
 
 function renderPins() {
@@ -1509,6 +1526,584 @@ function renderPins() {
 
 $("btn-pin").addEventListener("click", pinCurrent);
 
+/* ---------------- pinned-designs library ----------------
+   The durable, machine-level record: every workspace pin is auto-mirrored
+   here and survives preset switches, project opens, sessions and server
+   restarts. Rendered by the Pinned tab with an N-way compare. Never part
+   of sessionSnapshot or project files (the preset-library rationale). A
+   library pin embeds its custom-airfoil .dat text — uploads live in
+   server memory, and a pin that outlives the process must not die with
+   it. */
+
+const PINNED_SEL_MAX = 6;
+const pinnedSel = new Set();     // compare selection — page-session only
+const pinnedCp = new Map();      // pin id -> cp_distributions (session cache)
+const PIN_IMG_RE = /^data:image\/(png|jpe?g|webp);base64,[A-Za-z0-9+/=]+$/;
+
+function randId() {
+  return crypto.randomUUID().replaceAll("-", "").slice(0, 12);
+}
+
+// installed-frame contours, stride-downsampled to <= 48 points at 4
+// decimals (~2 KB/pin): the Pinned tab renders instantly and offline, and
+// the thumbnail agrees with the stored config exactly — state.geo always
+// describes state.config (same debounce staleness the pin button's
+// tooltip already owns)
+function outlineSnapshot() {
+  const els = state.geo?.installed;
+  if (!Array.isArray(els) || !els.length) return null;
+  const out = [];
+  for (const e of els.slice(0, 4)) {
+    const pts = e?.coords;
+    if (!Array.isArray(pts) || pts.length < 3) return null;
+    const step = Math.max(1, Math.ceil(pts.length / 47));
+    const poly = [];
+    for (let i = 0; i < pts.length; i += step) {
+      poly.push([+(+pts[i][0]).toFixed(4), +(+pts[i][1]).toFixed(4)]);
+    }
+    const last = pts[pts.length - 1];
+    const tail = [+(+last[0]).toFixed(4), +(+last[1]).toFixed(4)];
+    const prev = poly[poly.length - 1];
+    if (prev[0] !== tail[0] || prev[1] !== tail[1]) poly.push(tail);
+    out.push(poly);
+  }
+  return out;
+}
+
+// a full flow capture is hundreds of KB; the library stores a ~320px JPEG
+// thumb (~10-30 KB). data: sources cannot taint the canvas.
+async function shrinkDataURI(uri, width = 320) {
+  if (typeof uri !== "string" || !uri.startsWith("data:image/")) return null;
+  try {
+    const img = new Image();
+    await new Promise((ok, err) => {
+      img.onload = ok; img.onerror = err; img.src = uri;
+    });
+    const w = Math.min(width, img.naturalWidth || width);
+    const h = Math.max(1, Math.round(w * (img.naturalHeight || 1)
+                                     / (img.naturalWidth || 1)));
+    const cv = document.createElement("canvas");
+    cv.width = w; cv.height = h;
+    cv.getContext("2d").drawImage(img, 0, 0, w, h);
+    return cv.toDataURL("image/jpeg", 0.8);
+  } catch { return null; }
+}
+
+async function captureFlowThumbs() {
+  const [rans, fl2d] = await Promise.all([
+    captureRansFlow().catch(() => null),
+    captureFl2dFlow().catch(() => null),
+  ]);
+  const out = {};
+  for (const [key, uri] of [["rans_umag", rans?.umag], ["rans_cp", rans?.cp],
+                            ["fl2d_umag", fl2d?.umag], ["fl2d_cp", fl2d?.cp]]) {
+    const t = await shrinkDataURI(uri);
+    if (t) out[key] = t;
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+async function loadPinnedLib() {
+  const r = await api.pinnedDesigns();
+  state.pinnedLib = { pins: Array.isArray(r.pins) ? r.pins : [],
+                      rev: +r.rev || 0, loaded: true };
+}
+
+// One writer for every library mutation. On a 409 (another window wrote
+// first): re-load, re-apply the SAME operation to the fresh list, retry
+// once — append/rename/delete all re-apply cleanly, and the 409 body is
+// not parseable through ApiError (detailOf flattens object details).
+async function savePinnedLib(mutate) {
+  if (!state.pinnedLib.loaded) await loadPinnedLib();
+  const attempt = async () => {
+    const next = mutate(structuredClone(state.pinnedLib.pins));
+    const r = await api.pinnedDesignsSave(next, state.pinnedLib.rev);
+    state.pinnedLib = { pins: next, rev: +r.rev || 0, loaded: true };
+  };
+  try {
+    await attempt();
+  } catch (e) {
+    if (e?.status !== 409) throw e;
+    await loadPinnedLib();
+    await attempt();
+  }
+}
+
+async function mirrorPinToLibrary(pin) {
+  try {
+    const lib = structuredClone(pin);
+    lib.v = 1;
+    const preset = state.config.rule_envelope?.preset_name;
+    if (typeof preset === "string" && preset) {
+      lib.context = { rule_preset_name: preset };
+    }
+    const used = {};
+    for (const spec of usedCustomSpecs()) {
+      if (state.customDat[spec]) used[spec] = state.customDat[spec];
+    }
+    if (Object.keys(used).length) lib.custom_airfoils = used;
+    const names = {};
+    for (const e of pin.config.elements) {
+      if (state.airfoilNames[e.airfoil]) {
+        names[e.airfoil] = state.airfoilNames[e.airfoil];
+      }
+    }
+    if (Object.keys(names).length) lib.airfoil_names = names;
+    const ol = outlineSnapshot();
+    if (ol) lib.outline = ol;
+    const thumbs = await captureFlowThumbs();
+    if (thumbs) lib.flow_thumbs = thumbs;
+    await savePinnedLib((pins) =>
+      pins.some((x) => x.id === pin.id) ? pins : [...pins, lib]);
+    if (document.querySelector('.tab[data-tab="pinned"]')
+        ?.classList.contains("active")) {
+      renderPinnedTab();
+    }
+  } catch (e) {
+    toast(`Pinned locally — durable library not updated: ${e.message}`,
+          "info", 6000);
+  }
+}
+
+async function enterPinnedTab() {
+  // re-GET on every entry: a second window's pins appear without a reload
+  try {
+    await loadPinnedLib();
+  } catch (e) {
+    $("pinned-note").textContent = `library unreachable: ${e.message}`;
+  }
+  renderPinnedTab();
+}
+
+// library files can be hand-edited: an <img> src is assigned only after
+// the same data-URI shape check the server enforces
+function pinnedThumb(p, big = false) {
+  const th = document.createElement("div");
+  th.className = "pin-thumb";
+  const uri = p.flow_thumbs?.rans_umag || p.flow_thumbs?.fl2d_umag
+    || p.flow_thumbs?.rans_cp || p.flow_thumbs?.fl2d_cp;
+  if (typeof uri === "string" && PIN_IMG_RE.test(uri)) {
+    const img = document.createElement("img");
+    img.src = uri;
+    img.alt = "flow field at pin time";
+    th.appendChild(img);
+  } else if (Array.isArray(p.outline) && p.outline.length) {
+    stackPreview(th, p.outline, SERIES,
+                 big ? { width: 250, height: 64, pad: 4 }
+                     : { width: 120, height: 34, pad: 3 });
+  }
+  return th;
+}
+
+function renderPinnedTab() {
+  const lib = state.pinnedLib;
+  const grid = $("pinned-grid");
+  grid.innerHTML = "";
+  for (const id of [...pinnedSel]) {
+    if (!lib.pins.some((p) => p.id === id)) pinnedSel.delete(id);
+  }
+  $("pinned-empty").hidden = lib.pins.length > 0;
+  $("pinned-note").textContent =
+    `${lib.pins.length} of ${48} · machine library — survives preset and ` +
+    `project switches`;
+  const cmpBtn = $("btn-pinned-compare");
+  cmpBtn.disabled = pinnedSel.size < 2;
+  cmpBtn.textContent = pinnedSel.size >= 2
+    ? `Compare selected (${pinnedSel.size})` : "Compare selected";
+  lib.pins.forEach((p) => {
+    const h = p.headline || {};   // library files can be hand-edited
+    const card = document.createElement("div");
+    card.className = "cand-card pin-card";
+    card.appendChild(pinnedThumb(p, true));
+    const head = document.createElement("div");
+    head.className = "cand-head";
+    const name = document.createElement("span");
+    const nameB = document.createElement("b");
+    nameB.textContent = p.label;
+    name.appendChild(nameB);
+    name.appendChild(document.createTextNode(
+      ` ${fmtN(h.downforce_n, 0)} N`));
+    head.appendChild(name);
+    const sel = document.createElement("label");
+    sel.className = "pin-cmp-sel";
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = pinnedSel.has(p.id);
+    cb.disabled = !cb.checked && pinnedSel.size >= PINNED_SEL_MAX;
+    cb.addEventListener("change", () => {
+      if (cb.checked) pinnedSel.add(p.id);
+      else pinnedSel.delete(p.id);
+      renderPinnedTab();
+      if ($("pinned-compare").hidden === false) buildCompare();
+    });
+    sel.appendChild(cb);
+    sel.appendChild(document.createTextNode(" compare"));
+    head.appendChild(sel);
+    card.appendChild(head);
+    const body = document.createElement("div");
+    body.className = "cand-body";
+    const dLB = !!h.drag_is_lower_bound;
+    body.textContent =
+      `drag ${dLB ? "≥ " : ""}${fmtN(h.drag_n, 1)} N · ` +
+      `L/D ${dLB ? "≤ " : ""}${fmtN(h.ld, 1)} · ${h.elements ?? "?"} el` +
+      (h.warnings ? ` · ${h.warnings} warn` : "");
+    card.appendChild(body);
+    const meta = document.createElement("div");
+    meta.className = "cand-body pin-meta";
+    const when = p.t ? new Date(p.t) : null;
+    meta.textContent =
+      (when && !isNaN(+when) ? when.toLocaleDateString() : "") +
+      (p.context?.rule_preset_name ? ` · ${p.context.rule_preset_name}` : "");
+    if (when && !isNaN(+when)) meta.title = when.toLocaleString();
+    card.appendChild(meta);
+    const actions = document.createElement("div");
+    actions.className = "pin-actions";
+    const load = document.createElement("button");
+    load.className = "btn tiny";
+    load.textContent = "Load";
+    load.title = "Load this design into the workspace (replaces the " +
+                 "configuration and re-analyzes; re-registers any " +
+                 "embedded uploaded airfoils)";
+    load.addEventListener("click", () => loadLibraryPin(p, load));
+    actions.appendChild(load);
+    const ren = document.createElement("button");
+    ren.className = "btn tiny ghost";
+    ren.textContent = "Rename";
+    ren.addEventListener("click", () => renameLibraryPin(p, name));
+    actions.appendChild(ren);
+    const del = document.createElement("button");
+    del.className = "btn tiny ghost";
+    del.textContent = "✕";
+    del.title = "Delete from the durable library (workspace pins are " +
+                "unaffected)";
+    del.addEventListener("click", async () => {
+      if (!confirm(`Delete pinned design ${p.label} from the library?`)) {
+        return;
+      }
+      pinnedSel.delete(p.id);
+      pinnedCp.delete(p.id);
+      try {
+        await savePinnedLib((pins) => pins.filter((x) => x.id !== p.id));
+      } catch (e) {
+        toast(`Could not delete: ${e.message}`);
+      }
+      renderPinnedTab();
+      if ($("pinned-compare").hidden === false) buildCompare();
+    });
+    actions.appendChild(del);
+    card.appendChild(actions);
+    grid.appendChild(card);
+  });
+}
+
+async function loadLibraryPin(p, btn) {
+  // full context switch — the pin-restore contract, plus the project-open
+  // custom-airfoil re-registration (server memory may have lost the
+  // uploads, or re-slug them)
+  if (jobsRunning()) {
+    toast("A run is still using the solver — wait for it to finish or " +
+          "cancel it before loading a pinned design.", "info", 6000);
+    return;
+  }
+  busy(btn, true);
+  try {
+    const cfg = structuredClone(p.config);
+    const remap = {};
+    for (const [spec, dat] of Object.entries(p.custom_airfoils || {})) {
+      const up = await api.uploadAirfoil(spec.split(":")[1], dat);
+      remap[spec] = up.spec;
+      state.customDat[up.spec] = dat;
+      state.airfoilNames[up.spec] = up.name;
+    }
+    for (const e of cfg.elements) {
+      if (remap[e.airfoil]) { e.airfoil = remap[e.airfoil]; continue; }
+      const m = String(e.airfoil || "").match(/custom:[a-z0-9_-]+$/);
+      if (m && remap[m[0]]) e.airfoil = e.airfoil.replace(m[0], remap[m[0]]);
+    }
+    Object.assign(state.airfoilNames, p.airfoil_names || {});
+    state.config = withDefaults(cfg);
+    if (Number.isFinite(+p.target)) state.target = +p.target;
+    configRevision++;
+    resetWorkspaceResults();
+    writeConfigToForm();
+    persistSession();
+    await refreshGeometry();
+    await runAnalysis();
+    toast(`Pinned design ${p.label} loaded from the library.`, "good", 3000);
+  } catch (e) {
+    toast(`Could not load ${p.label}: ${e.message}`);
+  } finally {
+    busy(btn, false);
+  }
+}
+
+function renameLibraryPin(p, nameSpan) {
+  const input = document.createElement("input");
+  input.type = "text";
+  input.maxLength = 60;
+  input.value = p.label;
+  input.className = "pin-rename";
+  nameSpan.replaceWith(input);
+  input.focus();
+  input.select();
+  let done = false;
+  const commit = async () => {
+    if (done) return;
+    done = true;
+    const label = input.value.trim();
+    if (label && label !== p.label && label.length <= 60) {
+      try {
+        await savePinnedLib((pins) => pins.map(
+          (x) => (x.id === p.id ? { ...x, label } : x)));
+      } catch (e) {
+        toast(`Could not rename: ${e.message}`);
+      }
+    }
+    renderPinnedTab();
+    if ($("pinned-compare").hidden === false) buildCompare();
+  };
+  input.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") commit();
+    if (ev.key === "Escape") { done = true; renderPinnedTab(); }
+  });
+  input.addEventListener("blur", commit);
+}
+
+/* ---- compare: stat table + outline overlay + images + on-demand Cp ---- */
+
+function comparePins() {
+  return state.pinnedLib.pins.filter((p) => pinnedSel.has(p.id));
+}
+
+function compareColors(n) {
+  // resolved at render time so a theme flip re-inks (ink() reads tokens)
+  const pool = [ink("--e1", "#3c6df0"), ink("--e2", "#c4483d"),
+                ink("--e3", "#2a9d6f"), ink("--e4", "#b0812c"),
+                ink("--steel", "#9AA5BC"), ink("--warning", "#f2b544")];
+  return Array.from({ length: n }, (_, i) => pool[i % pool.length]);
+}
+
+function buildCompare() {
+  const pins = comparePins();
+  const box = $("pinned-compare");
+  if (pins.length < 2) { box.hidden = true; return; }
+  box.hidden = false;
+  const colors = compareColors(pins.length);
+
+  // (a) stat table — columns are pins, rows are metrics; the winner cell
+  // is highlighted, and BOUNDED values are excluded from the winner
+  // computation (a drag floor cannot win "lowest drag", a ceiling L/D
+  // cannot win "highest") with the reason on the cell
+  const host = $("pinned-cmp-table");
+  host.innerHTML = "";
+  const tbl = document.createElement("table");
+  tbl.className = "rr-table";
+  const addRow = (label, cells, win = null, titles = null) => {
+    const tr = tbl.insertRow();
+    const th = document.createElement("th");
+    th.textContent = label;
+    tr.appendChild(th);
+    cells.forEach((c, i) => {
+      const td = tr.insertCell();
+      td.textContent = c;
+      if (win && win[i]) td.style.color = "var(--good)";
+      if (titles && titles[i]) td.title = titles[i];
+    });
+  };
+  const hs = pins.map((p) => p.headline || {});
+  const head = tbl.insertRow();
+  head.appendChild(document.createElement("th"));
+  pins.forEach((p, i) => {
+    const th = document.createElement("th");
+    th.textContent = p.label;
+    th.style.color = colors[i];
+    head.appendChild(th);
+  });
+  const winner = (vals, mode, excluded) => {
+    const ok = vals.map((v, i) => Number.isFinite(+v) && !(excluded?.[i]));
+    const cand = vals.map((v, i) => (ok[i] ? +v : null));
+    const best = mode === "max"
+      ? Math.max(...cand.filter((v) => v != null))
+      : Math.min(...cand.filter((v) => v != null));
+    return cand.map((v) => v != null && v === best);
+  };
+  const dLBs = hs.map((h) => !!h.drag_is_lower_bound);
+  addRow("Date", pins.map((p) => {
+    const d = p.t ? new Date(p.t) : null;
+    return d && !isNaN(+d) ? d.toLocaleDateString() : "–";
+  }));
+  addRow("Downforce", hs.map((h) => `${fmtN(h.downforce_n, 0)} N`),
+         winner(hs.map((h) => h.downforce_n), "max"));
+  addRow("Drag", hs.map((h, i) =>
+           `${dLBs[i] ? "≥ " : ""}${fmtN(h.drag_n, 1)} N`),
+         winner(hs.map((h) => h.drag_n), "min", dLBs),
+         dLBs.map((b) => (b ? "a floored estimate cannot win lowest drag"
+                            : null)));
+  addRow("L/D", hs.map((h, i) => `${dLBs[i] ? "≤ " : ""}${fmtN(h.ld, 1)}`),
+         winner(hs.map((h) => h.ld), "max", dLBs),
+         dLBs.map((b) => (b ? "a ceiling cannot win highest L/D" : null)));
+  addRow("Elements", hs.map((h) => String(h.elements ?? "–")));
+  addRow("Warnings", hs.map((h) => String(h.warnings ?? "–")),
+         winner(hs.map((h) => h.warnings), "min"));
+  addRow("Max loading", hs.map((h) => (Number.isFinite(+h.frac_max)
+    ? `${Math.round(h.frac_max * 100)}%` : "–")));
+  addRow("Min confidence", hs.map((h) => (Number.isFinite(+h.confidence_min)
+    ? `${Math.round(h.confidence_min * 100)}%` : "–")));
+  addRow("Chord", pins.map((p) => `${fmtN(p.config?.chord_mm, 0)} mm`));
+  addRow("Ride height", pins.map((p) =>
+    `${fmtN(p.config?.ride_height_mm, 0)} mm`));
+  addRow("Speed", pins.map((p) => `${fmtN(p.config?.speed_ms, 0)} m/s`));
+  addRow("Stack AoA", pins.map((p) =>
+    `${fmtN(p.config?.stack_aoa_deg, 1)}°`));
+  addRow("Airfoils", pins.map((p) => (p.config?.elements || [])
+    .map((e) => p.airfoil_names?.[e.airfoil]
+      || state.airfoilNames[e.airfoil] || e.airfoil)
+    .join(" + ")));
+  addRow("Rules", pins.map((p) => p.context?.rule_preset_name || "–"));
+  addRow("Target", pins.map((p) => (Number.isFinite(+p.target)
+    ? `${fmtN(p.target, 0)} N` : "–")));
+  host.appendChild(tbl);
+
+  // (b) outline overlay — every pin's stored contours, one color per PIN
+  const oHost = $("pinned-cmp-outline");
+  oHost.innerHTML = "";
+  const polys = [];
+  const polyColors = [];
+  const missing = [];
+  pins.forEach((p, i) => {
+    if (Array.isArray(p.outline) && p.outline.length) {
+      for (const poly of p.outline) {
+        polys.push(poly);
+        polyColors.push(colors[i]);
+      }
+    } else {
+      missing.push(p.label);
+    }
+  });
+  if (polys.length) {
+    stackPreview(oHost, polys, polyColors,
+                 { width: Math.max(oHost.clientWidth || 560, 320),
+                   height: 220, pad: 10 });
+  }
+  const legend = document.createElement("div");
+  legend.className = "pin-legend";
+  pins.forEach((p, i) => {
+    const chip = document.createElement("span");
+    const dot = document.createElement("span");
+    dot.className = "pin-legend-dot";
+    dot.style.background = colors[i];
+    chip.appendChild(dot);
+    chip.appendChild(document.createTextNode(` ${p.label}`));
+    legend.appendChild(chip);
+  });
+  oHost.appendChild(legend);
+  $("pinned-cmp-note").textContent = missing.length
+    ? `no stored outline: ${missing.join(", ")}` : "";
+
+  // (c) images strip — each selected pin's flow thumbnails, side by side
+  const iHost = $("pinned-cmp-images");
+  iHost.innerHTML = "";
+  pins.forEach((p) => {
+    const col = document.createElement("div");
+    col.className = "pin-img-col";
+    const cap = document.createElement("div");
+    cap.className = "pin-img-cap";
+    cap.textContent = p.label;
+    col.appendChild(cap);
+    let any = false;
+    for (const [key, capText] of [["rans_umag", "RANS velocity"],
+                                  ["rans_cp", "RANS Cp"],
+                                  ["fl2d_umag", "Fluent 2D velocity"],
+                                  ["fl2d_cp", "Fluent 2D Cp"]]) {
+      const uri = p.flow_thumbs?.[key];
+      if (typeof uri === "string" && PIN_IMG_RE.test(uri)) {
+        const fig = document.createElement("figure");
+        const img = document.createElement("img");
+        img.src = uri;
+        img.alt = capText;
+        const fc = document.createElement("figcaption");
+        fc.textContent = capText;
+        fig.appendChild(img);
+        fig.appendChild(fc);
+        col.appendChild(fig);
+        any = true;
+      }
+    }
+    if (any) iHost.appendChild(col);
+  });
+  iHost.hidden = !iHost.children.length;
+
+  // (d) the Cp overlay renders only on demand (a real solve per pin)
+  $("pinned-cmp-cp").hidden = true;
+  $("pinned-cmp-cp").innerHTML = "";
+}
+
+async function overlayCompareCp() {
+  const pins = comparePins();
+  if (pins.length < 2) return;
+  const btn = $("btn-pinned-cp");
+  const note = $("pinned-cmp-note");
+  btn.disabled = true;
+  const colors = compareColors(pins.length);
+  const series = [];
+  try {
+    for (let i = 0; i < pins.length; i++) {
+      const p = pins[i];
+      let cps = pinnedCp.get(p.id);
+      if (!cps) {
+        note.textContent = `Analyzing ${i + 1}/${pins.length} — ${p.label}…`;
+        // /api/analyze resolves specs server-side: re-register embedded
+        // uploads first, exactly like Load does
+        const cfg = structuredClone(p.config);
+        const remap = {};
+        for (const [spec, dat] of Object.entries(p.custom_airfoils || {})) {
+          const up = await api.uploadAirfoil(spec.split(":")[1], dat);
+          remap[spec] = up.spec;
+        }
+        for (const e of cfg.elements) {
+          if (remap[e.airfoil]) { e.airfoil = remap[e.airfoil]; continue; }
+          const m = String(e.airfoil || "").match(/custom:[a-z0-9_-]+$/);
+          if (m && remap[m[0]]) {
+            e.airfoil = e.airfoil.replace(m[0], remap[m[0]]);
+          }
+        }
+        try {
+          const res = await api.analyze(cfg);
+          cps = res.cp_distributions || [];
+          pinnedCp.set(p.id, cps);   // pins are immutable snapshots
+        } catch (e) {
+          toast(`${p.label}: ${e.message}`);
+          continue;
+        }
+      }
+      const chordMm = +p.config?.chord_mm || 1;
+      cps.forEach((d, ei) => {
+        series.push({
+          name: `${p.label} E${ei + 1}`,
+          color: colors[i],
+          x: d.x.map((v) => v * chordMm),
+          y: d.cp,
+          ...(ei ? { dash: "5 4" } : {}),
+        });
+      });
+    }
+    note.textContent = "";
+    if (series.length) {
+      const cpHost = $("pinned-cmp-cp");
+      cpHost.hidden = false;
+      lineChart(cpHost, {
+        series,
+        xLabel: "x [mm]", yLabel: "Cp", invertY: true, height: 230,
+      });
+    }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$("btn-pinned-compare").addEventListener("click", buildCompare);
+$("btn-pinned-cp").addEventListener("click", overlayCompareCp);
+
 /* ---------------- pressure tab ---------------- */
 
 function renderCp(res) {
@@ -1546,6 +2141,7 @@ document.querySelectorAll(".tab").forEach((t) => {
     if (t.dataset.tab === "rans") refreshRansAvailability();
     if (t.dataset.tab === "fluent2d") refreshFl2dAvailability();
     if (t.dataset.tab === "optimizer") reattachOptimizer();
+    if (t.dataset.tab === "pinned") enterPinnedTab();
     // a flow animation owns a rAF loop, a resize observer and megabytes of
     // field arrays, none of which a merely hidden panel releases — leaving
     // the tab destroys the mount, returning rebuilds it
@@ -1574,6 +2170,10 @@ window.addEventListener("wss-themechange", () => {
   if (active.dataset.tab === "polars") renderPolars();
   if (active.dataset.tab === "optimizer") reattachOptimizer();
   if (active.dataset.tab === "fluent2d" && fl2dLast) renderFl2d(fl2dLast);
+  if (active.dataset.tab === "pinned") {
+    renderPinnedTab();
+    if (!$("pinned-compare").hidden) buildCompare();
+  }
 });
 
 /* ---------------- polars tab ---------------- */

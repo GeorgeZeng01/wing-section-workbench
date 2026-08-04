@@ -281,6 +281,37 @@ export function lineChart(container, spec) {
   });
 }
 
+/** Multi-contour outline preview: shared bounds over every polyline,
+    equal-aspect scale, one closed subpath per contour. `colors` indexes
+    per polyline (repeating) — per-element for a single stack, per-pin for
+    a comparison overlay. */
+export function stackPreview(container, polylines, colors, opts = {}) {
+  const { width = 120, height = 34, pad = 3 } = opts;
+  container.innerHTML = "";
+  const polys = (polylines || [])
+    .filter((p) => Array.isArray(p) && p.length > 2);
+  if (!polys.length) return;
+  const xs = polys.flatMap((p) => p.map((q) => +q[0]));
+  const ys = polys.flatMap((p) => p.map((q) => +q[1]));
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  const y0 = Math.min(...ys), y1 = Math.max(...ys);
+  const sc = Math.min((width - 2 * pad) / (x1 - x0 || 1),
+                      (height - 2 * pad) / (y1 - y0 || 1));
+  const ox = (width - (x1 - x0) * sc) / 2;
+  const oy = (height - (y1 - y0) * sc) / 2;
+  const svg = el("svg", { viewBox: `0 0 ${width} ${height}`,
+                          width, height }, container);
+  polys.forEach((poly, i) => {
+    const color = (Array.isArray(colors) && colors.length
+                   && colors[i % colors.length]) || "#9AA5BC";
+    const d = poly.map((p, j) =>
+      `${j ? "L" : "M"}${(ox + (+p[0] - x0) * sc).toFixed(1)} ` +
+      `${(height - oy - (+p[1] - y0) * sc).toFixed(1)}`).join(" ") + " Z";
+    el("path", { d, fill: color + "22", stroke: color,
+                 "stroke-width": 1 }, svg);
+  });
+}
+
 /** Small airfoil outline preview. */
 export function airfoilPreview(container, coords, color = null) {
   color = color ||

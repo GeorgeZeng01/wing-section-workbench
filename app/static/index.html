@@ -305,6 +305,8 @@
       <button class="tab" data-tab="maps" role="tab">Maps</button>
       <button class="tab" data-tab="rans" role="tab">RANS verify</button>
       <button class="tab" data-tab="fluent2d" role="tab">Fluent 2D</button>
+      <button class="tab" data-tab="pinned" role="tab"
+              title="The durable pin library: every pinned design is also saved here, machine-wide — it survives preset switches, project opens and restarts. Select 2-6 pins to compare them.">Pinned</button>
       <button class="tab" data-tab="export" role="tab">Export</button>
     </nav>
 
@@ -826,6 +828,31 @@
             <canvas data-role="pt"></canvas>
           </div>
         </div>
+      </div>
+    </div>
+
+    <div id="tab-pinned" class="tab-page" role="tabpanel">
+      <div class="tab-controls">
+        <button id="btn-pinned-compare" class="btn small" disabled
+                title="Compare the selected pins side by side: stats, section outlines overlaid, flow images, and (on demand) Cp distributions.">Compare selected</button>
+        <span id="pinned-note" class="note"></span>
+      </div>
+      <div id="pinned-empty" class="empty-note">Pin a design (the Pin
+        button in the results panel) to start the durable library — pins
+        land here automatically and survive preset switches, project opens
+        and restarts.</div>
+      <div id="pinned-grid" class="pinned-grid"></div>
+      <div id="pinned-compare" hidden>
+        <h3 class="sub-title">Comparison</h3>
+        <div id="pinned-cmp-table" class="table-host"></div>
+        <div id="pinned-cmp-outline" class="chart-host pin-cmp-outline"></div>
+        <div id="pinned-cmp-images" class="pin-cmp-images"></div>
+        <div class="tab-controls">
+          <button id="btn-pinned-cp" class="btn small ghost"
+                  title="Re-analyzes each selected pin's stored configuration (one panel solve each, a few seconds) and overlays their pressure distributions in the pins' colors — flaps dashed.">Overlay Cp</button>
+          <span id="pinned-cmp-note" class="note"></span>
+        </div>
+        <div id="pinned-cmp-cp" class="chart-host tall" hidden></div>
       </div>
     </div>
 
