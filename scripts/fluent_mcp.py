@@ -828,6 +828,255 @@ def write_case_data(stem: str = "case") -> dict:
 
 
 @mcp.tool()
+def read_case_data(path: str = "case.cas.h5") -> dict:
+    """Read a solved case+data pair (<stem>.cas.h5 with its .dat.h5
+    beside it) into the live session — the reload path for a finished
+    run's artifact (the in-app engines write one beside every done
+    run). Report definitions and monitors ride in the case, so the
+    force histories resume in the new session's cwd. Returns the
+    boundary zones so the caller can re-check the vocabulary it is
+    about to drive."""
+    s = _require()
+    p = Path(path)
+    if not p.is_absolute():
+        p = (_session_dir or WORK) / p
+    if not p.is_file():
+        raise ValueError(f"no case file at {p}")
+    s.settings.file.read_case_data(file_name=str(p).replace("\\", "/"))
+    return {"zones": _zones()}
+
+
+# ---------- adjoint / gradient-based polish ----------
+
+# One objective, one name: the polish drives Fluent's own gradient-based
+# optimizer (adjoint + shape morphing) toward J = downforce - k * drag,
+# built as a linear-combination observable over two force observables on
+# the profile walls. k is the studio's physical exchange rate (newtons of
+# downforce a newton of drag is worth), dimensionless, so it applies
+# identically whether the session's monitors are raw or chord-referenced.
+ADJ_OBS_DOWN = "polish-down"
+ADJ_OBS_DRAG = "polish-drag"
+ADJ_OBS_J = "polish-objective"
+# "maximize" in the live 26.1 goal vocabulary (target | step-size |
+# none | equal | bounded — there is no "increase"): request a relative
+# step per design iteration and let the optimizer take what it can get
+ADJ_STEP_PCT = 2.0
+
+
+def _design():
+    """The gradient-based design root (adjoint solver + optimizer),
+    presence-checked: a Fluent build without the typed design tree reads
+    as one clear refusal, never an AttributeError from deep inside a
+    setup step."""
+    s = _require()
+    d = getattr(s.settings, "design", None)
+    if d is None:
+        raise RuntimeError(
+            "this Fluent exposes no design/gradient-based tree — the "
+            "adjoint polish needs the Fluent 2024 R1+ settings API")
+    return d.gradient_based
+
+
+def _named(coll, name: str):
+    """Fetch-or-create one entry of a settings NamedObject collection."""
+    try:
+        names = list(coll.get_object_names())
+    except Exception:
+        try:
+            names = list(coll.keys())
+        except Exception:
+            names = []
+    if name not in names:
+        coll.create(name)
+    return coll[name]
+
+
+def _set_list_object(lst, rows: list[dict]) -> None:
+    """Fill a settings ListObject from row dicts (whole-list assignment
+    where the API version supports it, resize+index where it doesn't)."""
+    try:
+        lst.set_state(rows)
+        return
+    except Exception:
+        pass
+    try:
+        lst.resize(new_size=len(rows))
+    except Exception:
+        lst.resize(len(rows))
+    for i, row in enumerate(rows):
+        item = lst[i]
+        for k, v in row.items():
+            setattr(item, k, v)
+
+
+@mcp.tool()
+def adjoint_setup(profile_zones: list[str] = ["profile"],
+                  drag_exchange_k: float = 0.25,
+                  region_x: list[float] = [],
+                  region_y: list[float] = [],
+                  flow_iterations: int = 300,
+                  adjoint_iterations: int = 250,
+                  morphing_method: str = "polynomials") -> dict:
+    """Configure Fluent's gradient-based shape optimizer (adjoint) for a
+    final-stage polish of the loaded, solved case: observables
+    J = downforce - k*drag on the profile walls, a cartesian design
+    region bounding the morph (pass region_x/region_y as [lo, hi] in
+    meters — the caller clips them to the rule envelope so a box
+    violation is impossible by construction), the balanced adjoint
+    method preset, and shape-opt with a single increase-J objective,
+    one design iteration per optimize() call. Fluent's residual
+    auto-stop is disabled so the optimizer's interleaved flow solves
+    always run their full budget (drift doctrine, same as the studio
+    engines). Every step is fenced: a failure lands in `failed` with
+    its own error, never silently."""
+    s = _require()
+    d = _design()
+    k = float(drag_exchange_k)
+    applied: list = []
+    failed: list = []
+    fvec_down = [0.0, -1.0] if _dim == 2 else [0.0, -1.0, 0.0]
+    fvec_drag = [1.0, 0.0] if _dim == 2 else [1.0, 0.0, 0.0]
+
+    def enable():
+        try:
+            d.enable()
+        except Exception:
+            d.enabled = True
+    _fence(applied, failed, "enable gradient-based design", enable)
+    _fence(applied, failed, "disable residual auto-stop",
+           lambda: _disable_residual_stop(s.settings))
+
+    def obs_down():
+        o = _named(d.observables.definitions.force, ADJ_OBS_DOWN)
+        o.walls = list(profile_zones)
+        o.vector = fvec_down
+    _fence(applied, failed, "observable: downforce on profile", obs_down)
+
+    def obs_drag():
+        o = _named(d.observables.definitions.force, ADJ_OBS_DRAG)
+        o.walls = list(profile_zones)
+        o.vector = fvec_drag
+    _fence(applied, failed, "observable: drag on profile", obs_drag)
+
+    def obs_j():
+        o = _named(d.observables.definitions.linear_combination, ADJ_OBS_J)
+        _set_list_object(o.entries, [
+            {"coefficient": 1.0, "observable": ADJ_OBS_DOWN, "power": 1.0},
+            {"coefficient": -k, "observable": ADJ_OBS_DRAG, "power": 1.0},
+        ])
+    _fence(applied, failed,
+           f"observable: J = downforce - {k:g}*drag", obs_j)
+    _fence(applied, failed, "select J for the adjoint",
+           lambda: setattr(d.observables.selection, "adjoint_observable",
+                           ADJ_OBS_J))
+    _fence(applied, failed, "adjoint methods: balanced preset",
+           lambda: d.methods.balanced())
+
+    def region():
+        r = d.design_tool.region
+        r.region_type = "cartesian"
+        if region_x and region_y:
+            r.cartesian.extent.x = [float(region_x[0]), float(region_x[1])]
+            r.cartesian.extent.y = [float(region_y[0]), float(region_y[1])]
+        else:
+            r.get_bounds()
+        try:
+            r.modifiable_zones = list(profile_zones)
+        except Exception:
+            r.modifiable_location = list(profile_zones)
+    _fence(applied, failed, "design region (cartesian)", region)
+    _fence(applied, failed, f"morpher: {morphing_method}",
+           lambda: setattr(d.design_tool.morpher, "method",
+                           morphing_method))
+
+    def optimizer():
+        opt = d.optimizer
+        opt.optimizer_type = "shape-opt"
+        opt.objectives.observables.selection = [ADJ_OBS_J]
+        # the objectives list is MANAGED on the live build — one row per
+        # selected observable, resize/set_state inactive (measured
+        # 2026-08-03) — so the goal is written INTO the row; the row's
+        # observable/condition fields are the manager's and may refuse a
+        # write, which is fine as long as the goal itself lands
+        goal_row = {"observable": ADJ_OBS_J, "goal": "step-size",
+                    "value": float(ADJ_STEP_PCT),
+                    "value_as_percentage": True}
+        objs = opt.objectives.objectives
+        try:
+            row = objs[0]
+        except Exception:
+            _set_list_object(objs, [goal_row])
+        else:
+            landed = []
+            for k, v in goal_row.items():
+                try:
+                    setattr(row, k, v)
+                    landed.append(k)
+                except Exception:
+                    pass
+            missing = {"goal", "value"} - set(landed)
+            if missing:
+                raise RuntimeError(
+                    f"objective row refused {sorted(missing)}")
+        st = opt.optimizer_settings
+        st.design_iterations = 1
+        st.flow_iterations = int(flow_iterations)
+        st.adjoint_iterations = int(adjoint_iterations)
+    _fence(applied, failed,
+           f"optimizer: shape-opt, step J +{ADJ_STEP_PCT:g}%/iteration",
+           optimizer)
+    _fence(applied, failed, "optimizer initialize",
+           lambda: d.optimizer.initialize())
+    return {"applied": applied, "failed": failed,
+            "objective": {"name": ADJ_OBS_J, "k": k},
+            "dimension": _dim}
+
+
+@mcp.tool()
+def adjoint_step() -> dict:
+    """Run ONE gradient-based design iteration (flow solve, adjoint
+    solve, morph) with whatever adjoint_setup installed, and return the
+    post-step force reports plus the tail of the force history. The
+    caller owns the loop — chunked driving keeps cancel, progress and
+    rule checks between iterations, while the iteration itself is
+    entirely Fluent's own optimizer."""
+    d = _design()
+    t0 = time.time()
+    d.optimizer.optimize()
+    out: dict = {"wall_s": round(time.time() - t0, 1)}
+    try:
+        out["reports"] = _compute_reports(["lift_coef", "drag_coef"])
+    except Exception as e:
+        out["reports_error"] = str(e)
+    hist = _report_histories()
+    cl = next((v for n, v in hist.items() if "lift" in n.lower()), [])
+    cd = next((v for n, v in hist.items() if "drag" in n.lower()), [])
+    if cl:
+        tail = cl[-min(len(cl), 60):]
+        out["cl_tail_mean"] = round(sum(tail) / len(tail), 6)
+        out["history_rows"] = len(cl)
+        d_tail = _drift(cl[_DRIFT_SKIP:])
+        out["cl_drift"] = (round(d_tail, 5) if d_tail is not None
+                           else None)
+    if cd:
+        tail = cd[-min(len(cd), 60):]
+        out["cd_tail_mean"] = round(sum(tail) / len(tail), 6)
+    return out
+
+
+@mcp.tool()
+def adjoint_interrupt() -> dict:
+    """Ask the running gradient-based optimizer to stop at the next
+    opportunity (the soft half of cancellation — shutdown() remains the
+    hard one)."""
+    try:
+        _design().optimizer.interrupt()
+        return {"interrupted": True}
+    except Exception as e:
+        return {"interrupted": False, "error": f"{type(e).__name__}: {e}"}
+
+
+@mcp.tool()
 def mesh_native(stl_path: str, edge_size_m: float, far_size_m: float,
                 first_layer_m: float, n_layers: int = 12,
                 growth: float = 1.2, cells_per_gap: int = 8,

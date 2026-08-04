@@ -1459,6 +1459,15 @@ def start(config: dict, mesh_size: str = "coarse",
     else:
         job = RansJob(config, mesh_size, n_iters,
                       n_ranks)   # validates eagerly
+    return admit_and_launch(job)
+
+
+def admit_and_launch(job) -> str:
+    """Registry admission + housekeeping + thread launch, shared by every
+    interactively started engine job: start() builds its job from a
+    config; the adjoint polish builds its own job object and registers
+    it here, so the one-at-a-time guard, the orphan sweep and the
+    run-dir pruning span it identically."""
     with _jobs_lock:
         if _exclusive_claim is not None:
             raise RuntimeError(

@@ -113,6 +113,13 @@ export const api = {
               n_ranks: nRanks, max_concurrent: maxConcurrent }),
   ransQueueCurrent: () => request("GET", "/api/rans-queue/current"),
   ransQueueCancel: () => request("POST", "/api/rans-queue/cancel"),
+  // adjoint polish (final stage): seeds from a finished fluent2d run;
+  // status/cancel ride the shared /api/rans/{id} endpoints
+  polishStart: (runId, opts = {}) =>
+    request("POST", "/api/polish/start", { run_id: runId, ...opts }),
+  polishReverify: (id) => request("POST", `/api/polish/${id}/reverify`),
+  polishExportDxf: (id) =>
+    request("POST", `/api/polish/${id}/export/dxf`),
 };
 
 export async function downloadExport(fmt, config, options = {}) {

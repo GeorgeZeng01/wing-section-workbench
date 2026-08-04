@@ -30,9 +30,10 @@ OFFLINE = ["test_manufacturing.py", "test_panel_validation.py",
            "test_wake_shadow.py", "test_fluent_workflow.py",
            "test_fluent_run.py",
            "test_fluent2d_workflow.py", "test_fluent2d_run.py",
+           "test_adjoint_run.py", "test_polish_endpoints.py",
            "test_frontend_fl2d_state.py", "test_frontend_rules.py",
            "test_frontend_charts.py", "test_frontend_optimizer.py",
-           "test_frontend_pinned.py",
+           "test_frontend_pinned.py", "test_frontend_polish.py",
            "test_geometry_hardening.py", "test_server_hardening.py",
            "test_pinned_store.py"]
 

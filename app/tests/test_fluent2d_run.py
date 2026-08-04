@@ -205,7 +205,8 @@ def make_seams(fake, rec, chain_fn=None):
 def run_job(row_fn, n_iters=500, conventions="default", sizing="default",
             n_ranks=2, fail_setup=False, cancel_after=None, hold=None,
             cd_fn=None, iter_cap=None, fm_cls=FakeFM, precancel=False,
-            chain_fn=None, cfg=CFG_D, settings=None):
+            chain_fn=None, cfg=CFG_D, settings=None,
+            profiles_override=None):
     fake = fm_cls(row_fn, fail_setup=fail_setup, hold=hold, cd_fn=cd_fn,
                   iter_cap=iter_cap)
     rec = {}
@@ -217,7 +218,8 @@ def run_job(row_fn, n_iters=500, conventions="default", sizing="default",
     fluent2d_run._sizing = fs
     fluent2d_run._chain = fc
     job = fluent2d_run.Fluent2DJob(cfg, sizing, n_iters, n_ranks,
-                                   conventions, settings)
+                                   conventions, settings,
+                                   profiles_override=profiles_override)
     fake.job_ref = job
     try:
         if precancel:
@@ -1125,6 +1127,69 @@ for key, value, ok in (
 j50 = make_job("default", 50, 1, "default")
 check("50-iteration parity run is constructible (the 2D floor)",
       j50.n_iters == 50 and j50.state == "pending")
+
+# ---- profiles override: the adjoint polish's re-verify path ----
+
+import numpy as np  # noqa: E402
+
+
+def ring(cx, cy, rx, ry, n=48):
+    a = np.linspace(0, 2 * np.pi, n, endpoint=False)
+    return np.column_stack([cx + rx * np.cos(a), cy + ry * np.sin(a)])
+
+
+OVR = [ring(0.10, 0.060, 0.10, 0.012),
+       ring(0.28, 0.045, 0.04, 0.006)]
+
+hv = cfd_run._harvest_path()
+harvest_before = (hv.read_text().count("\n") if hv.is_file() else 0)
+job, fake, rec = run_job(lambda i: -0.875, n_iters=500,
+                         profiles_override=[p.tolist() for p in OVR])
+snap = job.snapshot()
+r = snap["result"]
+check("override: run completes done",
+      snap["state"] == "done" and r is not None,
+      f"({snap['state']}: {snap['error']})")
+check("override: the DXF meshes EXACTLY the override polylines",
+      len(rec["dxf_profiles"]) == 2
+      and np.allclose(rec["dxf_profiles"][0], OVR[0])
+      and np.allclose(rec["dxf_profiles"][1], OVR[1]))
+check("override: no panel claim for a free-form shape",
+      r["panel"] is None and r["delta_cl_pct"] is None
+      and r["suggested_k_g"] is None
+      and "polished" in (r["panel_error"] or ""))
+check("override: result and snapshot carry the flag",
+      r["profiles_override"] is True
+      and snap["profiles_override"] is True)
+check("override: engine note states the free-form provenance",
+      r["engine_note"].startswith("POLISHED FREE-FORM PROFILES"))
+harvest_after = (hv.read_text().count("\n") if hv.is_file() else 0)
+check("override: no calibration harvest row is appended",
+      harvest_after == harvest_before,
+      f"({harvest_before} -> {harvest_after})")
+gap_want = None
+d2 = ((OVR[0][:, None, :] - OVR[1][None, :, :]) ** 2).sum(axis=2)
+gap_want = float(np.sqrt(d2.min())) * 1000.0
+check("override: slot clearance measured on the actual polylines",
+      abs(rec["chain_kw"]["slot_gap_mm"] - gap_want) < 1e-6,
+      f"({rec['chain_kw']['slot_gap_mm']} vs {gap_want})")
+check("override: ground clearance from the polylines' lowest point",
+      abs(rec["chain_kw"]["ground_clear_mm"]
+          - float(min(p[:, 1].min() for p in OVR)) * 1000.0) < 1e-6)
+
+for bad, why in [
+        ([], "empty list"),
+        ([OVR[0][:5]], "too few points"),
+        ([np.array([[0.1, float("nan")]] * 25)], "non-finite"),
+        ([OVR[0] - np.array([0.0, 0.2])], "touches the ground"),
+        ([np.column_stack([np.linspace(0, 6, 30),
+                           np.full(30, 0.05)])], "absurd span")]:
+    try:
+        fluent2d_run.Fluent2DJob(CFG_D, "default", 500, 1, "default",
+                                 profiles_override=bad)
+        check(f"override: {why} refused", False)
+    except ValueError:
+        check(f"override: {why} refused", True)
 
 print(f"\n{sum(results)}/{len(results)} fluent2d-run checks passed")
 sys.exit(0 if all(results) else 1)

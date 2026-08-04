@@ -808,7 +808,8 @@ def rans_stop(job_id: str):
         # the refusal reasons differ per engine: Fluent (slab and 2D)
         # writes fields only at the end, so there is never a partial
         # state worth keeping — "not running yet" would be a lie mid-solve
-        if job.snapshot().get("engine") in ("fluent", "fluent2d"):
+        if job.snapshot().get("engine") in ("fluent", "fluent2d",
+                                            "polish"):
             raise HTTPException(409, detail="the Fluent engine writes "
                                             "fields only at the end — "
                                             "there is no keep-fields "
@@ -973,7 +974,7 @@ def rans_export_fluent(job_id: str):
     if job.state != "done":
         raise HTTPException(409, detail="the run has not finished")
     snap = job.snapshot()
-    if snap.get("engine") not in ("fluent", "fluent2d"):
+    if snap.get("engine") not in ("fluent", "fluent2d", "polish"):
         raise HTTPException(422, detail="this run was solved by the "
                                         "OpenFOAM engine — the ANSYS "
                                         "export applies to Fluent runs")
@@ -1015,6 +1016,16 @@ def rans_export_fluent(job_id: str):
                 + (f"  - {r['ref_note']}\n" if r.get("ref_note") else "")
                 + "  - true-2D case meshed by the ANSYS Workbench "
                 "chain\n\n")
+        elif snap.get("engine") == "polish":
+            conv_block = (
+                "Conventions (adjoint polish - gradient-based "
+                "shape-opt):\n"
+                "  - the seed verification run's 2D mesh, MORPHED by "
+                "Fluent's optimizer\n"
+                "  - solved state is the delivered polished shape; "
+                "numbers on the morphed\n"
+                "    mesh are provisional until the re-verification "
+                "on a fresh mesh\n\n")
         else:
             conv_block = (
                 "Conventions (as solved - the studio recipe):\n"
@@ -1051,6 +1062,169 @@ def rans_export_fluent(job_id: str):
     return {"filename": dest.name, "path": str(dest),
             "dir": str(EXPORTS_DIR), "files": files,
             "size_bytes": total, "data_included": dat.is_file()}
+
+
+# ---------- adjoint polish (final stage) ----------
+
+class PolishStartBody(BaseModel):
+    """Knobs for the final-stage adjoint polish. run_id names the
+    FINISHED ANSYS 2D verification run whose solved case seeds the
+    polish; the ranges mirror adjoint_run.resolve_options exactly, so a
+    request the job would refuse is refused here with a field name."""
+    run_id: str
+    drag_exchange_k: float = Field(default=0.25, ge=0.0, le=10.0,
+                                   allow_inf_nan=False)
+    design_iters: int = Field(default=12, ge=1, le=60)
+    flow_iters: int = Field(default=300, ge=100, le=5000)
+    adjoint_iters: int = Field(default=250, ge=50, le=5000)
+    margin_pct: float = Field(default=6.0, ge=1.0, le=15.0,
+                              allow_inf_nan=False)
+    settle_iters: int = Field(default=200, ge=50, le=2000)
+
+
+@app.post("/api/polish/start")
+def polish_start(body: PolishStartBody):
+    """Start the final-stage adjoint polish: Fluent's gradient-based
+    shape optimizer on a finished 2D verification run's solved case,
+    objective downforce - k*drag, morph bounded by the rule envelope.
+    Registers in the same cross-engine registry as every solver job, so
+    status/cancel ride the /api/rans/{job_id} endpoints."""
+    from .core import adjoint_run, cfd_run, rans_queue
+    seed = cfd_run.get(body.run_id)
+    if seed is None:
+        raise HTTPException(404, detail=(
+            "unknown run — the polish seeds from an ANSYS 2D "
+            "verification run of this app session; run one first"))
+    with _rans_start_lock:
+        q = rans_queue.get_current()
+        if q is not None and q.state in ("pending", "running"):
+            raise HTTPException(409, detail="a shortlist verification "
+                                            "queue is running — cancel it "
+                                            "or wait for it to finish")
+        try:
+            job = adjoint_run.AdjointPolishJob(seed, {
+                "drag_exchange_k": body.drag_exchange_k,
+                "design_iters": body.design_iters,
+                "flow_iters": body.flow_iters,
+                "adjoint_iters": body.adjoint_iters,
+                "margin_pct": body.margin_pct,
+                "settle_iters": body.settle_iters,
+            })
+        except (ValueError, TypeError, KeyError) as e:
+            raise HTTPException(422, detail=_err_detail(e))
+        try:
+            job_id = cfd_run.admit_and_launch(job)
+        except RuntimeError as e:
+            raise HTTPException(409, detail=str(e))
+    return {"job_id": job_id}
+
+
+def _polish_profiles(job) -> list:
+    """The delivered polished polylines of a done polish job, or an
+    HTTP-shaped refusal naming exactly what is missing."""
+    if job.state != "done":
+        raise HTTPException(409, detail="the polish has not finished")
+    r = job.result or {}
+    art = r.get("artifacts") or {}
+    if not r.get("improved") or not art.get("profiles_json"):
+        raise HTTPException(409, detail=(
+            "the polish found no compliant improvement — there is no "
+            "polished shape to use"))
+    path = Path(job.case_dir) / art["profiles_json"]
+    if not path.is_file():
+        raise HTTPException(409, detail=(
+            "the polished profiles were pruned from disk — re-run the "
+            "polish"))
+    import json as _json
+    try:
+        data = _json.loads(path.read_text(encoding="utf-8"))
+        polys = data["elements"]
+    except (OSError, ValueError, KeyError) as e:
+        raise HTTPException(422, detail=f"polished profiles unreadable: "
+                                        f"{e}")
+    if not polys:
+        raise HTTPException(422, detail="polished profiles are empty")
+    return polys
+
+
+@app.post("/api/polish/{job_id}/reverify")
+def polish_reverify(job_id: str):
+    """Re-verify the polished shape on a FRESH mesh through the standard
+    ANSYS 2D chain (studio conventions): the honest measure of the
+    polish gain, free of morphed-mesh quality effects. The run carries
+    profiles_override, so the panel comparison and the calibration
+    harvest are disabled on it."""
+    from .core import cfd_run, fluent2d_run, rans_queue
+    job = cfd_run.get(job_id)
+    if job is None:
+        raise HTTPException(404, detail="unknown job")
+    if job.snapshot().get("engine") != "polish":
+        raise HTTPException(422, detail="this run is not an adjoint "
+                                        "polish")
+    polys = _polish_profiles(job)
+    # the seed's resolved mesh recipe, replayed as overrides (requested
+    # values where the chain capped them — it re-caps against the
+    # polished clearances itself); conventions are ALWAYS studio for a
+    # re-verify — the drift doctrine judges convergence
+    seed_settings = dict(getattr(job, "seed_settings", {}) or {})
+    overrides = {}
+    for name in _ANSYS_OVERRIDE_NAMES:
+        v = seed_settings.get(f"{name}_requested",
+                              seed_settings.get(name))
+        if v is not None:
+            overrides[name] = v
+    sizing = seed_settings.get("sizing") or "default"
+    n_iters = int(seed_settings.get("n_iters") or FLUENT2D_ITERS)
+    with _rans_start_lock:
+        q = rans_queue.get_current()
+        if q is not None and q.state in ("pending", "running"):
+            raise HTTPException(409, detail="a shortlist verification "
+                                            "queue is running — cancel it "
+                                            "or wait for it to finish")
+        try:
+            rjob = fluent2d_run.Fluent2DJob(
+                job.config, sizing, n_iters, job.n_ranks,
+                "studio", settings=overrides,
+                profiles_override=polys)
+        except (ValueError, TypeError, KeyError) as e:
+            raise HTTPException(422, detail=_err_detail(e))
+        try:
+            rid = cfd_run.admit_and_launch(rjob)
+        except RuntimeError as e:
+            raise HTTPException(409, detail=str(e))
+    return {"job_id": rid, "polish_id": job_id}
+
+
+@app.post("/api/polish/{job_id}/export/dxf")
+def polish_export_dxf(job_id: str):
+    """The polished profiles as a true-scale DXF in the exports folder —
+    exact closed polylines per element (never smoothing splines), ground
+    line included."""
+    import time as _time
+
+    from .core import cfd_run
+    job = cfd_run.get(job_id)
+    if job is None:
+        raise HTTPException(404, detail="unknown job")
+    if job.snapshot().get("engine") != "polish":
+        raise HTTPException(422, detail="this run is not an adjoint "
+                                        "polish")
+    polys = _polish_profiles(job)
+    try:
+        data = export.polished_dxf_bytes(polys)
+    except Exception as e:
+        raise HTTPException(422, detail=f"DXF generation failed: "
+                                        f"{_err_detail(e)}")
+    EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = _time.strftime("%Y%m%d-%H%M%S")
+    dest = EXPORTS_DIR / f"polished_section_{stamp}.dxf"
+    k = 2
+    while dest.exists():
+        dest = EXPORTS_DIR / f"polished_section_{stamp}-{k}.dxf"
+        k += 1
+    dest.write_bytes(data)
+    return {"filename": dest.name, "path": str(dest),
+            "dir": str(EXPORTS_DIR), "size_bytes": len(data)}
 
 
 # ---------- screener ----------
@@ -1828,7 +2002,7 @@ _PIN_CUSTOM_RE = re.compile(r"^custom:[a-z0-9_-]+$")
 # path renders) plus compare-width flow images in the exact shape the
 # client's safeFlow() accepts, each image byte-capped (a ~640px JPEG runs
 # 40-90 KB)
-_PIN_RUN_KEYS = ("rans", "fl2d")
+_PIN_RUN_KEYS = ("rans", "fl2d", "polish")
 _PIN_RUN_IMG_KEYS = ("umag", "cp")
 _PIN_IMG_DATA_RE = re.compile(
     r"^data:image/(png|jpe?g|webp);base64,[A-Za-z0-9+/=]+$")

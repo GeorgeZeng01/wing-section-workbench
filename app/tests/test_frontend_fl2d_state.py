@@ -132,10 +132,13 @@ check("gateFl2dRun reflects the foreign run",
 gr = body(js, "async function gateRerank()")
 check("gateRerank reflects the foreign run before and after its await",
       "if (solverForeignBusy)" in gr
-      and "|| fl2dJob || solverForeignBusy)" in gr)
-check("click-time single-flight guards include the foreign run",
-      "|| state.queueActive || fl2dJob || solverForeignBusy)" in js
-      and "|| state.queueActive || solverForeignBusy)" in js)
+      and "|| fl2dJob || polishJob || solverForeignBusy)" in gr)
+check("click-time single-flight guards include the foreign run "
+      "(and the adjoint polish)",
+      "|| state.queueActive || fl2dJob || polishJob\n"
+      "      || solverForeignBusy)" in js
+      and "fl2dJob || polishJob || state.ransJob || state.queueActive\n"
+      "      || solverForeignBusy)" in js)
 
 # ---- adopted-live runs never complete as fresh --------------------------
 check("adoption flag declared beside the fl2d state",

@@ -2639,3 +2639,82 @@ per-pin colors and dashed flaps.
 Everything library-origin reaches the DOM through textContent, and <img>
 sources are re-checked against the data-URI shape client-side — library
 files can be hand-edited.
+
+## The adjoint polish: Fluent's own optimizer as the final stage (2026-08-03)
+
+**Decision: the last stage of the pipeline is ANSYS Fluent's native
+gradient-based shape optimizer (adjoint, shape-opt), run as a studio
+job seeded by a finished 2D verification run — with the studio wrapped
+around it for exactly the things Fluent cannot know: FSAE legality,
+buildability, and honest bookkeeping.** The earlier rejection of
+gradient/adjoint methods (the shape-parameterization decision above)
+stands untouched: that verdict was about differentiating through the
+panel+NeuralFoil chain, where no trustworthy gradients exist. Fluent's
+adjoint differentiates its OWN RANS solution — the gradients are the
+solver's, not the surrogate's — and per the no-architecture-reuse rule
+the loop itself is the tool's: observables, sensitivity solve, morphing
+and step control are all Fluent's gradient-based optimizer
+(`design.gradient-based` settings tree, present since 2024 R1;
+enumerated live against 26.1 before a line was written).
+
+**Seeding, not re-meshing.** A polish starts from a FINISHED
+`fluent2d` run: the solved `case.cas.h5/.dat.h5` written beside every
+done run reloads into a fresh licensed 2D session, a short settle
+solve re-establishes convergence (a baseline that lands >1% from the
+seed's Cl is stated on the card), and only then does the optimizer
+touch anything. Seeds that themselves solved free-form profiles are
+refused — the extraction attributes morphed nodes against the
+config's parametric contours, which a re-verify mesh no longer
+matches.
+
+**The objective is the studio's own exchange rate, in newtons.**
+J = downforce − k·drag, built as a linear-combination observable over
+two force observables on the profile walls; k is the physical exchange
+rate the optimizer tab uses (dimensionless N-per-N, so it applies
+identically whether the seed's monitors are raw or chord-referenced).
+One observable, "maximize" spelled the way the live build actually
+accepts it: the goal enum on the installed 26.1 has NO "increase"
+(the generated pyfluent stubs claim one — measured otherwise by
+scripts/adjoint_smoke.py), so the objective asks for a +2% relative
+step per design iteration (goal=step-size), and the optimizer's
+objectives list is MANAGED — one row per selected observable,
+resize/set_state inactive; the goal is written into the existing row.
+The multi-objective machinery stays unused until something needs it.
+
+**Legality by construction where possible, by measurement where not.**
+The cartesian design region is the stack's bbox plus a margin CLIPPED
+to the rule envelope (height cap with the measure-ride-height
+translation, ground-clearance floor — or half the current clearance
+when no rule is configured, so the ground is never offered to the
+morph — and the length cap while always containing the current stack):
+box violations are impossible by construction. The edge rules a morph
+can silently break — LE radius (T.7.1.4), TE thickness, and the
+manufacturing aft-thickness floor — are re-MEASURED on the extracted
+contour after every design iteration, at mesh resolution, with the
+parametric checker's tolerances and knife-edge bands. The first
+violating iterate ends the loop; the deliverable is the best compliant
+shape seen (tracked explicitly — the loop also stops itself when J
+flattens for two iterations or walks >1% past its peak twice).
+Measured on the first live morph (the solved 3-element case,
+2026-08-03): Fluent's very first design iteration gained J while
+thinning flap1 to 1.86 mm and flap2 to 1.50 mm — both under the 2 mm
+aft floor — so the per-iteration re-measurement is load-bearing, not
+belt-and-braces.
+
+**Artifact honesty.** Per-iteration numbers are re-solves on the
+MORPHED mesh and the card says so; the flow field, wall verdicts and
+the exported case are written ONLY when the session actually ends on
+the delivered iterate (a rule-stop leaves the session one morph past
+delivery — then the polished profiles are the deliverable and the card
+states why there is no flow view). Free-form shapes get no panel
+comparison, no k_g suggestion and NO calibration harvest row — pairing
+a measurement with an estimate of a different geometry would poison
+the calibration record. Re-verify pushes the delivered polylines
+through the standard chain (`Fluent2DJob` with `profiles_override`,
+studio conventions, the seed's mesh recipe replayed as overrides) on a
+fresh mesh: that number is the honest gain. Polish runs register in
+the cross-engine registry (one solver at a time, cancel interrupts the
+optimizer then shoots the session, 12 h backstop), pin as their own
+run channel, export DXF as exact polylines (a spline would re-smooth
+the very millimeter shaping the adjoint added), and protect their seed
+and case dirs from run-dir pruning while referenced.

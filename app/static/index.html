@@ -829,6 +829,91 @@
           </div>
         </div>
       </div>
+
+      <hr class="rule" style="margin:18px 0 12px">
+      <div id="polish-block">
+        <div class="tab-controls">
+          <button id="btn-polish-run" class="btn small primary" disabled
+                  title="Runs Fluent's own adjoint solver and gradient-based optimizer on the finished verification run above: the solved case is reloaded, the profile walls morph toward downforce − k × drag inside the rule envelope, and the studio re-checks legality and buildability after every design iteration.">
+            Polish (adjoint)</button>
+          <button id="btn-polish-cancel" class="btn small ghost" disabled>
+            Cancel</button>
+          <span id="polish-note" class="note">final stage — needs a
+            finished ANSYS 2D verification run from this session as its
+            seed</span>
+        </div>
+        <details class="adv fl2d-adv" id="polish-settings">
+          <summary>Polish settings</summary>
+          <fieldset class="var-set">
+            <legend>Objective &amp; budget</legend>
+            <div class="fields two-col">
+              <label class="field"
+                     title="The physical exchange rate: how many newtons of downforce one newton of drag is worth in the objective J = downforce − k × drag. Matches the optimizer tab's exchange rate; 0 maximizes downforce with drag free.">
+                <span class="f-label">Exchange rate k</span>
+                <span class="f-wrap"><input id="polish-k" type="number"
+                  step="0.05" min="0" max="10" value="0.25"><i>N/N</i></span></label>
+              <label class="field"
+                     title="Design iterations: each one is a full flow solve, an adjoint solve and a mesh morph. Longer is acceptable for a final polish — the loop also stops itself once J flattens or a rule line is reached.">
+                <span class="f-label">Design iterations</span>
+                <span class="f-wrap"><input id="polish-iters" type="number"
+                  step="1" min="1" max="60" value="12"><i></i></span></label>
+              <label class="field"
+                     title="Flow-solver iterations inside each design iteration (the re-solve on the morphed mesh). The seed case is already converged, so a few hundred usually settles each morph.">
+                <span class="f-label">Flow iters / design</span>
+                <span class="f-wrap"><input id="polish-flow-iters" type="number"
+                  step="50" min="100" max="5000" value="300"><i></i></span></label>
+              <label class="field"
+                     title="Adjoint-solver iterations per design iteration (the sensitivity solve).">
+                <span class="f-label">Adjoint iters</span>
+                <span class="f-wrap"><input id="polish-adjoint-iters" type="number"
+                  step="50" min="50" max="5000" value="250"><i></i></span></label>
+              <label class="field"
+                     title="How far outside the current section the morph region extends, as a percentage of chord. The region is always clipped to the rule envelope (height cap, ground clearance, length cap), so a box violation is impossible by construction.">
+                <span class="f-label">Morph margin</span>
+                <span class="f-wrap"><input id="polish-margin" type="number"
+                  step="1" min="1" max="15" value="6"><i>%c</i></span></label>
+              <label class="field"
+                     title="Iterations of the plain flow solve run after reloading the seed case, to re-establish the converged state before the first adjoint solve.">
+                <span class="f-label">Settle iterations</span>
+                <span class="f-wrap"><input id="polish-settle" type="number"
+                  step="50" min="50" max="2000" value="200"><i></i></span></label>
+            </div>
+          </fieldset>
+          <p class="group-note">The polish drives ANSYS Fluent's own
+          gradient-based optimizer (adjoint, shape-opt) — the studio adds
+          what Fluent cannot know: the FSAE rule envelope bounds the morph
+          region, and after every design iteration the extracted contour is
+          re-checked against the leading-edge radius rule, the trailing-edge
+          thickness rule and the manufacturing aft-thickness floor. The
+          first violating step ends the run with the last compliant shape
+          as the deliverable. Numbers measured on the morphed mesh are
+          provisional — Re-verify runs the polished profiles through the
+          standard chain on a fresh mesh.</p>
+        </details>
+        <div class="progress" aria-hidden="true"><div id="polish-progress"></div></div>
+        <div id="polish-status" class="note">idle — polish reloads the
+          verification run's solved case (no re-mesh), then morphs the
+          profile toward downforce − k × drag with Fluent's adjoint
+          optimizer; every design iteration is a full flow + adjoint solve,
+          so expect minutes per iteration</div>
+        <div id="polish-charts" class="chart-pair rans-charts empty" style="margin-top:8px">
+          <div id="polish-conv" class="chart-host"></div>
+          <div id="polish-result"><div class="empty-note">No polish yet.
+            Finish an ANSYS 2D verification run above, then Polish — the
+            adjoint stage starts from its solved case.</div></div>
+        </div>
+        <div class="action-row" id="polish-actions" hidden>
+          <button id="btn-polish-reverify" class="btn tiny"
+                  title="Meshes and solves the polished profiles through the standard ANSYS 2D chain (studio conventions) on a fresh mesh — the honest measure of the polish gain.">
+            Re-verify polished shape</button>
+          <button id="btn-polish-dxf" class="btn tiny ghost"
+                  title="True-scale DXF of the polished profiles (exact closed polylines per element) into the exports folder.">
+            Export polished DXF</button>
+          <button id="btn-polish-case" class="btn tiny ghost"
+                  title="Copies the polished run's solved Fluent case (case.cas.h5 / .dat.h5) into the exports folder for opening in ANSYS.">
+            Export case for ANSYS</button>
+        </div>
+      </div>
     </div>
 
     <div id="tab-pinned" class="tab-page" role="tabpanel">

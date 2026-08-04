@@ -262,7 +262,8 @@ class Fluent2DJob:
     def __init__(self, config: dict, mesh_size: str = "default",
                  n_iters: int = 500, n_ranks: int = 1,
                  conventions: str = "default",
-                 settings: dict | None = None):
+                 settings: dict | None = None,
+                 profiles_override: list | None = None):
         # mesh_size carries the SIZING mode here (the recipe the mesh
         # overrides sit on): "default" = the walkthrough's 0.1 mm /
         # 1 mm x 10 inflation, "studio-yplus1" = resolved-wall first
@@ -311,6 +312,41 @@ class Fluent2DJob:
                                          n_ranks, conventions)
         self.n_iters = self.settings["n_iters"]
         self.n_ranks = self.settings["n_ranks"]
+        # free-form profiles (the adjoint polish's re-verify path): the
+        # run meshes and solves EXACTLY these installed-frame polylines
+        # (meters, ground at y = 0) instead of the config's parametric
+        # section. The config still supplies conditions, references and
+        # sizing; everything that describes the PARAMETRIC shape — the
+        # panel comparison, the k_g suggestion, the calibration harvest
+        # — is disabled, because it would describe a section this run
+        # did not solve. Validated eagerly, like every other input.
+        self.profiles_override = None
+        if profiles_override is not None:
+            polys = []
+            if not isinstance(profiles_override, (list, tuple)) \
+                    or not profiles_override:
+                raise ValueError("profiles_override must be a non-empty "
+                                 "list of polylines")
+            for i, p in enumerate(profiles_override):
+                a = np.asarray(p, float)
+                if a.ndim != 2 or a.shape[1] != 2 or len(a) < 20:
+                    raise ValueError(
+                        f"profiles_override element {i + 1} must be an "
+                        f"Nx2 polyline with at least 20 points")
+                if not np.isfinite(a).all():
+                    raise ValueError(
+                        f"profiles_override element {i + 1} carries "
+                        f"non-finite coordinates")
+                if float(a[:, 1].min()) <= 0.0:
+                    raise ValueError(
+                        f"profiles_override element {i + 1} touches or "
+                        f"crosses the ground plane (y <= 0)")
+                if float(np.ptp(a[:, 0])) > 5.0:
+                    raise ValueError(
+                        f"profiles_override element {i + 1} spans more "
+                        f"than 5 m — not a section polyline in meters")
+                polys.append(a)
+            self.profiles_override = polys
         self.state = "pending"
         self.phase: str | None = None
         self.error: str | None = None
@@ -406,17 +442,22 @@ class Fluent2DJob:
         # the identical installed section every engine meshes; only the
         # polylines matter here — the 2D domain rectangle follows the
         # resolved proportions, built by the DXF writer, not the
-        # studio's fixed box
+        # studio's fixed box. A profiles override (the polish re-verify
+        # path) IS the section: those exact polylines mesh, and the
+        # parametric geometry is never consulted.
         self._set_phase("building the section geometry")
-        try:
-            g = cfd.section_geometry(self.cfg, "coarse")
-        except ValueError as e:
-            shutil.rmtree(self.case_dir, ignore_errors=True)
-            with self._lock:
-                self.state = "failed"
-                self.error = f"case geometry failed: {e}"
-            return None
-        polys = [p for p, _blunt in g["polys"]]
+        if self.profiles_override is not None:
+            polys = self.profiles_override
+        else:
+            try:
+                g = cfd.section_geometry(self.cfg, "coarse")
+            except ValueError as e:
+                shutil.rmtree(self.case_dir, ignore_errors=True)
+                with self._lock:
+                    self.state = "failed"
+                    self.error = f"case geometry failed: {e}"
+                return None
+            polys = [p for p, _blunt in g["polys"]]
         if self._cancel.is_set():
             with self._lock:
                 self.state = "cancelled"
@@ -441,12 +482,23 @@ class Fluent2DJob:
         # the clearances the inflation stack actually faces: the chain
         # caps the resolved layers where they physically cannot fit
         # (opposing fronts in a slot gap collapsed Mechanical's whole
-        # generation to 0 elements when left uncapped)
-        slot_gaps = [e.get("slot_gap_pct") for e in
-                     self.config.get("elements", [])
-                     if e.get("slot_gap_pct")]
-        slot_gap_mm = (min(slot_gaps) / 100.0 * self.cfg.chord_m * 1000.0
-                       if slot_gaps else None)
+        # generation to 0 elements when left uncapped). With an override
+        # the configured slot percentages describe the PARAMETRIC
+        # section, so the clearance is measured on the actual polylines.
+        if self.profiles_override is not None:
+            slot_gap_mm = None
+            if len(polys) > 1:
+                gaps = []
+                for a, b in zip(polys, polys[1:]):
+                    d2 = ((a[:, None, :] - b[None, :, :]) ** 2).sum(axis=2)
+                    gaps.append(float(np.sqrt(d2.min())))
+                slot_gap_mm = min(gaps) * 1000.0
+        else:
+            slot_gaps = [e.get("slot_gap_pct") for e in
+                         self.config.get("elements", [])
+                         if e.get("slot_gap_pct")]
+            slot_gap_mm = (min(slot_gaps) / 100.0 * self.cfg.chord_m
+                           * 1000.0 if slot_gaps else None)
         ground_clear_mm = min(float(p[:, 1].min()) for p in polys) * 1000.0
 
         self._set_phase("meshing in ANSYS (SpaceClaim, then Workbench "
@@ -676,13 +728,17 @@ class Fluent2DJob:
                             self.result["wall_verdict"] = fverdict
                             self.result["sep_knife_edge"] = fknife
                 # the calibration row is written here rather than at result
-                # assembly so it carries the field measurement, not a None
-                try:
-                    cfd_run.append_harvest(cfd_run.harvest_row(
-                        self.result or {}, self.config, "fluent2d",
-                        self.mesh_size))
-                except Exception:
-                    pass
+                # assembly so it carries the field measurement, not a None.
+                # Never for an override run: the harvest pairs the panel
+                # estimate with the measurement, and a free-form polished
+                # shape has no honest panel estimate to pair
+                if self.profiles_override is None:
+                    try:
+                        cfd_run.append_harvest(cfd_run.harvest_row(
+                            self.result or {}, self.config, "fluent2d",
+                            self.mesh_size))
+                    except Exception:
+                        pass
                 try:
                     self._set_phase("writing case files")
                     # absolute stem: the case+data land in the RUN dir,
@@ -843,35 +899,46 @@ class Fluent2DJob:
         panel = None
         panel_error = None
         suggestion = None
-        try:
-            r = analysis.analyze(self.cfg, include_geometry=False)
-            co, fo = r["coefficients"], r["forces"]
-            panel = {
-                "c_est": co["C_downforce_estimated"],
-                "c_free": co["C_downforce_inviscid_free"],
-                "c_ground": co["C_downforce_inviscid_ground"],
-                "cd_profile": co["CD_profile_stack"],
-                # the drag comparison is only as honest as the polar
-                # lookup behind it — carry the cap flag with the number
-                "cd_profile_is_lower_bound": fo[
-                    "drag_profile_is_lower_bound"],
-                "cd_capped_roles": fo["drag_capped_roles"],
-                # what the CHEAP screen predicted for this design, kept
-                # beside the expensive measurement so a calibration row can
-                # pair them without re-running the panel model
-                "shadow_mins": [e.get("shadow_min") for e in r["elements"]],
-                "k_g_used": co["k_ground_realization"],
-                "downforce_n": fo["downforce_n"],
-            }
-            if converged:
-                # the suggestion is offered under BOTH conventions — it
-                # is always computed from the chord-referenced
-                # downforce-positive value, never from the raw one
-                suggestion = cfd_run.suggested_k_g(
-                    clc_mean, panel["c_free"], panel["c_ground"],
-                    self.cfg)
-        except Exception as e:
-            panel_error = f"{type(e).__name__}: {e}"
+        if self.profiles_override is not None:
+            # the panel model describes the parametric section; claiming
+            # its numbers against a free-form polished shape would pair
+            # a measurement with an estimate of a DIFFERENT geometry
+            panel_error = ("free-form profiles (polished shape) — the "
+                           "panel estimate applies to the parametric "
+                           "section, not to this run")
+        else:
+            try:
+                r = analysis.analyze(self.cfg, include_geometry=False)
+                co, fo = r["coefficients"], r["forces"]
+                panel = {
+                    "c_est": co["C_downforce_estimated"],
+                    "c_free": co["C_downforce_inviscid_free"],
+                    "c_ground": co["C_downforce_inviscid_ground"],
+                    "cd_profile": co["CD_profile_stack"],
+                    # the drag comparison is only as honest as the polar
+                    # lookup behind it — carry the cap flag with the
+                    # number
+                    "cd_profile_is_lower_bound": fo[
+                        "drag_profile_is_lower_bound"],
+                    "cd_capped_roles": fo["drag_capped_roles"],
+                    # what the CHEAP screen predicted for this design,
+                    # kept beside the expensive measurement so a
+                    # calibration row can pair them without re-running
+                    # the panel model
+                    "shadow_mins": [e.get("shadow_min")
+                                    for e in r["elements"]],
+                    "k_g_used": co["k_ground_realization"],
+                    "downforce_n": fo["downforce_n"],
+                }
+                if converged:
+                    # the suggestion is offered under BOTH conventions —
+                    # it is always computed from the chord-referenced
+                    # downforce-positive value, never from the raw one
+                    suggestion = cfd_run.suggested_k_g(
+                        clc_mean, panel["c_free"], panel["c_ground"],
+                        self.cfg)
+            except Exception as e:
+                panel_error = f"{type(e).__name__}: {e}"
 
         # the near-wall caveat follows the inflation the mesh ACTUALLY
         # got (reconciled with the chain's cap/degrade), not the sizing
@@ -1032,6 +1099,16 @@ class Fluent2DJob:
                 "user_stopped": False,
                 "case_dir": str(self.case_dir),
             }
+            if self.profiles_override is not None:
+                self.result["profiles_override"] = True
+                self.result["engine_note"] = (
+                    "POLISHED FREE-FORM PROFILES: this run meshed and "
+                    "solved explicit polylines delivered by the adjoint "
+                    "polish, not the parametric section — panel "
+                    "comparison, k_g suggestion and calibration harvest "
+                    "do not apply. " + self.result["engine_note"])
+            else:
+                self.result["profiles_override"] = False
             # state stays "running" — the caller flips to done once the
             # flow-field export has landed (see _run_inner), and the
             # recirculation report and the harvest row are written there
@@ -1059,6 +1136,7 @@ class Fluent2DJob:
                 "iteration": self.iteration, "n_iters": self.n_iters,
                 "mesh_size": self.mesh_size, "n_ranks": self.n_ranks,
                 "engine": "fluent2d", "mesher": "ansys-2d",
+                "profiles_override": self.profiles_override is not None,
                 "conventions": self.conventions,
                 "settings": dict(self.settings),
                 "elapsed_s": round(elapsed, 1),

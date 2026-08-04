@@ -113,6 +113,39 @@ def dxf_bytes(cfg: StackConfig, frame: str = "installed",
     return buf.getvalue().encode("utf-8")
 
 
+def polished_dxf_bytes(polys_m: list, include_ground: bool = True) -> bytes:
+    """True-scale (mm) DXF of a POLISHED free-form stack: explicit
+    installed-frame polylines in meters (the adjoint polish's
+    deliverable), one closed LWPOLYLINE per element on its own layer
+    (E1_MAIN_POLISHED, E2_FLAP1_POLISHED, ...). Always exact polylines,
+    never fit-point splines — a spline would re-smooth the very
+    millimeter-scale shaping the polish added."""
+    import ezdxf
+    from ezdxf import units
+
+    doc = ezdxf.new("R2010", setup=False)
+    doc.units = units.MM
+    doc.header["$MEASUREMENT"] = 1
+    msp = doc.modelspace()
+    roles = ["MAIN"] + [f"FLAP{i}" for i in range(1, len(polys_m))]
+    pts_mm = [np.asarray(p, float) * 1000.0 for p in polys_m]
+    for i, (pts, role) in enumerate(zip(pts_mm, roles)):
+        layer = f"E{i + 1}_{role}_POLISHED"
+        doc.layers.add(layer, color=LAYER_COLORS[i % len(LAYER_COLORS)])
+        msp.add_lwpolyline(pts.tolist(), close=True,
+                           dxfattribs={"layer": layer})
+    if include_ground:
+        doc.layers.add("GROUND", color=8)
+        allpts = np.vstack(pts_mm)
+        x0, x1 = allpts[:, 0].min(), allpts[:, 0].max()
+        pad = 0.25 * (x1 - x0)
+        msp.add_line((x0 - pad, 0.0), (x1 + pad, 0.0),
+                     dxfattribs={"layer": "GROUND"})
+    buf = io.StringIO()
+    doc.write(buf, fmt="asc")
+    return buf.getvalue().encode("utf-8")
+
+
 def dat_text(coords: np.ndarray, name: str) -> str:
     # the name is the payload's first line: an uploaded display name with an
     # embedded newline would inject lines that Selig parsers read as real

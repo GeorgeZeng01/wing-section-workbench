@@ -1618,6 +1618,10 @@ async function captureRunSnapshots() {
       && fl2dResult.result) {
     out.fl2d = await runSnapshot(fl2dResult, () => captureFl2dFlow());
   }
+  if (typeof polishResult !== "undefined" && polishResult?.state === "done"
+      && polishResult.result) {
+    out.polish = await runSnapshot(polishResult, () => capturePolishFlow());
+  }
   for (const k of Object.keys(out)) {
     if (!out[k]) delete out[k];
   }
@@ -2268,6 +2272,9 @@ window.addEventListener("wss-themechange", () => {
   if (active.dataset.tab === "polars") renderPolars();
   if (active.dataset.tab === "optimizer") reattachOptimizer();
   if (active.dataset.tab === "fluent2d" && fl2dLast) renderFl2d(fl2dLast);
+  if (active.dataset.tab === "fluent2d" && polishLast) {
+    renderPolish(polishLast);
+  }
   if (active.dataset.tab === "pinned") {
     renderPinnedTab();
     if (!$("pinned-compare").hidden) buildCompare();
@@ -3811,6 +3818,10 @@ function updateSolverButtons() {
     runBtn.disabled = true;
     runBtn.title = "A Fluent 2D run is using the solver — wait for it or " +
                    "cancel it in the Fluent 2D tab.";
+  } else if (polishJob) {
+    runBtn.disabled = true;
+    runBtn.title = "The adjoint polish is using the solver — wait for it " +
+                   "or cancel it in the Fluent 2D tab.";
   } else if (solverForeignBusy) {
     runBtn.disabled = true;
     runBtn.title = foreignBusyTitle();
@@ -3820,6 +3831,7 @@ function updateSolverButtons() {
   }
   gateRerank();
   gateFl2dRun();
+  gatePolish();
 }
 
 /* Verify-shortlist gating: needs candidates, Docker, and a free solver */
@@ -3848,6 +3860,12 @@ async function gateRerank() {
                 "cancel it in the Fluent 2D tab.";
     return;
   }
+  if (polishJob) {
+    btn.disabled = true;
+    btn.title = "The adjoint polish is using the solver — wait for it or " +
+                "cancel it in the Fluent 2D tab.";
+    return;
+  }
   if (solverForeignBusy) {
     btn.disabled = true;
     btn.title = foreignBusyTitle();
@@ -3857,7 +3875,7 @@ async function gateRerank() {
   // the world may have moved while the probe ran — never enable against
   // stale pre-await state
   if (btn.classList.contains("busy") || state.queueActive || state.ransJob
-      || fl2dJob || solverForeignBusy) {
+      || fl2dJob || polishJob || solverForeignBusy) {
     return;
   }
   if (!a.available) {
@@ -3984,7 +4002,8 @@ async function startRansVerify() {
   // click-time single-flight: the mutex is otherwise only on button.disabled,
   // which two near-simultaneous triggers (a click plus Enter) can both pass
   // before the async ransStart lands and the server 409s
-  if (state.ransJob || state.queueActive || fl2dJob || solverForeignBusy) {
+  if (state.ransJob || state.queueActive || fl2dJob || polishJob
+      || solverForeignBusy) {
     toast("The solver is already busy — wait for the current run or the " +
           "re-rank queue to finish.", "info");
     return;
@@ -5012,6 +5031,12 @@ function gateFl2dRun() {
     btn.title = "";
     return;
   }
+  if (polishJob) {
+    btn.disabled = true;
+    btn.title = "The adjoint polish is using the solver — wait for it " +
+                "or cancel it below.";
+    return;
+  }
   if (state.ransJob || state.queueActive) {
     btn.disabled = true;
     btn.title = "The solver is busy (a RANS verify run or the re-rank " +
@@ -5051,6 +5076,7 @@ function applyFl2dAvailabilityNote() {
     note.textContent = `ANSYS toolchain unavailable — ${missing}`;
   }
   gateFl2dRun();
+  gatePolish();
 }
 
 async function refreshFl2dAvailability() {
@@ -5067,9 +5093,19 @@ async function refreshFl2dAvailability() {
       const s = cur.job_id ? await api.ransStatus(cur.job_id) : null;
       const live = !!s && ["pending", "running"].includes(s.state);
       // a live run of another engine is not adopted, but the Run button
-      // must still reflect the busy solver instead of 409ing on click
-      solverForeignBusy = live && s.engine !== "fluent2d" ? "rans" : null;
-      if (live && s.engine === "fluent2d") {
+      // must still reflect the busy solver instead of 409ing on click;
+      // a live POLISH is adopted into its own panel below
+      solverForeignBusy = live && s.engine !== "fluent2d"
+        && s.engine !== "polish" ? "rans" : null;
+      if (live && s.engine === "polish" && !polishJob) {
+        polishJob = cur.job_id;
+        $("btn-polish-cancel").disabled = false;
+        $("polish-result").innerHTML =
+          '<div class="empty-note">Re-attached to a running adjoint ' +
+          'polish…</div>';
+        updateSolverButtons();
+        pollPolish();
+      } else if (live && s.engine === "fluent2d") {
         fl2dJob = cur.job_id;
         fl2dConventions = s.conventions ?? null;
         fl2dRev = null;             // start revision is unverifiable
@@ -5111,7 +5147,8 @@ $("btn-fl2d-cancel").addEventListener("click", async () => {
 async function startFl2d() {
   // click-time single-flight, same reasoning as startRansVerify: the
   // disabled flag alone cannot stop a click+Enter pair racing the await
-  if (fl2dJob || state.ransJob || state.queueActive || solverForeignBusy) {
+  if (fl2dJob || polishJob || state.ransJob || state.queueActive
+      || solverForeignBusy) {
     toast("The solver is already busy — wait for the current run or the " +
           "re-rank queue to finish.", "info");
     return;
@@ -5197,12 +5234,17 @@ function pollFl2d() {
           // one-click k_g calibration (same guard the RANS tab has). A run
           // adopted mid-flight has no verifiable start revision, so it
           // must not present as fresh either — it keeps the re-attached
-          // wording, which also disables the one-click k_g
-          const prov = fl2dAdoptedLive ? "reattached"
+          // wording, which also disables the one-click k_g. A run started
+          // as the polish's re-verification is labeled as exactly that.
+          const prov = (fl2dReverifyOf && fl2dReverifyOf.jobId === s.id)
+            ? "polish"
+            : fl2dAdoptedLive ? "reattached"
             : (fl2dRev != null && configRevision !== fl2dRev
                ? "edited" : "fresh");
           renderFl2dResult(s, { provenance: prov });
           fl2dFlow.show(s.id);
+          if (prov === "polish") renderPolishReverify(s);
+          gatePolish();   // a finished parametric run is a fresh seed
         }
       }
     } catch (e) {
@@ -5276,6 +5318,10 @@ function renderFl2dResult(s, { provenance = "fresh" } = {}) {
       : provenance === "edited"
       ? "the configuration was edited while this run solved — the numbers " +
         "below describe the design at start; re-run"
+      : provenance === "polish"
+      ? "re-verification of the POLISHED shape — this run meshed and " +
+        "solved the adjoint-delivered profiles on a fresh mesh; the " +
+        "panel comparison does not apply to a free-form contour"
       : "re-attached result from an earlier run — it may describe an " +
         "earlier configuration; re-run to be sure";
     $("fl2d-stale").hidden = false;
@@ -6053,6 +6099,375 @@ async function captureFl2dFlow() {
   if (!Object.keys(out).length) return null;
   fl2dFlow.cache = out;   // later saves skip the refetch
   return out;
+}
+
+/* ==================== adjoint polish (final stage) ==================== */
+// var, not let: the shared solver gates (updateSolverButtons, gateFl2dRun,
+// gateRerank) reference these and can run during module evaluation — a
+// hoisted undefined reads falsy there, where a let would throw
+var polishJob = null;        // live job id while a polish runs
+var polishLast = null;       // latest snapshot (chart re-ink on theme flip)
+var polishResult = null;     // terminal done snapshot
+var fl2dReverifyOf = null;   // {polishId, jobId} while a re-verify runs
+
+function gatePolish() {
+  const btn = $("btn-polish-run");
+  const note = $("polish-note");
+  const seed = (typeof fl2dResult !== "undefined") ? fl2dResult : null;
+  const seedOk = seed?.state === "done" && seed.result
+    && !seed.result.profiles_override;
+  if (polishJob) {
+    btn.disabled = true;
+    btn.title = "";
+    return;
+  }
+  if (state.ransJob || state.queueActive || fl2dJob || solverForeignBusy) {
+    btn.disabled = true;
+    btn.title = "The solver is busy — wait for the current run or cancel " +
+                "it first.";
+    return;
+  }
+  if (!fl2dAvail?.fluent?.available) {
+    btn.disabled = true;
+    btn.title = "Needs a licensed local Fluent — the note beside Run " +
+                "Fluent 2D says what is missing.";
+    return;
+  }
+  if (!seedOk) {
+    btn.disabled = true;
+    btn.title = seed?.result?.profiles_override
+      ? "This run re-verified an already-polished shape — polish seeds " +
+        "from a parametric verification run."
+      : "Finish an ANSYS 2D verification run first — the polish reloads " +
+        "its solved case.";
+    note.textContent = seed?.result?.profiles_override
+      ? "the run above solved polished profiles — seed the polish from " +
+        "a parametric verification run"
+      : "final stage — needs a finished ANSYS 2D verification run from " +
+        "this session as its seed";
+    return;
+  }
+  btn.disabled = false;
+  btn.title = "";
+  const conv = seed.result.conventions === "studio"
+    ? "studio conventions" : "default conventions";
+  note.textContent = `seed: run ${seed.id.slice(0, 8)} — ` +
+    `Cl ${numf(seed.result.cl_rans, 3)}, Cd ${numf(seed.result.cd_rans, 4)} ` +
+    `(${conv}${seed.result.converged ? "" : ", NOT converged"})`;
+}
+
+function polishReadInt(id, lo, hi) {
+  const v = parseFloat($(id).value);
+  if (!Number.isFinite(v) || v < lo || v > hi) return null;
+  return v;
+}
+
+$("btn-polish-run").addEventListener("click", startPolish);
+$("btn-polish-cancel").addEventListener("click", async () => {
+  if (polishJob) { try { await api.ransCancel(polishJob); } catch {} }
+});
+
+async function startPolish() {
+  const seed = (typeof fl2dResult !== "undefined") ? fl2dResult : null;
+  if (polishJob || fl2dJob || state.ransJob || state.queueActive
+      || solverForeignBusy || !seed || seed.state !== "done") {
+    toast("The solver is busy or there is no finished verification run " +
+          "to seed from.", "info");
+    return;
+  }
+  const k = polishReadInt("polish-k", 0, 10);
+  const iters = polishReadInt("polish-iters", 1, 60);
+  const flowIters = polishReadInt("polish-flow-iters", 100, 5000);
+  const adjIters = polishReadInt("polish-adjoint-iters", 50, 5000);
+  const margin = polishReadInt("polish-margin", 1, 15);
+  const settle = polishReadInt("polish-settle", 50, 2000);
+  if ([k, iters, flowIters, adjIters, margin, settle].some(v => v == null)) {
+    toast("A polish setting is out of range — the tooltips state each " +
+          "field's limits.");
+    return;
+  }
+  $("btn-polish-run").disabled = true;   // close the race before the await
+  try {
+    const { job_id } = await api.polishStart(seed.id, {
+      drag_exchange_k: k, design_iters: iters, flow_iters: flowIters,
+      adjoint_iters: adjIters, margin_pct: margin, settle_iters: settle,
+    });
+    polishJob = job_id;
+    polishResult = null;
+    $("btn-polish-cancel").disabled = false;
+    $("polish-conv").innerHTML = "";
+    $("polish-charts").classList.add("empty");
+    $("polish-actions").hidden = true;
+    $("polish-result").innerHTML =
+      '<div class="empty-note">Polish started — reloading the solved ' +
+      'case, then design iterations (each a full flow + adjoint solve; ' +
+      'expect minutes per iteration)…</div>';
+    updateSolverButtons();
+    pollPolish();
+  } catch (e) {
+    toast(`Could not start the polish: ${e.message}`);
+    updateSolverButtons();
+  }
+}
+
+var polishPollTimer = null;
+function pollPolish() {
+  clearInterval(polishPollTimer);
+  let misses = 0;
+  polishPollTimer = setInterval(async () => {
+    try {
+      const s = await api.ransStatus(polishJob);
+      misses = 0;
+      renderPolish(s);
+      if (["done", "failed", "cancelled"].includes(s.state)) {
+        clearInterval(polishPollTimer);
+        polishJob = null;
+        $("btn-polish-cancel").disabled = true;
+        updateSolverButtons();
+        if (s.state === "failed") {
+          toast("Adjoint polish failed — details in the Fluent 2D tab.",
+                "err");
+          $("polish-result").innerHTML = "";
+          const d = document.createElement("div");
+          d.className = "warning-item crit";
+          d.style.whiteSpace = "pre-wrap";
+          d.textContent = s.error || "polish failed";
+          $("polish-result").appendChild(d);
+        }
+        if (s.state === "cancelled") {
+          $("polish-result").innerHTML =
+            '<div class="empty-note">Polish cancelled.</div>';
+        }
+        if (s.state === "done") {
+          polishResult = s;
+          renderPolishResult(s);
+        }
+      }
+    } catch (e) {
+      misses++;
+      if (e.status !== 404 && misses < 5) return;
+      clearInterval(polishPollTimer);
+      polishJob = null;
+      $("btn-polish-cancel").disabled = true;
+      updateSolverButtons();
+      toast(`Lost the polish job: ${e.message} — reopen this tab to ` +
+            `re-attach if it is still running.`);
+    }
+  }, 1000);
+}
+
+function renderPolish(s) {
+  polishLast = s;
+  const pct = Math.round((s.progress || 0) * 100);
+  $("polish-progress").style.width = pct + "%";
+  $("polish-progress").classList.toggle("done", s.state === "done");
+  const bits = [s.state === "running" ? (s.phase || "running") : s.state];
+  if (s.iteration) bits.push(`design iteration ${s.iteration} / ${s.n_iters}`);
+  if (s.latest) {
+    bits.push(`J ${numf(s.latest.j_n, 1)} N`,
+              `ΔF ${numf(s.latest.downforce_n, 1)} N`,
+              s.latest.compliant ? "compliant" : "RULE VIOLATION");
+  }
+  bits.push(`${Math.round(+s.elapsed_s || 0)}s`);
+  $("polish-status").textContent = bits.join(" · ");
+  if (s.history && s.history.length) {
+    $("polish-charts").classList.remove("empty");
+    const base = s.result?.baseline;
+    lineChart($("polish-conv"), {
+      series: [
+        { name: "J = ΔF − k·drag", color: SERIES[0],
+          x: s.history.map(h => h.iter), y: s.history.map(h => h.j_n) },
+        { name: "downforce", color: SERIES[1],
+          x: s.history.map(h => h.iter),
+          y: s.history.map(h => h.downforce_n) },
+      ],
+      xLabel: "design iteration",
+      yLabel: "newtons (credible, span-scaled)",
+      targetY: base ? base.j_n : undefined,
+      targetLabel: base ? `baseline J ${numf(base.j_n, 1)} N` : undefined,
+      height: 180,
+    });
+  }
+}
+
+function renderPolishResult(s) {
+  const r = s.result;
+  if (!r) return;
+  const host = $("polish-result");
+  const kv = ([k, v]) => `<div class="kv"><span>${k}</span><b>${v}</b></div>`;
+  const sgn = (v, d = 1, unit = "") => v == null ? "–"
+    : `${v > 0 ? "+" : ""}${(+v).toFixed(d)}${unit}`;
+  const rows = [];
+  const b = r.baseline || {};
+  rows.push(["Baseline (re-settled seed)",
+    `Cl ${numf(b.cl, 3)} · Cd ${numf(b.cd, 4)} · ` +
+    `ΔF ${numf(b.downforce_n, 1)} N · drag ${numf(b.drag_n, 1)} N · ` +
+    `J ${numf(b.j_n, 1)} N`]);
+  if (r.improved && r.polished) {
+    const p = r.polished, d = r.delta || {};
+    rows.push([`Polished (iteration ${p.iteration})`,
+      `Cl ${numf(p.cl, 3)} · Cd ${numf(p.cd, 4)} · ` +
+      `ΔF ${numf(p.downforce_n, 1)} N · drag ${numf(p.drag_n, 1)} N · ` +
+      `J ${numf(p.j_n, 1)} N`]);
+    rows.push(["Gain (morphed mesh — provisional)",
+      `ΔF ${sgn(d.downforce_n, 1, " N")} (${sgn(d.cl_pct)}%) · ` +
+      `drag ${sgn(d.drag_n, 1, " N")} (${sgn(d.cd_pct)}%) · ` +
+      `J ${sgn(d.j_n, 1, " N")}`]);
+    if (r.displacement) {
+      rows.push(["Morph displacement",
+        `max ${numf(r.displacement.max_disp_mm, 2)} mm · ` +
+        `mean ${numf(r.displacement.mean_disp_mm, 2)} mm`]);
+    }
+  }
+  rows.push(["Exchange rate k", `${numf(r.k_exchange, 2)} N drag per N ` +
+    `downforce`]);
+  rows.push(["Stopped because", esc(r.stop_reason || "–")]);
+  let html = rows.map(kv).join("");
+  if (!r.improved) {
+    html += '<div class="warning-item">No compliant improvement found — ' +
+      'the seed shape already sits at (or the first step left) the ' +
+      'legality/buildability boundary under this objective.</div>';
+  }
+  if (r.rules) {
+    if (r.rules.ok) {
+      const knife = (r.rules.rows || []).some(x => x.le_radius_knife_edge);
+      html += `<div class="note">Rules: compliant — LE radius, TE ` +
+        `thickness and the aft-thickness floor re-measured on the ` +
+        `polished contour${knife
+          ? " (a nose sits knife-edge close to its radius floor)"
+          : ""}.</div>`;
+    } else {
+      for (const v of r.rules.violations || []) {
+        html += `<div class="warning-item crit">${esc(v.rule)}: ` +
+          `${esc(v.value_mm)} mm vs limit ${esc(v.limit_mm)} mm ` +
+          `(by ${esc(v.by_mm)} mm)${v.element
+            ? ` — ${esc(v.element)}` : ""}</div>`;
+      }
+    }
+    for (const u of r.rules.unverified || []) {
+      html += `<div class="warning-item">${esc(u.rule)} on ` +
+        `${esc(u.element)} could not be verified: ${esc(u.reason)}</div>`;
+    }
+  }
+  if (r.wall_verdict) {
+    html += `<div class="note">Polished-flow attachment: ` +
+      `${esc(r.wall_verdict)}</div>`;
+  }
+  if (r.field_verdict?.verdict) {
+    html += `<div class="note">${esc(r.field_verdict.verdict)}</div>`;
+  }
+  for (const c of r.cautions || []) {
+    html += `<div class="warning-item">${esc(c)}</div>`;
+  }
+  host.innerHTML = html;
+  $("polish-actions").hidden = false;
+  $("btn-polish-reverify").disabled = !r.improved;
+  $("btn-polish-dxf").disabled = !r.improved;
+  $("btn-polish-case").disabled = !(r.artifacts?.case_written);
+  gatePolish();
+}
+
+function renderPolishReverify(s) {
+  // the re-verified measurement, appended to the polish card: the fresh-
+  // mesh numbers beside the seed's — the honest before/after
+  if (!polishResult?.result || !s?.result) return;
+  const host = $("polish-result");
+  const seed = polishResult.result.seed || {};
+  const div = document.createElement("div");
+  div.className = "note";
+  const dcl = (seed.cl_rans && s.result.cl_rans != null)
+    ? (s.result.cl_rans / seed.cl_rans - 1) * 100 : null;
+  div.textContent =
+    `Re-verified on a fresh mesh: Cl ${numf(s.result.cl_rans, 3)} · ` +
+    `Cd ${numf(s.result.cd_rans, 4)} · ` +
+    `${numf(s.result.downforce_n_at_rans_cl, 1)} N` +
+    (dcl == null ? "" : ` — ${dcl > 0 ? "+" : ""}${dcl.toFixed(1)}% vs ` +
+      `the seed verification (${s.result.converged
+        ? "converged" : "NOT converged — provisional"})`);
+  host.appendChild(div);
+}
+
+$("btn-polish-reverify").addEventListener("click", async () => {
+  if (!polishResult) return;
+  if (fl2dJob || polishJob || state.ransJob || state.queueActive
+      || solverForeignBusy) {
+    toast("The solver is busy — wait for the current run first.", "info");
+    return;
+  }
+  const btn = $("btn-polish-reverify");
+  btn.disabled = true;
+  try {
+    const { job_id } = await api.polishReverify(polishResult.id);
+    fl2dReverifyOf = { polishId: polishResult.id, jobId: job_id };
+    // hand the run to the standard Fluent 2D machinery: same poll, same
+    // chart, same verdict rendering — provenance marks it as the
+    // polished shape's re-verification
+    fl2dJob = job_id;
+    fl2dConventions = "studio";
+    fl2dCEst = null;          // panel estimate does not apply
+    fl2dRev = null;
+    fl2dAdoptedLive = false;
+    fl2dFlow.reset();
+    $("btn-fl2d-cancel").disabled = false;
+    fl2dLockControls(true);
+    $("fl2d-stale").hidden = true;
+    $("fl2d-flow").hidden = true;
+    $("fl2d-conv").innerHTML = "";
+    $("fl2d-charts").classList.add("empty");
+    $("fl2d-result").innerHTML =
+      '<div class="empty-note">Re-verifying the polished shape — fresh ' +
+      'ANSYS mesh on the polished profiles, then the standard studio-' +
+      'conventions solve…</div>';
+    updateSolverButtons();
+    pollFl2d();
+  } catch (e) {
+    toast(`Could not start the re-verification: ${e.message}`);
+    btn.disabled = false;
+  }
+});
+
+$("btn-polish-dxf").addEventListener("click", async () => {
+  if (!polishResult) return;
+  try {
+    const r = await api.polishExportDxf(polishResult.id);
+    toast(`Polished DXF saved: ${r.filename} (in ${r.dir})`, "ok", 7000);
+  } catch (e) {
+    toast(`DXF export failed: ${e.message}`, "err");
+  }
+});
+
+$("btn-polish-case").addEventListener("click", async () => {
+  if (!polishResult) return;
+  try {
+    const r = await api.ransExportFluent(polishResult.id);
+    toast(`Polished ANSYS case exported: ${r.filename}`, "ok", 7000);
+  } catch (e) {
+    toast(`Case export failed: ${e.message}`, "err");
+  }
+});
+
+async function capturePolishFlow() {
+  const id = polishResult?.id;
+  if (!id || !polishResult?.result?.artifacts?.flow_exported) return null;
+  const grab = async (field) => {
+    try {
+      const ctl = new AbortController();
+      const t = setTimeout(() => ctl.abort(), 5000);
+      const theme = document.documentElement.dataset.theme === "light"
+        ? "light" : "dark";
+      const res = await fetch(
+        `/api/rans/${id}/flow?field=${field}&theme=${theme}`,
+        { signal: ctl.signal });
+      clearTimeout(t);
+      if (res.ok) return await blobToDataURL(await res.blob());
+    } catch { /* best effort */ }
+    return null;
+  };
+  const [umag, cp] = await Promise.all([grab("umag"), grab("cp")]);
+  const out = {};
+  if (umag) out.umag = umag;
+  if (cp) out.cp = cp;
+  return Object.keys(out).length ? out : null;
 }
 
 $("btn-save").addEventListener("click", saveProject);
