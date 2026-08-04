@@ -1,7 +1,7 @@
 /* Wing Section Studio — application wiring. */
 
 import { api, downloadExport } from "./api.js";
-import { lineChart, airfoilPreview } from "./charts.js";
+import { lineChart, airfoilPreview, redrawStaleCharts } from "./charts.js";
 import { Viewport, SERIES } from "./viewport.js";
 import { mountFlowAnim } from "./flowanim.js";
 
@@ -1538,6 +1538,9 @@ document.querySelectorAll(".tab").forEach((t) => {
       x.classList.toggle("active", x === t));
     document.querySelectorAll(".tab-page").forEach(p =>
       p.classList.toggle("active", p.id === `tab-${t.dataset.tab}`));
+    // charts drawn while this tab was hidden baked the 480px fallback into
+    // their viewBox; replay them now that the hosts have real widths
+    redrawStaleCharts();
     if (t.dataset.tab === "polars") renderPolars();
     if (t.dataset.tab === "screener") prefillScreener();
     if (t.dataset.tab === "rans") refreshRansAvailability();
@@ -1562,6 +1565,10 @@ window.addEventListener("wss-themechange", () => {
   if (state.analysis) { renderResults(state.analysis); renderCp(state.analysis); }
   if (state.lastSweep) renderSweep(state.lastSweep);
   if (state.screenRows) renderScreenTable();
+  // finished results carry resolved colors too; a live optimizer poll rewrites
+  // its charts every tick, so only a settled result needs the re-ink here
+  if (state.optResult && !state.optJob) renderOptimizer(state.optResult);
+  if (state.ransResult) renderRans(state.ransResult);
   const active = document.querySelector(".tab.active");
   if (!active) return;
   if (active.dataset.tab === "polars") renderPolars();

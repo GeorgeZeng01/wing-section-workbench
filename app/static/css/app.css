@@ -249,6 +249,7 @@ body {
 .f-label {
   font-size: var(--fs-0); letter-spacing: 0.07em; text-transform: uppercase;
   color: var(--ink-3); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
 }
 .f-wrap {
   display: flex; align-items: center; gap: 5px;
@@ -672,6 +673,7 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
   font: var(--fs-0) var(--mono); color: var(--ink);
   box-shadow: var(--shadow-2);
   z-index: 20; min-width: 110px;
+  max-width: calc(100% - 8px);
 }
 .chart-tip .tip-x { color: var(--ink-3); margin-bottom: 3px; }
 .tip-swatch { display: inline-block; width: 8px; height: 8px;
@@ -709,7 +711,12 @@ input::-webkit-outer-spin-button, input::-webkit-inner-spin-button
 }
 .progress > div.done { background: var(--good); }
 #opt-hints .warning-item { margin: 8px 0; }
-.opt-charts { display: grid; grid-auto-rows: minmax(190px, 1fr); gap: 8px; min-width: 0; }
+/* rows size to content: the optimizer svgs are fixed-height (128/148px), so
+   a 190px row minimum only manufactured dead space between charts — and gave
+   the two-line #opt-pareto-note a 190px slab of its own. align-content packs
+   the rows at the top, else the parent grid's stretch re-inflates them */
+.opt-charts { display: grid; gap: 8px; min-width: 0; align-content: start; }
+.opt-charts > .chart-host { min-height: 0; }
 
 /* generic empty-chart state: before a run, a chart area is one large blank
    panel — show a centered placeholder instead and hide the empty hosts.

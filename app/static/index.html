@@ -11,7 +11,7 @@
 </script>
 <link rel="icon" href="/static/favicon.ico" sizes="any">
 <link rel="icon" type="image/png" href="/static/favicon.png">
-<link rel="stylesheet" href="/static/css/app.css?v=26">
+<link rel="stylesheet" href="/static/css/app.css?v=27">
 </head>
 <body>
 
@@ -357,8 +357,8 @@
               </select><i></i></span></label>
             <label class="field" id="opt-target-field"><span class="f-label">Target</span>
               <span class="f-wrap"><input id="opt-target" type="number" step="10" value="250"><i>N</i></span></label>
-            <label class="field" title="The trade the search actually makes: newtons of downforce given up to remove one newton of drag. 0.25 (the default) is the FSAE rule of thumb that aero pays when its L/D beats about 4. 1.0 is an even trade. 0.017 reproduces the old 'Drag penalty 0.1' behaviour, where drag was nearly free and the search maximized downforce at any drag cost. Set it from what your car wants — a lap-time sensitivity beats a guess.">
-              <span class="f-label">Drag exchange rate</span>
+            <label class="field" title="Drag exchange rate: the trade the search actually makes — newtons of downforce given up to remove one newton of drag. 0.25 (the default) is the FSAE rule of thumb that aero pays when its L/D beats about 4. 1.0 is an even trade. 0.017 reproduces the old 'Drag penalty 0.1' behaviour, where drag was nearly free and the search maximized downforce at any drag cost. Set it from what your car wants — a lap-time sensitivity beats a guess.">
+              <span class="f-label">Drag exchange</span>
               <span class="f-wrap"><input id="opt-drag-k" type="number" step="0.05" min="0" max="10" value="0.25"><i>N/N</i></span></label>
             <label class="field"
                    title="Optional efficiency floor: candidates must hold at least this downforce/drag ratio. Blank = off. Useful with Maximize downforce — pure maximization otherwise pays any drag price for the last newton.">
@@ -1059,6 +1059,6 @@
 </template>
 
 <script type="module" src="/static/js/shell.js?v=26"></script>
-<script type="module" src="/static/js/app.js?v=28"></script>
+<script type="module" src="/static/js/app.js?v=29"></script>
 </body>
 </html>

@@ -17,6 +17,47 @@ function el(tag, attrs = {}, parent = null) {
   return n;
 }
 
+// A chart drawn while its tab is hidden measures clientWidth 0 and bakes the
+// 480px fallback into its viewBox; nothing used to redraw it on tab
+// activation, so the svg letterboxed and the hover landed off-register. The
+// registry remembers each container's last spec and re-renders whenever the
+// measured width stops matching the baked one (tab activation, window resize,
+// breakpoint collapse). Geometry only: specs carry colors resolved at build
+// time, so re-inking on theme flips stays the wss-themechange listener's job.
+const REDRAW = new WeakMap();
+const WATCHED = new Set();   // the ~10 stable chart hosts; never grows past them
+let RO = null;
+function replayIfStale(container) {
+  const rec = REDRAW.get(container);
+  if (!rec) return;
+  const cw = container.clientWidth;
+  // zero width = still hidden; the clamp mirrors lineChart's, so a replay
+  // always lands on the new W and neither caller can loop
+  if (cw > 0 && Math.max(cw, 280) !== rec.W) lineChart(container, rec.spec);
+}
+function watchRedraw(container, spec, W) {
+  if (typeof ResizeObserver === "undefined") return;
+  if (!RO) {
+    RO = new ResizeObserver((entries) => {
+      for (const entry of entries) replayIfStale(entry.target);
+    });
+  }
+  if (!REDRAW.has(container)) { RO.observe(container); WATCHED.add(container); }
+  REDRAW.set(container, { spec, W });
+}
+
+// Tab activation cannot rely on the observer alone: its callbacks ride the
+// rendering pipeline, so a page that is not compositing (background window,
+// hidden pane) delivers them late. The tab handler calls this sweep
+// synchronously after flipping the active classes — layout is current, no
+// frame needed.
+export function redrawStaleCharts() {
+  for (const c of WATCHED) {
+    if (!c.isConnected) { WATCHED.delete(c); continue; }
+    replayIfStale(c);
+  }
+}
+
 function niceTicks(lo, hi, n = 5) {
   if (!isFinite(lo) || !isFinite(hi)) return [0, 1];
   if (lo === hi) { lo -= 1; hi += 1; }
@@ -55,6 +96,8 @@ export function lineChart(container, spec) {
   container.innerHTML = "";
   const W = Math.max(container.clientWidth || 480, 280);
   const H = spec.height || Math.max(container.clientHeight || 220, 180);
+  // registered before the no-data return so empty charts self-heal too
+  watchRedraw(container, spec, W);
   const m = { t: 14, r: 14, b: 34, l: 52 };
   const iw = W - m.l - m.r, ih = H - m.t - m.b;
 
@@ -197,7 +240,11 @@ export function lineChart(container, spec) {
 
   svg.addEventListener("pointermove", (ev) => {
     const r = svg.getBoundingClientRect();
-    const px = (ev.clientX - r.left) * (W / r.width);
+    // invert the svg's xMidYMid-meet mapping: when the rect and viewBox
+    // disagree (a chart not yet replayed at its real width), the drawing is
+    // scaled by sc and centered, not stretched
+    const sc = Math.min(r.width / W, r.height / H);
+    const px = (ev.clientX - r.left - (r.width - W * sc) / 2) / sc;
     if (px < m.l || px > m.l + iw) { hover.style.display = "none";
       tipG.style.display = "none"; return; }
     const xv = x0 + ((px - m.l) / iw) * (x1 - x0);
@@ -224,7 +271,8 @@ export function lineChart(container, spec) {
                      rows.map(r => `<div>${r}</div>`).join("");
     tipG.style.display = "";
     const cx = (ev.clientX - r.left);
-    tipG.style.left = Math.min(cx + 14, r.width - 150) + "px";
+    tipG.style.left =
+      Math.max(4, Math.min(cx + 14, r.width - tipG.offsetWidth - 4)) + "px";
     tipG.style.top = "8px";
   });
   svg.addEventListener("pointerleave", () => {

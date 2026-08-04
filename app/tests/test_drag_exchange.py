@@ -76,9 +76,10 @@ check("the rate drives MAX mode only; target mode keeps the legacy weight "
       "(it balances by construction — attain the level, descend on drag)",
       '"max_downforce"' in js.split("const dragK")[1][:400]
       and ": 0.1;" in js.split("const dragK")[1][:400])
-check("the panel's field is labelled as a rate, not an opaque penalty",
-      'id="opt-drag-k"' in html and "Drag exchange rate" in html
-      and 'value="0.25"' in html)
+check("the panel's field is labelled as a rate, not an opaque penalty "
+      "(short span so the 300px column never clips; full name in the title)",
+      'id="opt-drag-k"' in html and ">Drag exchange</span>" in html
+      and "Drag exchange rate" in html and 'value="0.25"' in html)
 check("the old opaque field is gone everywhere",
       "opt-drag-w" not in js and "opt-drag-w" not in html)
 check("the rate persists with the rest of the panel",
