@@ -831,9 +831,13 @@ try:
           s_pm == 200 and s_pg == 200
           and (r_pg.get("pins") or [{}])[0].get("config") == GOOD,
           f"(got {s_pm}/{s_pg})")
+    # two near-cap .dat entries per pin: 48 x ~238 KB ~ 11.4 MB — over the
+    # 8 MB store cap while staying under the 16 MB streamed body cap, so
+    # the refusal exercised is the store's, not the body reader's
     s_pb, r_pb = call("PUT", "/api/pinned-designs", {"pins": [
         {**_marker, "id": f"{i:012x}", "label": f"big {i}",
-         "custom_airfoils": {f"custom:pad{i}": "x" * 119_000}}
+         "custom_airfoils": {f"custom:pada{i}": "x" * 119_000,
+                             f"custom:padb{i}": "x" * 119_000}}
         for i in range(48)]})
     check("pinned designs: an over-bytes library -> 422 before it lands",
           s_pb == 422 and "too large" in str((r_pb or {}).get("detail")),
