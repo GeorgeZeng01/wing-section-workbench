@@ -144,7 +144,22 @@ DEADZONE_F = 0.008         # descend: |downforce-D*|/D* treated as "on level"
                            # (same width as the early-stop tolerance, so the
                            # simplex can slide ALONG the on-target manifold
                            # trading the last 0.1% of tracking for drag)
-DESCEND_DRAG_W = 0.30      # descend drag-weight floor (user's if higher)
+# Descend drag weight — PINNED, not user-scaled. At a held level, drag
+# minimization is rate-independent: any positive weight orders equal-level
+# designs identically, so the weight's only real effect is how far OFF the
+# level the search may walk (equilibrium f_dev = w*(d drag/d D)/12 against
+# the 60*f_dev^2 spring). The exchange front's local slope was MEASURED at
+# ~0.43 N/N on the two-element bench — at a "capped" w = 2.0 that is a 7%
+# walk (232.5 N delivered on a 250 N target), a real violation of the
+# mode's held-level contract, where 0.30 walks ~1.9% incl. the deadzone
+# and matches every recorded target run (the suites' 3% checks were
+# validated at exactly this value). The user's exchange rate still drives
+# max mode, the Pareto marker and the measured-drag re-rank; in target
+# mode the level is the contract, so the rate is deliberately inert
+# in-search. This also fixes the latent hazard where an API caller passing
+# drag_weight = 60 walked a target run ~20% off its level (the old code
+# took max(w, 0.30)).
+DESCEND_DRAG_W = 0.30
 
 # clean-pool band gate slack. The pool gate tests RAW band membership, not
 # the smooth search penalty: 40*x^2 < PEN_OK would admit a design ~11% past
@@ -885,14 +900,20 @@ class Job:
             f_dev = max(0.0, abs(ev["downforce_n"] - self.dstar) / scale
                         - DEADZONE_F)
             j = (60.0 * f_dev ** 2
-                 + max(w_drag, DESCEND_DRAG_W) * ev["drag_n"] / scale * 10.0
+                 + DESCEND_DRAG_W * ev["drag_n"] / scale * 10.0
                  + j_pen)
         else:
             # the target term must dominate realistic drag savings inside
             # ~1% of target, or induced drag (which falls with downforce^2)
-            # would pull the optimum a few percent under the requested load
+            # would pull the optimum a few percent under the requested load.
+            # The attain phase is a root-find toward the target: its drag
+            # term shapes the approach path only, so the user's rate is
+            # capped at the descend floor here — uncapped, a high k pulls
+            # the standing optimum off-target past the early-stop tolerance
+            # and starves the on-target pool that defines D*
             j = (60.0 * f_err ** 2
-                 + w_drag * ev["drag_n"] / max(abs(target), 1.0) * 10.0
+                 + min(w_drag, DESCEND_DRAG_W)
+                 * ev["drag_n"] / max(abs(target), 1.0) * 10.0
                  + j_pen)
 
         # the clean-pool gate is RAW band membership: the smooth quadratic
@@ -993,7 +1014,7 @@ class Job:
         scale = max(abs(dstar), 1.0)
         f_dev = max(0.0, abs(a["downforce_n"] - dstar) / scale - DEADZONE_F)
         return (60.0 * f_dev ** 2
-                + max(w_drag, DESCEND_DRAG_W) * a["drag_n"] / scale * 10.0
+                + DESCEND_DRAG_W * a["drag_n"] / scale * 10.0
                 + a["penalty"])
 
     def _resolve_dstar(self) -> None:
@@ -1189,7 +1210,9 @@ class Job:
             cfg_c = apply_vector(self.config, self.variables,
                                  np.array(a["x"]), self.shortlists)
             # J is the FINAL-objective re-score: the archive mixes phase
-            # objectives, and "candidate #1 has the lowest J" must stay true
+            # objectives, and "candidate #1 has the lowest J" must stay
+            # true (in max mode: the lowest credible-J — the output filter
+            # re-ranks by the calibration-derated expectation)
             entry = {"rank": rank, "J": round(self._rescore(a), 4),
                      "downforce_n": a["downforce_n"], "drag_n": a["drag_n"],
                      "x": a["x"], "config": cfg_c}
@@ -1203,6 +1226,17 @@ class Job:
                 conf_min = min(e["nf_confidence"] for e in els)
                 entry["summary"] = {
                     "downforce_n": r["forces"]["downforce_n"],
+                    # the calibration-informed expectation beside the claim,
+                    # and the bound marks the report already shows — cards
+                    # must not present a floored drag as a measurement
+                    "credible_downforce_n":
+                        r["forces"]["credible_downforce_n"],
+                    "credible_gain": r["forces"]["credible_gain"],
+                    "credible_underclaim_possible":
+                        r["forces"]["credible_underclaim_possible"],
+                    "drag_is_lower_bound":
+                        r["forces"]["drag_profile_is_lower_bound"],
+                    "drag_capped_roles": r["forces"]["drag_capped_roles"],
                     "drag_total_n": r["forces"]["drag_total_n"],
                     "efficiency_ld": r["forces"]["efficiency_ld"],
                     "warnings": len(r["warnings"]),
@@ -1321,12 +1355,31 @@ class Job:
                 continue
             kept.append(entry)
         if any(drops.values()):
-            # a dropped winner must promote the best SURVIVOR by the final
-            # objective, not whatever diversity pick happened to be next
-            kept.sort(key=lambda e: e["J"])
             self._drop_stats = {**drops, "best_frac": best_frac,
                                 "best_conf": best_conf, "best_ld": best_ld,
                                 "best_shadow": best_shadow}
+        if self.objective_mode == "max_downforce":
+            # rank by the calibration-derated expectation, not the paper
+            # claim: J with D -> g*D, algebraically J + 60*D*(1-g)/dscale.
+            # Identical to J when every survivor is clean (g = 1), so the
+            # already-clean case keeps its order; a winner riding the load
+            # line stops out-ranking one that keeps its downforce after
+            # RANS. Target mode keeps its rank: candidates sit on one level
+            # by construction and differentiate by drag — the credible
+            # value is display-only there. (Survivors here always carry a
+            # summary: max mode is guarded, and summary-less entries were
+            # dropped above.)
+            for entry in kept:
+                g = analysis.credible_gain(entry["summary"].get("frac_max"))
+                entry["J_credible"] = round(
+                    entry["J"]
+                    + 60.0 * entry["downforce_n"] * (1.0 - g) / self.dscale,
+                    4)
+            kept.sort(key=lambda e: e["J_credible"])
+        elif any(drops.values()):
+            # a dropped winner must promote the best SURVIVOR by the final
+            # objective, not whatever diversity pick happened to be next
+            kept.sort(key=lambda e: e["J"])
         for i, entry in enumerate(kept, 1):
             entry["rank"] = i
         return kept
@@ -1390,6 +1443,13 @@ class Job:
                 "drag_n": r["forces"]["drag_total_n"],
                 "x": a["x"], "config": cfg_c,
                 "summary": {
+                    "credible_downforce_n":
+                        r["forces"]["credible_downforce_n"],
+                    "credible_gain": r["forces"]["credible_gain"],
+                    "credible_underclaim_possible":
+                        r["forces"]["credible_underclaim_possible"],
+                    "drag_is_lower_bound":
+                        r["forces"]["drag_profile_is_lower_bound"],
                     "efficiency_ld": r["forces"]["efficiency_ld"],
                     "warnings": len(r["warnings"]),
                     "confidence_min": round(conf_min, 3),
@@ -1804,6 +1864,10 @@ class Job:
                 # against a live form value edited since
                 "target_downforce_n": float(
                     self.options.get("target_downforce_n", 200.0)),
+                # the run's own exchange rate, for the same reason: the
+                # green Pareto marker must mark the trade THIS run made,
+                # never a form value edited since
+                "drag_weight": float(self.options.get("drag_weight", 0.10)),
                 "objective": self.objective_mode,
                 "load_cap_note": self.load_cap_note,
                 "conf_note": self.conf_note,

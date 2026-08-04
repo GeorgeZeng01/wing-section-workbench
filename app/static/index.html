@@ -357,7 +357,7 @@
               </select><i></i></span></label>
             <label class="field" id="opt-target-field"><span class="f-label">Target</span>
               <span class="f-wrap"><input id="opt-target" type="number" step="10" value="250"><i>N</i></span></label>
-            <label class="field" title="Drag exchange rate: the trade the search actually makes — newtons of downforce given up to remove one newton of drag. 0.25 (the default) is the FSAE rule of thumb that aero pays when its L/D beats about 4. 1.0 is an even trade. 0.017 reproduces the old 'Drag penalty 0.1' behaviour, where drag was nearly free and the search maximized downforce at any drag cost. Set it from what your car wants — a lap-time sensitivity beats a guess.">
+            <label class="field" title="Drag exchange rate: the trade the search actually makes — newtons of downforce given up to remove one newton of drag. Applies in both modes honestly: Maximize trades with it outright and its green Pareto marker lands where the rate says. Target holds its level by contract and minimizes drag at that level — a process that is rate-independent by construction — so the rate is deliberately inert in that search (the field used to be silently discarded there; now the run records it and the re-rank orders on-level rows by measured drag). 0.25 (the default) is the FSAE rule of thumb that aero pays when its L/D beats about 4; 1.0 is an even trade. Set it from what your car wants — a lap-time sensitivity beats a guess.">
               <span class="f-label">Drag exchange</span>
               <span class="f-wrap"><input id="opt-drag-k" type="number" step="0.05" min="0" max="10" value="0.25"><i>N/N</i></span></label>
             <label class="field"
@@ -403,9 +403,10 @@
           <div id="opt-conv" class="chart-host"></div>
           <div id="opt-obj" class="chart-host"></div>
           <div id="opt-pareto" class="chart-host"
-               title="Every clean design the search evaluated, as the downforce–drag trade-off. Blue points are trusted; amber points carry a trust flag (low confidence, near stall, past the loading line, a wake-shadow collapse, or the tight-slot signature). Click a front point to apply that design."></div>
+               title="Every clean design the search evaluated, as the downforce–drag trade-off. Blue points are trusted; amber points carry a trust flag (low confidence, near stall, past the loading line, a wake-shadow collapse, or the tight-slot signature). The green point is the run's own pick — where its exchange rate lands (maximize) or the lowest-drag design on the held level (target); re-run after changing the rate to move it. Click a front point to apply that design."></div>
           <div id="opt-pareto-note" class="note" hidden>Pareto front —
-            click a point to apply that design. Amber = trust-flagged.</div>
+            click a point to apply that design. Amber = trust-flagged.
+            Green = the run's own pick.</div>
         </div>
         <div class="opt-best">
           <h3 class="sub-title">Best design</h3>
@@ -417,7 +418,7 @@
             Candidates</h3>
           <div id="opt-candidates"></div>
           <h3 class="sub-title" id="rerank-title" hidden
-              title="Runs the winner, every candidate and the Pareto knee through the same 2D RANS truth case, one at a time, then re-ranks on the MEASURED numbers, consistently with the objective: target runs rank by measured drag among the designs that hit the target, maximum-downforce runs rank by measured downforce, and any row whose measured flow separated ranks behind every attached row. The panel model navigates; RANS measures — this is the maximum-accuracy step for the designs you would actually build. Only fine-mesh runs carry a calibrated verdict; coarse and medium are labelled screening only.">
+              title="Runs the winner, every candidate and the Pareto knee through the same 2D RANS truth case, one at a time, then re-ranks on the MEASURED numbers, consistently with the objective: target runs rank by measured drag among the designs that hit the target (the RANS drag column shows the number those rows are ranked by), maximum-downforce runs rank by measured downforce, and any row whose measured flow separated ranks behind every attached row. The panel model navigates; RANS measures — this is the maximum-accuracy step for the designs you would actually build. Only fine-mesh runs carry a calibrated verdict; coarse and medium are labelled screening only.">
             RANS re-rank</h3>
           <div id="rerank-block" hidden>
             <div class="action-row">

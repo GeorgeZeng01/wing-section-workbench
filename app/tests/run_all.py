@@ -22,7 +22,7 @@ OFFLINE = ["test_manufacturing.py", "test_panel_validation.py",
            "test_cfd_case.py", "test_cfd_run.py", "test_delta_cd.py",
            "test_recirculation.py", "test_harvest.py", "test_repair.py",
            "test_field_verdict.py", "test_fluent_wall.py",
-           "test_drag_exchange.py",
+           "test_drag_exchange.py", "test_credible_downforce.py",
            "test_optimizer_candidates.py", "test_shaping.py",
            "test_rules_envelope.py", "test_optimizer_target_modes.py",
            "test_slot_signature.py", "test_optimizer_objectives.py",
@@ -31,7 +31,7 @@ OFFLINE = ["test_manufacturing.py", "test_panel_validation.py",
            "test_fluent_run.py",
            "test_fluent2d_workflow.py", "test_fluent2d_run.py",
            "test_frontend_fl2d_state.py", "test_frontend_rules.py",
-           "test_frontend_charts.py",
+           "test_frontend_charts.py", "test_frontend_optimizer.py",
            "test_geometry_hardening.py", "test_server_hardening.py"]
 
 

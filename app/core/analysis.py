@@ -105,6 +105,45 @@ HC_CHOKE_OPTIMISM = 0.08
 # ride-height decisions are made.
 HC_CONSERVATIVE = (0.12, 0.35)
 
+# Credible-downforce expectation (2026-08): the fine-mesh RANS record maps
+# panel optimism against the peak free-air loading fraction. Knots, each from
+# named docs/calibration/runs.csv rows at h/c 0.086 unless noted:
+#   <= 0.80 -> 1.00   PLACED, not measured: last-safe point under the first
+#                     measured optimism (clean cluster: anchor-h30 -0.0%,
+#                     meshchk-h40 -1.0% at h/c 0.114, gapleg -1.3%,
+#                     stage3_pareto_knee -4.0% — all inside the fine-mesh
+#                     limit-cycle band)
+#      0.85 -> 0.86   stage2_clean -14.2%, stage2b_clean -14.4%
+#      0.90 -> 0.76   stage3b_maxdf_winner -24.4% at loading 0.900
+#   >= 0.95 -> 0.60   CLAMPED floor: past the line the model is declared
+#                     unreliable (-36.5%/-41.7% measured); 0.60 is a display
+#                     floor, not a fit
+# Held-out validation: stage3_maxdf_winner measured -19.2% at 0.876; the
+# 0.85->0.90 segment interpolates to 0.808 there (0.1% off) — piecewise
+# linear is enough. Every row predates the 2026-07-24 domain fix (the taller
+# domain shifts the clean cluster ~4 points more negative), so the gain is a
+# calibration-informed EXPECTATION, advisory-grade — never a correction.
+# High ground-coupling designs at mid ride heights measured the opposite
+# error (+35..+67% at h/c 0.171-0.257): above CREDIBLE_UNDERCLAIM_HC the
+# number is annotated "may under-claim" rather than raised. A c_ground/c_free
+# ratio gate was considered for that class and REJECTED against the record:
+# the healthy anchor sits at ratio 7.29 (-0.0%) while the worst over-claimer
+# sits at 9.51 (-41.7%) — a ratio threshold fires hardest exactly on the
+# designs the derate exists for.
+CREDIBLE_GAIN_KNOTS = ((0.80, 1.00), (0.85, 0.86), (0.90, 0.76), (0.95, 0.60))
+CREDIBLE_UNDERCLAIM_HC = 0.15
+
+
+def credible_gain(frac_max: float | None) -> float:
+    """Expected fraction of the panel downforce surviving fine-mesh RANS,
+    from the measured loading->optimism gradient (see knots above)."""
+    if frac_max is None or not np.isfinite(frac_max):
+        return 1.0
+    xs = [k[0] for k in CREDIBLE_GAIN_KNOTS]
+    ys = [k[1] for k in CREDIBLE_GAIN_KNOTS]
+    return float(np.clip(np.interp(float(frac_max), xs, ys), 0.60, 1.00))
+
+
 # Slot-capture signature (2026-07): every recorded optimizer winner —
 # clean and flagged alike — sits in the corner the inviscid solver loves:
 # slot gap pinned at the workable floor with essentially no overlap tuck.
@@ -421,6 +460,8 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
     drag_profile_n = q * area * cd_stack
     drag_induced, induced_detail = induced_drag_n(downforce_n, cfg, installed)
     drag_total_n = drag_profile_n + drag_induced
+    cred_g = credible_gain(max((e["loading_fraction"] for e in elements),
+                               default=None))
     # Cm_le is nose-up positive; the CCW z-moment is -Cm_le, and the center
     # of pressure satisfies x_cp * Cl = tau_z, so x_cp = -Cm_le / Cl
     x_cp_c = (-ground.Cm_le / ground.Cl) if abs(ground.Cl) > 1e-9 else 0.0
@@ -456,6 +497,14 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
         "forces": {
             "downforce_n": round(downforce_n, 1),
             "downforce_inviscid_n": round(downforce_n_inviscid, 1),
+            # calibration-informed expectation of what survives fine-mesh
+            # RANS, from the measured loading gradient (advisory — see the
+            # CREDIBLE_GAIN_KNOTS provenance); "may under-claim" at mid ride
+            # heights instead of a raised number
+            "credible_downforce_n": round(downforce_n * cred_g, 1),
+            "credible_gain": round(cred_g, 3),
+            "credible_underclaim_possible": bool(
+                cfg.ride_height_c >= CREDIBLE_UNDERCLAIM_HC),
             "drag_total_n": round(drag_total_n, 1),
             "drag_profile_n": round(drag_profile_n, 2),
             "drag_profile_is_lower_bound": bool(capped_roles),
@@ -555,6 +604,10 @@ def quick_objective_eval(cfg: StackConfig, model_size: str = "large") -> dict:
         "drag_n": q * area * cd_stack + drag_induced,
         "c_est": c_est,
         "c_ground": c_ground,
+        # data-only: the ground-coupling ratio c_ground/c_free is the
+        # candidate predictor for the conservative class (LOG.md) — recorded
+        # so future calibration legs can fit it from archives
+        "c_free": c_free,
         "load_excess": load_excess,
         "load_excess_ground": load_excess_ground,
         "fracs": fracs,

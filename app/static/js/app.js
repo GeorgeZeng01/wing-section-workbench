@@ -1866,16 +1866,15 @@ async function launchOptimization() {
   // trade sits at dD/ddrag = 10w/60. drag_weight stays the wire field, so
   // saved automations and older sessions keep working unchanged.
   //
-  // The rate drives MAX mode, where balance was missing — the old 0.10
-  // default made drag cost 1/60 N of downforce, pure maximization in
-  // practice. TARGET mode keeps the legacy weight: it balances by
-  // construction (attain the level, then the descend phase spends the
-  // remaining freedom on drag at that level), and rate-scale drag pressure
-  // there fights the target spring and pulls designs off the level the
-  // user explicitly asked for (measured: the target suites miss).
+  // The rate is transmitted in BOTH modes. In max mode it is the objective's
+  // trade outright. In target mode the level is the contract: descend drag
+  // minimization at a held level is rate-independent, so the server pins its
+  // weight (a measured w = 2.0 "cap" still walked 7% off-level) and only the
+  // attain phase's bounded path-shaping sees the field — but the run RECORDS
+  // the rate, so the marker and reports describe the trade honestly. The old
+  // client-side pin to 0.1 silently discarded the field instead.
   const dragK = parseFloat($("opt-drag-k").value);
-  const isMax = $("opt-objective").value === "max_downforce";
-  const dragW = isMax ? (Number.isFinite(dragK) ? 6 * dragK : 1.5) : 0.1;
+  const dragW = Number.isFinite(dragK) ? 6 * dragK : 1.5;
   // snapshot the target: charts and hints must describe THIS run even if
   // the target field is edited while it searches
   const target = state.target;
@@ -2062,9 +2061,25 @@ function renderOptimizer(s) {
         : `${val.toFixed(1)}°`;
       return `<div class="kv"><span>${label}</span><b>${unit}</b></div>`;
     }).join("");
+    // the winner's trust context rides beside the claim: the calibration
+    // expectation (candidates[0] carries it once the run settles) and the
+    // ≥ mark when the profile-drag lookup was capped
+    const c0s = (s.state === "done" || s.state === "cancelled")
+      ? (s.candidates?.[0]?.summary || null) : null;
+    let credRow = "";
+    if (c0s && c0s.credible_underclaim_possible) {
+      credRow = `<div class="kv"><span title="${EXPECTED_TIP}">expected ` +
+        `after RANS</span><b>may under-claim</b></div>`;
+    } else if (c0s && c0s.credible_downforce_n != null
+               && +c0s.credible_gain < 0.995) {
+      credRow = `<div class="kv"><span title="${EXPECTED_TIP}">expected ` +
+        `after RANS</span><b>≈ ${esc(c0s.credible_downforce_n)} N</b></div>`;
+    }
+    const dMark = c0s?.drag_is_lower_bound ? "≥ " : "";
     $("opt-best-body").innerHTML =
       `<div class="kv"><span>downforce</span><b>${esc(s.best.downforce_n)} N</b></div>` +
-      `<div class="kv"><span>drag estimate</span><b>${esc(s.best.drag_n)} N</b></div>` +
+      credRow +
+      `<div class="kv"><span>drag estimate</span><b>${dMark}${esc(s.best.drag_n)} N</b></div>` +
       rows;
   }
 }
@@ -2085,18 +2100,39 @@ function renderPareto(s) {
   if (s.pareto && s.pareto.length) {
     // finalized front: full-fidelity numbers, clickable, trust-colored
     const pts = s.pareto.slice().sort((a, b) => a.drag_n - b.drag_n);
-    // where the CHOSEN exchange rate lands on the front: the point
-    // maximizing D − k·drag. This is the picture of what the rate means —
-    // moving the k field moves this marker along the front, so the trade
-    // is chosen by eye instead of by faith in a weight.
-    const kNow = parseFloat($("opt-drag-k").value);
+    // The green marker shows the run's OWN pick, from the run's echoed
+    // options — never the live form, which may have been edited since.
+    // Max mode: where the run's exchange rate lands, on the EXPECTED
+    // (calibration-derated) downforce so the marker agrees with the
+    // candidate ranking. Target mode never optimized D − k·drag; its real
+    // semantics are "hold the level, minimize drag", so the marker is the
+    // lowest-drag point on the level (the RANS re-rank's tiering at panel
+    // fidelity). A result saved before the drag_weight echo shipped shows
+    // no marker rather than a faked one.
+    const isMaxRun = s.objective === "max_downforce";
     let kBest = -1;
-    if (Number.isFinite(kNow)) {
+    if (isMaxRun && Number.isFinite(+s.drag_weight)) {
+      const kRun = +s.drag_weight / 6;
       let bestV = -Infinity;
       pts.forEach((p, i) => {
-        const v = p.downforce_n - kNow * p.drag_n;
+        const v = (p.summary?.credible_downforce_n ?? p.downforce_n)
+                  - kRun * p.drag_n;
         if (v > bestV) { bestV = v; kBest = i; }
       });
+    } else if (!isMaxRun) {
+      const level = s.dstar_n ?? s.target_downforce_n;
+      if (Number.isFinite(+level)) {
+        const tol = Math.max(0.03 * Math.abs(+level), 1);
+        let bestDrag = Infinity, nearest = -1, nearMiss = Infinity;
+        pts.forEach((p, i) => {
+          const miss = Math.abs(p.downforce_n - +level);
+          if (miss <= tol && p.drag_n < bestDrag) {
+            bestDrag = p.drag_n; kBest = i;
+          }
+          if (miss < nearMiss) { nearMiss = miss; nearest = i; }
+        });
+        if (kBest < 0) kBest = nearest;
+      }
     }
     lineChart(host, {
       series: [{
@@ -2107,8 +2143,13 @@ function renderPareto(s) {
           : flagged(p) ? ink("--viz-flag", "#f2b544") : SERIES[0])),
         onPointClick: (i) => {
           applyDesign(pts[i].config);
-          toast(`Pareto design applied — ${fmtN(pts[i].downforce_n, 0)} N ` +
-                `at ${fmtN(pts[i].drag_n)} N drag. Re-analyzing.`, "good");
+          const cred = pts[i].summary?.credible_downforce_n;
+          const credBit = (cred != null
+                           && +(pts[i].summary?.credible_gain) < 0.995)
+            ? ` (expected ≈ ${fmtN(cred, 0)} N after RANS)` : "";
+          toast(`Pareto design applied — ${fmtN(pts[i].downforce_n, 0)} N` +
+                `${credBit} at ${fmtN(pts[i].drag_n)} N drag. ` +
+                `Re-analyzing.`, "good");
         },
       }],
       xLabel: "drag [N]", yLabel: "downforce [N]", height: 148,
@@ -2116,9 +2157,14 @@ function renderPareto(s) {
     note.hidden = false;
     host.title = "Every clean design the search evaluated, as the " +
       "downforce–drag trade-off. Blue points are trusted; amber points " +
-      "carry a trust flag; the green point is where your drag exchange " +
-      "rate lands on this front (max of D − k·drag). Click a front point " +
-      "to apply that design.";
+      "carry a trust flag; " +
+      (isMaxRun
+        ? "the green point is where the run's own exchange rate lands on " +
+          "this front (max of expected-after-RANS downforce − k·drag) — " +
+          "re-run after changing the rate to move it."
+        : "the green point is the lowest-drag design on the level this " +
+          "run held.") +
+      " Click a front point to apply that design.";
   } else if (s.cloud && s.cloud.length
              && (s.state === "running" || s.state === "finalizing")) {
     // live evaluation cloud while the search runs (not clickable — these
@@ -2267,8 +2313,11 @@ function renderRerank(q) {
   const tbl = document.createElement("table");
   tbl.className = "rr-table";
   const head = tbl.insertRow();
-  for (const h of ["#", "design", "panel N", "RANS N", "Δ%", "flow",
-                   "verdict", "state", ""]) {
+  // "RANS drag N" is the number target-mode rows are RANKED by (on-level
+  // rows compete on measured drag) — it was computed and used but never
+  // shown, so the ordering read as arbitrary
+  for (const h of ["#", "design", "panel N", "RANS N", "RANS drag N", "Δ%",
+                   "flow", "verdict", "state", ""]) {
     const th = document.createElement("th");
     th.textContent = h;
     head.appendChild(th);
@@ -2291,6 +2340,7 @@ function renderRerank(q) {
       r.rank ?? "–", r.label,
       r.panel_downforce_n != null ? fmtN(r.panel_downforce_n, 0) : "–",
       r.rans_downforce_n != null ? fmtN(r.rans_downforce_n, 0) : "–",
+      r.drag_rans_n != null ? fmtN(r.drag_rans_n, 1) : "–",
       r.delta_cl_pct != null
         ? `${r.delta_cl_pct > 0 ? "+" : ""}${fmtN(r.delta_cl_pct, 1)}` : "–",
       flow,
@@ -2305,7 +2355,21 @@ function renderRerank(q) {
       const td = tr.insertCell();
       td.textContent = String(c);   // labels/errors are data, not markup
     }
-    const fd = tr.cells[5];
+    // measured L/D and the drag-estimate caveat live on the drag cell —
+    // Δcd% stays OUT of the table: the negative controls showed it grades
+    // the capped polar estimate (4–6× low on loaded stacks), not the design
+    const gd = tr.cells[4];
+    if (r.drag_rans_n != null && r.rans_downforce_n != null
+        && +r.drag_rans_n > 0) {
+      let t = `measured L/D ${fmtN(+r.rans_downforce_n / +r.drag_rans_n, 1)}`;
+      if (r.delta_cd_pct != null) {
+        t += ` · the panel profile-drag estimate ran ` +
+             `${fmtN(r.delta_cd_pct, 0)}% low here (an upper bound — the ` +
+             `capped polar estimate is documented 4–6× low on loaded stacks)`;
+      }
+      gd.title = t;
+    }
+    const fd = tr.cells[6];
     if (r.wall_verdict) fd.title = r.wall_verdict;
     else if (fv) fd.title = fv.verdict;
     if (flow.startsWith("separated")) fd.style.color = "var(--warning)";
@@ -2331,7 +2395,7 @@ function renderRerank(q) {
       }
       td.appendChild(b);
     }
-    const vd = tr.cells[6];
+    const vd = tr.cells[7];
     if (r.verdict === "over-claims") vd.style.color = "var(--warning)";
     if (r.verdict === "healthy band") vd.style.color = "var(--good)";
   }
@@ -2393,13 +2457,20 @@ function renderOptHints(s) {
     msg = null;
     const w0 = ((s.candidates || [])[0] || {}).summary;
     if (s.state === "done" && w0 && w0.frac_max != null) {
+      const expBit = (w0.credible_downforce_n != null
+                      && +w0.credible_gain < 0.995
+                      && w0.downforce_n != null)
+        ? ` The winner expects ≈ ${fmtN(w0.credible_downforce_n, 0)} N ` +
+          `after RANS against its ${fmtN(w0.downforce_n, 0)} N panel ` +
+          `claim, and candidates are ranked by that expectation.`
+        : "";
       msg = `Maximum trusted downforce: every element held inside the 90% ` +
             `free-air loading line (winner peaks at ` +
             `${Math.round(w0.frac_max * 100)}%). Fine-mesh RANS measured ` +
             `panel optimism rising along this axis — about −14% near 85% ` +
             `loading, −24% right at the line — versus the −37…−42% ` +
-            `collapse past it that this mode exists to exclude. Use the ` +
-            `RANS re-rank below to measure your actual winner.`;
+            `collapse past it that this mode exists to exclude.${expBit} ` +
+            `Use the RANS re-rank below to measure your actual winner.`;
     }
   }
   if (s.load_cap_note === "baseline_exceeds_cap") {
@@ -2508,6 +2579,14 @@ async function applyBestDesign() {
   toast("Optimized design applied.", "good");
 }
 
+// advisory tooltip for every "expected after RANS" figure — the derate is
+// an extrapolation-grade expectation, never a correction
+const EXPECTED_TIP =
+  "Calibration-informed expectation from the recorded fine-mesh RANS " +
+  "loading gradient (about −14% near 85% loading, −24% at the 90% line). " +
+  "Advisory: the record predates the current solver domain — the RANS " +
+  "verify queue below measures each design for real.";
+
 function renderCandidates(s) {
   const host = $("opt-candidates");
   host.innerHTML = "";
@@ -2520,6 +2599,16 @@ function renderCandidates(s) {
     const dn = f.downforce_n ?? c.downforce_n;
     const drag = f.drag_total_n ?? c.drag_n;
     const ld = f.efficiency_ld;
+    // bound marks travel with the numbers (report precedent): a capped
+    // drag lookup makes drag a floor and L/D a ceiling; the expected value
+    // rides beside the claim, or "may under-claim" at mid ride heights
+    const dLB = !!f.drag_is_lower_bound;
+    const expBit = f.credible_underclaim_possible
+      ? `<span title="${EXPECTED_TIP}"> · may under-claim</span>`
+      : (f.credible_downforce_n != null && +f.credible_gain < 0.995
+         ? `<span title="${EXPECTED_TIP}"> · expected ≈ ` +
+           `${fmtN(f.credible_downforce_n, 0)} N</span>`
+         : "");
     const badges =
       // "off target" is meaningless while maximizing — there is no target
       (c.on_target || s.objective === "max_downforce"
@@ -2560,8 +2649,9 @@ function renderCandidates(s) {
     const head = document.createElement("div");
     head.className = "cand-head";
     head.innerHTML =
-      `<span><b>#${esc(c.rank)}</b> ${fmtN(dn, 0)} N · drag ${fmtN(drag, 1)} N` +
-      (ld != null ? ` · L/D ${fmtN(ld, 1)}` : "") +
+      `<span><b>#${esc(c.rank)}</b> ${fmtN(dn, 0)} N${expBit}` +
+      ` · drag ${dLB ? "≥ " : ""}${fmtN(drag, 1)} N` +
+      (ld != null ? ` · L/D ${dLB ? "≤ " : ""}${fmtN(ld, 1)}` : "") +
       (f.confidence_min != null
         ? ` · conf ${Math.round(f.confidence_min * 100)}%` : "") +
       `</span><span>${badges}</span>`;
@@ -4992,7 +5082,8 @@ async function buildReport() {
       ["Best drag", `${o.best.drag_n} N`],
       ["Evaluations", o.n_eval],
     ]) + ((o.candidates || []).length
-      ? `<table class="grid"><tr><th>#</th><th>Downforce</th><th>Drag</th>` +
+      ? `<table class="grid"><tr><th>#</th><th>Downforce</th>` +
+        `<th>Expected</th><th>Drag</th>` +
         `<th>L/D</th><th>Flags</th></tr>` +
         o.candidates.map(cd => {
           const s = cd.summary || {};
@@ -5001,10 +5092,20 @@ async function buildReport() {
                          s.slot_signature ? "slot corner" : "",
                          s.shadow_collapse ? "sep risk" : ""]
             .filter(Boolean).join(", ") || "clean";
+          // same bound-mark language as the analysis block: a capped drag
+          // lookup makes drag a floor and L/D a ceiling; the expected
+          // column carries the calibration derate (advisory)
+          const dLB = s.drag_is_lower_bound;
+          const expected = s.credible_underclaim_possible
+            ? "may under-claim"
+            : (s.credible_downforce_n != null && +s.credible_gain < 0.995
+               ? `≈ ${fmtN(s.credible_downforce_n, 0)} N` : "–");
           return `<tr><td>${esc(cd.rank)}</td>` +
             `<td>${fmtN(s.downforce_n ?? cd.downforce_n, 0)} N</td>` +
-            `<td>${fmtN(s.drag_total_n ?? cd.drag_n, 1)} N</td>` +
-            `<td>${s.efficiency_ld != null ? fmtN(s.efficiency_ld, 1) : "–"}</td>` +
+            `<td>${esc(expected)}</td>` +
+            `<td>${dLB ? "≥ " : ""}${fmtN(s.drag_total_n ?? cd.drag_n, 1)} N</td>` +
+            `<td>${s.efficiency_ld != null
+              ? (dLB ? "≤ " : "") + fmtN(s.efficiency_ld, 1) : "–"}</td>` +
             `<td>${esc(flags)}</td></tr>`;
         }).join("") + `</table>` : ""));
   }

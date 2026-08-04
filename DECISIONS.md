@@ -2530,3 +2530,58 @@ beyond it) and found the fix the shipped screen walks away from. Its
 margins verify nothing — the one repair "verified attached" by the Fluent
 field probe measured wall 0.241. `repair.py`'s docstring leads with the
 falsification of its own founding premise.
+
+## Credible newtons and an honest exchange rate (2026-08-03)
+
+**Candidates now carry an expected-after-RANS downforce, and max mode ranks
+by it.** The fine-mesh record maps panel optimism against peak free-air
+loading: ~0% for the clean cluster (anchor-h30 −0.0%, meshchk-h40 −1.0%,
+gapleg −1.3%, stage3_pareto_knee −4.0%), −14.2/−14.4% near 0.85
+(stage2/stage2b clean), −24.4% at 0.900 (stage3b_maxdf_winner), −36.5/−41.7%
+past the line. `analysis.credible_gain()` carries that gradient as a
+piecewise-linear derate (knots 0.80→1.00, 0.85→0.86, 0.90→0.76, ≥0.95
+floored at 0.60); the held-out −19.2%-at-0.876 row lands on the interpolant
+to 0.1%, which is why linear is enough. The derate stays OUT of the search
+objective — every calibration row predates the 2026-07-24 domain fix, so
+the bands are extrapolation-grade advisories, and a ranking can be
+re-anchored cheaply where a search trajectory cannot. CL/CD as the
+objective was considered and rejected: profile drag is the recorded 4–6×-low
+capped estimate and induced drag is an analytic function of downforce², so
+an efficiency objective optimizes the least-measured number in the stack.
+
+**The conservative class is annotated, not derated — and the ratio gate was
+rejected against its own record.** A c_ground/c_free threshold was proposed
+to exempt high-coupling designs; the record refutes it: the healthy anchor
+sits at ratio 7.29 with −0.0% error while the worst over-claimer sits at
+9.51 with −41.7% — the gate would fire hardest exactly where the derate
+matters. What the record does support is ride height: every fine row at
+h/c ≥ 0.171 measured +35…+67%, so h/c ≥ 0.15 renders "may under-claim"
+instead of a number. `c_free` is now recorded per evaluation so a future
+calibration leg can fit the real predictor from archives.
+
+**The exchange rate is transmitted in both modes, and target mode pins its
+descend weight.** The old client silently sent drag_weight = 0.1 in target
+mode while the green Pareto marker recomputed argmax(D − k·drag) from the
+live field — marking a trade the search never made, movable without a
+re-run. Now the true 6k always travels, the snapshot echoes the run's own
+drag_weight (same disease and cure as the target echo), and the marker
+derives from the echo: max mode marks the rate's landing on EXPECTED
+downforce (agreeing with the ranking), target mode marks the lowest-drag
+on-level point (its actual semantics). In-search, a "spring-dominance" cap
+of 2.0 was derived, then measured and refuted: the bench front's local
+slope is ~0.43 N drag per N downforce (3.6× the derivation's assumption),
+and a k = 10 run walked to 232.5 N on a 250 N target. Since drag
+minimization at a held level is rate-independent — the weight's only
+effect is how far off-level the search may walk — descend and re-scoring
+pin DESCEND_DRAG_W = 0.30, the value every recorded target run was
+validated at (the k = 10 run then delivers 246.1 N), and the attain phase
+caps at the same floor. This also fixes the latent API hazard where
+drag_weight = 60 walked a target run ~20% off level via max(w, 0.30).
+
+**Measured drag is on screen.** `drag_rans_n` always ranked target-mode
+re-rank rows and was never displayed; it is now a column, with measured
+L/D in its tooltip. Δcd% stays out of the table — the negative controls
+showed it grades the capped estimate (+396…+626% regardless of flow
+state), not the design — and survives only as tooltip prose with the bias
+named. Candidate cards and the report carry the same ≥/≤ bound marks the
+analysis block already used.

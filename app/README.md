@@ -137,13 +137,31 @@ application window, then to the default browser.
   element's top-side flow dying in its neighbors' shadow — the recorded
   failure mode the loading budget cannot see), and intersections.
   Max-downforce mode additionally re-checks every returned candidate at
-  full fidelity and drops any that still collapse the screen. Runs on a
+  full fidelity, drops any that still collapse the screen, and **ranks the
+  survivors by their expected-after-RANS downforce** — the panel claim
+  derated along the measured fine-mesh loading gradient (about −14% near
+  85% loading, −24% at the 90% line; ~0% for the clean cluster), so a
+  winner riding the load line no longer out-ranks one that keeps its
+  downforce when measured. The expectation is advisory (the record
+  predates the current solver domain) and is shown beside the raw claim,
+  never in place of it; designs at mid ride heights are annotated "may
+  under-claim" instead (the measured +35…+67% conservative class). The
+  **drag exchange rate** is honored honestly in both modes: it is
+  transmitted always, drives max mode outright, and in target mode the
+  level is the contract — descend drag minimization at a held level is
+  rate-independent, so the search pins its weight (a measured 2.0 cap
+  still walked 7% off a 250 N level) while the run records the rate for
+  the Pareto marker and reports. Runs on a
   worker thread with live convergence charts and progress. A finished run returns the best design **plus up to three
   candidate designs** — on-target alternates chosen farthest-point-first
   from everything the search evaluated, so they are genuinely different
   set-ups (different slot geometry, incidence, or airfoils) rather than
-  jitter around one optimum; each card shows its own analyzed downforce,
-  drag, and L/D, and one click applies any of them to the configuration.
+  jitter around one optimum; each card shows its own analyzed downforce
+  (with the expected-after-RANS value beside it where the derate acts),
+  drag, and L/D — the latter two carrying ≥/≤ bound marks when the drag
+  lookup was capped — and one click applies any of them to the
+  configuration. The RANS re-rank table shows the measured drag column
+  its target-mode ordering runs on.
 - **Airfoil screener** — ranks the entire bundled library at a chosen
   Reynolds number (CL_max, L/D, drag at a reference CL, thickness, camber,
   surrogate confidence) and assigns the pick to an element.
@@ -412,6 +430,16 @@ RANS (the in-app OpenFOAM pipeline for fast screening; the Fluent
 workflow in `scripts/` is the reference of record for absolute levels)
 or tunnel data, and recalibrate
 the knobs against those results.
+
+The analysis also reports `credible_downforce_n` — the estimate derated
+along the recorded fine-mesh loading→optimism gradient (1.00 up to 85 %
+loading knee at 0.86, 0.76 at the 90 % line, floored at 0.60 past it; the
+interior of that curve reproduces the held-out −19.2 %-at-0.876 row to
+0.1 %). It is an advisory expectation of what survives RANS, not a
+correction: every calibration row predates the 2026-07 domain fix, and at
+mid ride heights (h/c ≥ 0.15) the measured error reverses sign, so the UI
+annotates "may under-claim" there instead of raising anything. Max-downforce
+candidates are ranked by this expectation.
 
 The `k_g` curve was calibrated on the **two-element** baseline and is blind
 to how strongly a given stack couples to the road, so its error is

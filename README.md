@@ -195,7 +195,8 @@ measured manual-vs-automated equivalence record lives in
   a target downforce, over stack angle, deflections, slot geometry,
   optionally flap chords, airfoil selection from screened candidates, and
   per-element shape refinement (camber bumps + thickness scale). Returns the
-  best design plus genuinely distinct on-target alternates.
+  best design plus genuinely distinct on-target alternates, each showing a
+  calibration-informed expected-after-RANS value beside its raw estimate.
 - **Rule checks** — an optional geometric envelope checked on the installed
   wing: length, height above the road and ground clearance, plus per-element
   leading-edge radius and trailing-edge thickness floors measured on the
