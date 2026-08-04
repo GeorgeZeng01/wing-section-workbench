@@ -12,8 +12,10 @@ Contracts pinned here:
     survival is the library's whole point (uploads die with the process).
   * Hostile pins 422 by name: bad/duplicate/malformed ids, non-text or
     over-long labels, non-dict/unparseable configs, bad custom_airfoils
-    keys/values, malformed outlines, flow_thumbs that are not data-URI
-    images or exceed the per-field cap.
+    keys/values, malformed outlines, runs with unknown channels, no
+    status object, unknown image keys, non-data-URI or oversized images.
+  * A run's terminal status travels VERBATIM inside runs.{rans,fl2d} — the
+    same restore path project files flow through renders it.
   * Caps: 49 pins -> 422; an over-bytes library -> 422; the previous file
     survives every rejected write; no tmp stragglers remain.
   * The key= generalization of the preset helpers did not disturb the
@@ -105,6 +107,14 @@ CFG = {
 DAT = "pin test airfoil\n 1.000000 0.000000\n 0.500000 0.080000\n" \
       " 0.000000 0.000000\n 0.500000 -0.020000\n 1.000000 0.000000\n"
 THUMB = "data:image/jpeg;base64," + ("A" * 400)
+RUN = {"rans": {"status": {"id": "1c2d3e4f5a6b", "state": "done",
+                           "engine": "openfoam", "mesh_size": "fine",
+                           "result": {"cl_rans": 7.59, "cl_rans_std": 0.02,
+                                      "cd_rans": 0.31,
+                                      "delta_cl_pct": -7.9,
+                                      "downforce_n_at_rans_cl": 238.0,
+                                      "converged": True}},
+                "images": {"umag": THUMB, "cp": THUMB}}}
 
 
 def pin(pid="a1b2c3d4e5f6", label="#1", **kw):
@@ -115,7 +125,9 @@ def pin(pid="a1b2c3d4e5f6", label="#1", **kw):
                       "warnings": 2, "elements": 2, "frac_max": 0.889,
                       "confidence_min": 0.91},
          "outline": [[[0.0, 0.0], [0.5, 0.08], [1.0, 0.0]],
-                     [[1.1, -0.05], [1.3, 0.02]]]}
+                     [[1.1, -0.05], [1.3, 0.02]]],
+         "runs": {"rans": {"status": dict(RUN["rans"]["status"]),
+                           "images": dict(RUN["rans"]["images"])}}}
     p.update(kw)
     return p
 
@@ -145,6 +157,12 @@ try:
     check("round-trip: headline, outline and target survive",
           got.get("headline", {}).get("drag_is_lower_bound") is True
           and got.get("outline") and got.get("target") == 250.0)
+    check("round-trip: the run's terminal status travels verbatim with "
+          "its images",
+          got.get("runs", {}).get("rans", {}).get("status")
+          == RUN["rans"]["status"]
+          and got.get("runs", {}).get("rans", {}).get("images", {})
+          .get("umag") == THUMB)
 
     s, r = call("PUT", "/api/pinned-designs",
                 {"pins": [pin(), pin("b2" * 6, "#2")], "rev": 1})
@@ -205,14 +223,26 @@ try:
          pin(outline=[[[0, 0]] * 121])),
         ("outline with NaN", pin(outline=[[[0, float("nan")]]])),
         ("outline with text point", pin(outline=[[[0, "x"]]])),
-        ("flow_thumbs unknown key", pin(flow_thumbs={"selfie": THUMB})),
-        ("flow_thumbs not an image data URI",
-         pin(flow_thumbs={"rans_umag": "data:text/html;base64,PGI+"})),
-        ("flow_thumbs missing base64 marker",
-         pin(flow_thumbs={"rans_umag": "data:image/png,raw"})),
-        ("flow_thumbs oversized",
-         pin(flow_thumbs={"rans_umag":
-                          "data:image/jpeg;base64," + "A" * 120_001})),
+        ("runs unknown channel", pin(runs={"xfoil": RUN["rans"]})),
+        ("runs channel not an object", pin(runs={"rans": "x"})),
+        ("runs without a status object",
+         pin(runs={"rans": {"images": {"umag": THUMB}}})),
+        ("runs status is text",
+         pin(runs={"rans": {"status": "done"}})),
+        ("runs images unknown key",
+         pin(runs={"rans": {"status": {"state": "done"},
+                            "images": {"selfie": THUMB}}})),
+        ("runs image not an image data URI",
+         pin(runs={"rans": {"status": {"state": "done"},
+                            "images": {"umag":
+                                       "data:text/html;base64,PGI+"}}})),
+        ("runs image missing base64 marker",
+         pin(runs={"rans": {"status": {"state": "done"},
+                            "images": {"umag": "data:image/png,raw"}}})),
+        ("runs image oversized",
+         pin(runs={"rans": {"status": {"state": "done"},
+                            "images": {"umag": "data:image/jpeg;base64,"
+                                       + "A" * 250_001}}})),
         ("duplicate ids", None),   # handled below (needs two pins)
     ]
     for label, p in bad:
@@ -234,12 +264,16 @@ try:
                 {"pins": [pin(f"{i:012x}", f"p{i}") for i in range(49)]})
     check("49 pins -> 422 naming the cap", s == 422
           and "48" in str((r or {}).get("detail")))
+    # 24 pins x (~119 KB dat + 2 x ~240 KB run images) ~ 14.4 MB: over the
+    # 12 MB store cap while comfortably under the 16 MB streamed body cap,
+    # so the refusal exercised is the store validator's
     big = [pin(f"{i:012x}", f"big{i}",
                custom_airfoils={f"custom:big{i}": "x" * 119_000},
-               flow_thumbs={k: "data:image/jpeg;base64," + "A" * 110_000
-                            for k in ("rans_umag", "rans_cp",
-                                      "fl2d_umag", "fl2d_cp")})
-           for i in range(20)]
+               runs={"rans": {"status": {"state": "done"},
+                              "images": {k: "data:image/jpeg;base64,"
+                                         + "A" * 240_000
+                                         for k in ("umag", "cp")}}})
+           for i in range(24)]
     s, r = call("PUT", "/api/pinned-designs", {"pins": big})
     check("an over-bytes library -> 422 telling the user to delete pins",
           s == 422 and "too large" in str((r or {}).get("detail")))

@@ -1589,16 +1589,37 @@ async function shrinkDataURI(uri, width = 320) {
   } catch { return null; }
 }
 
-async function captureFlowThumbs() {
-  const [rans, fl2d] = await Promise.all([
-    captureRansFlow().catch(() => null),
-    captureFl2dFlow().catch(() => null),
-  ]);
+// The verification runs the workspace holds right now, packaged for the
+// library: per engine channel the FULL terminal status verbatim (numbers,
+// verdicts, convergence history, mesh — the same object the session and
+// project restore paths render) plus the flow images at a compare-friendly
+// width. Full-resolution fields stay with the case dir; the pin is
+// self-contained evidence that survives run-dir pruning and restarts.
+async function runSnapshot(st, grab) {
+  try {
+    const entry = { status: structuredClone(st) };
+    const flow = await grab().catch(() => null);
+    const images = {};
+    for (const k of ["umag", "cp"]) {
+      const t = await shrinkDataURI(flow?.[k], 640);
+      if (t) images[k] = t;
+    }
+    if (Object.keys(images).length) entry.images = images;
+    return entry;
+  } catch { return null; }
+}
+
+async function captureRunSnapshots() {
   const out = {};
-  for (const [key, uri] of [["rans_umag", rans?.umag], ["rans_cp", rans?.cp],
-                            ["fl2d_umag", fl2d?.umag], ["fl2d_cp", fl2d?.cp]]) {
-    const t = await shrinkDataURI(uri);
-    if (t) out[key] = t;
+  if (state.ransResult?.state === "done" && state.ransResult.result) {
+    out.rans = await runSnapshot(state.ransResult, () => captureRansFlow());
+  }
+  if (typeof fl2dResult !== "undefined" && fl2dResult?.state === "done"
+      && fl2dResult.result) {
+    out.fl2d = await runSnapshot(fl2dResult, () => captureFl2dFlow());
+  }
+  for (const k of Object.keys(out)) {
+    if (!out[k]) delete out[k];
   }
   return Object.keys(out).length ? out : null;
 }
@@ -1651,8 +1672,8 @@ async function mirrorPinToLibrary(pin) {
     if (Object.keys(names).length) lib.airfoil_names = names;
     const ol = outlineSnapshot();
     if (ol) lib.outline = ol;
-    const thumbs = await captureFlowThumbs();
-    if (thumbs) lib.flow_thumbs = thumbs;
+    const runs = await captureRunSnapshots();
+    if (runs) lib.runs = runs;
     await savePinnedLib((pins) =>
       pins.some((x) => x.id === pin.id) ? pins : [...pins, lib]);
     if (document.querySelector('.tab[data-tab="pinned"]')
@@ -1680,8 +1701,8 @@ async function enterPinnedTab() {
 function pinnedThumb(p, big = false) {
   const th = document.createElement("div");
   th.className = "pin-thumb";
-  const uri = p.flow_thumbs?.rans_umag || p.flow_thumbs?.fl2d_umag
-    || p.flow_thumbs?.rans_cp || p.flow_thumbs?.fl2d_cp;
+  const uri = p.runs?.rans?.images?.umag || p.runs?.fl2d?.images?.umag
+    || p.runs?.rans?.images?.cp || p.runs?.fl2d?.images?.cp;
   if (typeof uri === "string" && PIN_IMG_RE.test(uri)) {
     const img = document.createElement("img");
     img.src = uri;
@@ -1748,6 +1769,25 @@ function renderPinnedTab() {
       `L/D ${dLB ? "≤ " : ""}${fmtN(h.ld, 1)} · ${h.elements ?? "?"} el` +
       (h.warnings ? ` · ${h.warnings} warn` : "");
     card.appendChild(body);
+    // the verification runs the pin carries, compactly: Load brings the
+    // full result card and flow view back with the design
+    const runBits = [];
+    for (const [eng, nm] of [["rans", "RANS"], ["fl2d", "Fluent 2D"]]) {
+      const rr = p.runs?.[eng]?.status?.result;
+      if (!rr) continue;
+      const d = rr.delta_cl_pct;
+      runBits.push(`${nm}${Number.isFinite(+d)
+        ? ` ${+d > 0 ? "+" : ""}${fmtN(d, 1)}%` : ""}` +
+        (rr.converged === false ? " (unconverged)" : ""));
+    }
+    if (runBits.length) {
+      const runLine = document.createElement("div");
+      runLine.className = "cand-body pin-meta";
+      runLine.textContent = `runs: ${runBits.join(" · ")}`;
+      runLine.title = "Measured verification carried by this pin — Load " +
+                      "restores the full result card and flow view.";
+      card.appendChild(runLine);
+    }
     const meta = document.createElement("div");
     meta.className = "cand-body pin-meta";
     const when = p.t ? new Date(p.t) : null;
@@ -1829,7 +1869,35 @@ async function loadLibraryPin(p, btn) {
     persistSession();
     await refreshGeometry();
     await runAnalysis();
-    toast(`Pinned design ${p.label} loaded from the library.`, "good", 3000);
+    // the pin's verification runs come back with the design, through the
+    // same restored-provenance path project-open uses; they belong to the
+    // config just loaded, so they restore un-stale
+    let restored = 0;
+    if (p.runs?.rans?.status?.result) {
+      const st = structuredClone(p.runs.rans.status);
+      state.ransResult = st;
+      state.ransRev = null;
+      renderRans(st);
+      renderRansResult(st, { provenance: "restored" });
+      const im = safeFlow(p.runs.rans.images);
+      if (im) { ransFlow.cache = im; ransFlow.show(null); }
+      restored++;
+    }
+    if (p.runs?.fl2d?.status?.result) {
+      const st = structuredClone(p.runs.fl2d.status);
+      fl2dResult = st;
+      fl2dRev = null;
+      renderFl2d(st);
+      renderFl2dResult(st, { provenance: "restored" });
+      const im = safeFlow(p.runs.fl2d.images);
+      if (im) { fl2dFlow.cache = im; fl2dFlow.show(null); }
+      restored++;
+    }
+    persistSession();
+    toast(`Pinned design ${p.label} loaded from the library` +
+          (restored ? ` with ${restored} verification run` +
+                      `${restored > 1 ? "s" : ""}` : "") + ".",
+          "good", 3000);
   } catch (e) {
     toast(`Could not load ${p.label}: ${e.message}`);
   } finally {
@@ -1962,6 +2030,29 @@ function buildCompare() {
   addRow("Rules", pins.map((p) => p.context?.rule_preset_name || "–"));
   addRow("Target", pins.map((p) => (Number.isFinite(+p.target)
     ? `${fmtN(p.target, 0)} N` : "–")));
+  // the ACTUAL runs, per engine channel, side by side — a pin carrying
+  // both engines shows OpenFOAM and Fluent rows for the same design
+  for (const [eng, nm] of [["rans", "RANS"], ["fl2d", "Fluent 2D"]]) {
+    if (!pins.some((p) => p.runs?.[eng]?.status?.result)) continue;
+    const sts = pins.map((p) => p.runs?.[eng]?.status || null);
+    const rs = sts.map((s2) => s2?.result || null);
+    addRow(`${nm} Cl`, rs.map((r2) => (r2 && r2.cl_rans != null
+      ? `${numf(r2.cl_rans, 3)}${r2.cl_rans_std != null
+          ? ` ± ${numf(r2.cl_rans_std, 3)}` : ""}` : "–")));
+    addRow(`${nm} Δ% vs panel`, rs.map((r2) =>
+      (r2 && r2.delta_cl_pct != null
+        ? `${+r2.delta_cl_pct > 0 ? "+" : ""}${fmtN(r2.delta_cl_pct, 1)}%`
+        : "–")));
+    addRow(`${nm} downforce`, rs.map((r2) =>
+      (r2 && r2.downforce_n_at_rans_cl != null
+        ? `${fmtN(r2.downforce_n_at_rans_cl, 0)} N` : "–")),
+      winner(rs.map((r2) => r2?.downforce_n_at_rans_cl), "max"));
+    addRow(`${nm} run`, sts.map((s2, i2) => (rs[i2]
+      ? [rs[i2].converged ? "converged" : "unconverged",
+         s2.mesh_size || null,
+         s2.engine || null].filter(Boolean).join(" · ")
+      : "–")));
+  }
   host.appendChild(tbl);
 
   // (b) outline overlay — every pin's stored contours, one color per PIN
@@ -2000,7 +2091,8 @@ function buildCompare() {
   $("pinned-cmp-note").textContent = missing.length
     ? `no stored outline: ${missing.join(", ")}` : "";
 
-  // (c) images strip — each selected pin's flow thumbnails, side by side
+  // (c) images strip — each selected pin's captured run fields, side by
+  // side; a pin carrying both engines shows them stacked in its column
   const iHost = $("pinned-cmp-images");
   iHost.innerHTML = "";
   pins.forEach((p) => {
@@ -2011,22 +2103,28 @@ function buildCompare() {
     cap.textContent = p.label;
     col.appendChild(cap);
     let any = false;
-    for (const [key, capText] of [["rans_umag", "RANS velocity"],
-                                  ["rans_cp", "RANS Cp"],
-                                  ["fl2d_umag", "Fluent 2D velocity"],
-                                  ["fl2d_cp", "Fluent 2D Cp"]]) {
-      const uri = p.flow_thumbs?.[key];
-      if (typeof uri === "string" && PIN_IMG_RE.test(uri)) {
-        const fig = document.createElement("figure");
-        const img = document.createElement("img");
-        img.src = uri;
-        img.alt = capText;
-        const fc = document.createElement("figcaption");
-        fc.textContent = capText;
-        fig.appendChild(img);
-        fig.appendChild(fc);
-        col.appendChild(fig);
-        any = true;
+    for (const [eng, nm] of [["rans", "RANS"], ["fl2d", "Fluent 2D"]]) {
+      const run = p.runs?.[eng];
+      if (!run) continue;
+      // the RANS verify channel can run either engine, so its engine is
+      // information; the Fluent 2D channel's own engine name is not
+      const engine = run.status?.engine;
+      const label = engine && !(eng === "fl2d" && engine === "fluent2d")
+        && engine !== eng ? `${nm} (${engine})` : nm;
+      for (const [key, what] of [["umag", "velocity"], ["cp", "Cp"]]) {
+        const uri = run.images?.[key];
+        if (typeof uri === "string" && PIN_IMG_RE.test(uri)) {
+          const fig = document.createElement("figure");
+          const img = document.createElement("img");
+          img.src = uri;
+          img.alt = `${label} ${what}`;
+          const fc = document.createElement("figcaption");
+          fc.textContent = `${label} ${what}`;
+          fig.appendChild(img);
+          fig.appendChild(fc);
+          col.appendChild(fig);
+          any = true;
+        }
       }
     }
     if (any) iHost.appendChild(col);

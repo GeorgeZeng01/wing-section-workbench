@@ -88,8 +88,15 @@ check("a mirror failure surfaces as a toast, not a lost pin",
 check("the mirror embeds custom .dat text and airfoil names",
       "usedCustomSpecs()" in mirror and "state.customDat" in mirror
       and "airfoil_names" in mirror)
-check("the mirror captures the outline and flow thumbnails",
-      "outlineSnapshot()" in mirror and "captureFlowThumbs()" in mirror)
+check("the mirror captures the outline and the verification runs",
+      "outlineSnapshot()" in mirror and "captureRunSnapshots()" in mirror)
+snaps = body(js, "async function captureRunSnapshots")
+check("run capture packages the FULL terminal status verbatim per engine",
+      "state.ransResult" in snaps and "fl2dResult" in snaps
+      and "structuredClone(st)" in body(js, "async function runSnapshot"))
+check("run images are captured at compare width, not thumbnail width",
+      "shrinkDataURI(flow?.[k], 640)"
+      in body(js, "async function runSnapshot"))
 check("sessionSnapshot does NOT carry the library",
       "pinnedLib" not in body(js, "function sessionSnapshot"))
 check("the preset switch still wipes workspace pins",
@@ -121,6 +128,16 @@ check("Load re-registers embedded uploads and remaps wrapped specs",
 check("Load is a full context switch",
       "resetWorkspaceResults()" in lp and "configRevision++" in lp
       and "writeConfigToForm()" in lp)
+check("Load restores the pin's runs through the restored-provenance path "
+      "(the exact renderers project-open uses)",
+      'renderRansResult(st, { provenance: "restored" })' in lp
+      and 'renderFl2dResult(st, { provenance: "restored" })' in lp
+      and "state.ransResult = st" in lp and "fl2dResult = st" in lp)
+check("restored run images flow through safeFlow into the flow-view "
+      "caches", "safeFlow(p.runs.rans.images)" in lp
+      and "ransFlow.cache" in lp and "fl2dFlow.cache" in lp)
+check("restored runs belong to the loaded config — they come back "
+      "un-stale", "state.ransRev = null" in lp and "fl2dRev = null" in lp)
 
 # ---- rendering safety ---------------------------------------------------
 rt = body(js, "function renderPinnedTab")
@@ -140,6 +157,11 @@ check("compare images pass the same check",
       "PIN_IMG_RE.test(uri)" in bc)
 check("bounded values are excluded from the compare winner computation",
       "excluded" in bc and "cannot win" in bc)
+check("the compare table shows the actual runs per engine channel, side "
+      "by side", "Δ% vs panel" in bc and "cl_rans" in bc
+      and '["rans", "RANS"]' in bc and '["fl2d", "Fluent 2D"]' in bc)
+check("the images strip labels each field with its engine",
+      "images?.[key]" in bc or "run.images" in bc)
 shrink = body(js, "async function shrinkDataURI")
 check("flow thumbnails are downscaled before storage (canvas -> JPEG)",
       "drawImage" in shrink and 'toDataURL("image/jpeg"' in shrink)

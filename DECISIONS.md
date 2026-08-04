@@ -2608,7 +2608,8 @@ not stored under a misnamed field forever; same optimistic rev token,
 409-carrying-the-newer-library, atomic unique-tmp replace, shared lock,
 read-check-write. The client resolves a 409 by re-GET + re-apply +
 retry-once rather than parsing the body (detailOf flattens object
-details). Caps: 48 pins, 8 MB store, per-field byte limits.
+details). Caps: 48 pins, 12 MB store (clearing the 16 MB streamed body
+cap with headroom), per-field byte limits.
 
 **A pin embeds what a later session cannot reconstruct.** Uploaded
 airfoils live in server memory, so a pin carries its custom .dat text and
@@ -2617,16 +2618,24 @@ the Load path re-registers and remaps specs exactly as project-open does
 validation, because restart survival is the feature. The config travels
 verbatim (parse-validated, never round-tripped through the dataclass).
 Pins also carry a stride-downsampled installed-frame outline (~2 KB) so
-the tab renders thumbnails instantly and offline, and optional ~320px
-flow thumbnails (safeFlow-shaped data URIs, downscaled client-side)
-captured from whatever flow images the workspace holds at pin time.
+the tab renders thumbnails instantly and offline, and the ACTUAL
+verification runs: per engine channel (RANS verify / Fluent 2D) the full
+terminal status verbatim — the same object the session and project
+restore paths render, so Load brings the result card and flow view back
+with the design, un-stale — plus ~640px flow images (safeFlow-shaped
+data URIs, downscaled client-side, byte-capped server-side). The
+full-resolution field stays with the case dir; the pin is self-contained
+evidence that survives run-dir pruning and restarts.
 
 **Compare shows numbers AND pictures, honestly.** Stat table with winner
 highlighting that EXCLUDES bounded values (a floored drag cannot win
-"lowest drag"; a ceiling L/D cannot win "highest"), section outlines
-overlaid in per-pin colors with a legend, a side-by-side flow-thumbnail
-strip, and a button-gated Cp overlay that re-analyzes each stored config
-serially (one panel solve each) with per-pin colors and dashed flaps.
+"lowest drag"; a ceiling L/D cannot win "highest"), per-engine run rows
+(Cl ± std, Δ% vs panel, measured downforce, convergence · mesh · engine)
+so a design's OpenFOAM and Fluent runs sit side by side, section
+outlines overlaid in per-pin colors with a legend, an engine-labeled
+side-by-side flow-image strip, and a button-gated Cp overlay that
+re-analyzes each stored config serially (one panel solve each) with
+per-pin colors and dashed flaps.
 Everything library-origin reaches the DOM through textContent, and <img>
 sources are re-checked against the data-URI shape client-side — library
 files can be hand-edited.

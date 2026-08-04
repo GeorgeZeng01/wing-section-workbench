@@ -1818,15 +1818,21 @@ def ansys_presets_put(body: AnsysPresetsBody):
 
 PINNED_FILE = SESSION_FILE.parent / "pinned_designs.json"
 PINNED_MAX = 48                  # 4x the workspace cap of 12
-PINNED_MAX_BYTES = 8_000_000     # its own file; the session cap is untouched
+# Its own file; the session cap is untouched. Must clear MAX_BODY_BYTES
+# (16 MB) with JSON headroom, since a PUT carries the whole library.
+PINNED_MAX_BYTES = 12_000_000
 _PIN_ID_RE = re.compile(r"^[0-9a-f]{8,32}$")
 _PIN_CUSTOM_RE = re.compile(r"^custom:[a-z0-9_-]+$")
-# flow thumbnails: the same shape safeFlow() accepts client-side, with a
-# per-field byte cap (a downscaled ~320px JPEG runs 10-30 KB)
-_PIN_THUMB_KEYS = ("rans_umag", "rans_cp", "fl2d_umag", "fl2d_cp")
-_PIN_THUMB_RE = re.compile(
+# verification runs captured with the pin: per engine channel, the full
+# terminal status (verbatim — the same object the session/project restore
+# path renders) plus compare-width flow images in the exact shape the
+# client's safeFlow() accepts, each image byte-capped (a ~640px JPEG runs
+# 40-90 KB)
+_PIN_RUN_KEYS = ("rans", "fl2d")
+_PIN_RUN_IMG_KEYS = ("umag", "cp")
+_PIN_IMG_DATA_RE = re.compile(
     r"^data:image/(png|jpe?g|webp);base64,[A-Za-z0-9+/=]+$")
-_PIN_THUMB_MAX = 120_000
+_PIN_RUN_IMG_MAX = 250_000
 _PIN_DAT_MAX = 120_000           # an 800-pt .dat (the upload cap) is ~25 KB
 
 
@@ -1921,20 +1927,46 @@ def _pin_clean(p, seen_ids: set) -> dict:
                 422, detail=f"pin {label!r}: outline must be up to 4 "
                             f"polylines of up to 120 finite [x, y] points")
         out["outline"] = ol
-    th = p.get("flow_thumbs")
-    if th is not None:
-        if not isinstance(th, dict) \
-                or any(k not in _PIN_THUMB_KEYS for k in th):
+    rn = p.get("runs")
+    if rn is not None:
+        if not isinstance(rn, dict) \
+                or any(k not in _PIN_RUN_KEYS for k in rn):
             raise HTTPException(
-                422, detail=f"pin {label!r}: flow_thumbs allows only "
-                            f"{', '.join(_PIN_THUMB_KEYS)}")
-        for k, v in th.items():
-            if not (isinstance(v, str) and len(v) <= _PIN_THUMB_MAX
-                    and _PIN_THUMB_RE.match(v)):
+                422, detail=f"pin {label!r}: runs allows only "
+                            f"{', '.join(_PIN_RUN_KEYS)}")
+        out_runs = {}
+        for k, v in rn.items():
+            if not isinstance(v, dict):
                 raise HTTPException(
-                    422, detail=f"pin {label!r}: {k} must be a data-URI "
-                                f"image up to {_PIN_THUMB_MAX} bytes")
-        out["flow_thumbs"] = th
+                    422, detail=f"pin {label!r}: runs.{k} must be an object")
+            st = v.get("status")
+            if not isinstance(st, dict):
+                raise HTTPException(
+                    422, detail=f"pin {label!r}: runs.{k}.status must be "
+                                f"an object (the run's terminal status)")
+            # the status travels verbatim like the config: it is rendered
+            # by the same restore path project files already flow through
+            entry = {"status": st}
+            im = v.get("images")
+            if im is not None:
+                if not isinstance(im, dict) \
+                        or any(kk not in _PIN_RUN_IMG_KEYS for kk in im):
+                    raise HTTPException(
+                        422, detail=f"pin {label!r}: runs.{k}.images "
+                                    f"allows only "
+                                    f"{', '.join(_PIN_RUN_IMG_KEYS)}")
+                for kk, vv in im.items():
+                    if not (isinstance(vv, str)
+                            and len(vv) <= _PIN_RUN_IMG_MAX
+                            and _PIN_IMG_DATA_RE.match(vv)):
+                        raise HTTPException(
+                            422,
+                            detail=f"pin {label!r}: runs.{k}.{kk} must be "
+                                   f"a data-URI image up to "
+                                   f"{_PIN_RUN_IMG_MAX} bytes")
+                entry["images"] = im
+            out_runs[k] = entry
+        out["runs"] = out_runs
     return out
 
 
