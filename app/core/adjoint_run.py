@@ -73,6 +73,8 @@ ADJOINT_ITERS_RANGE = (50, 5000)
 MARGIN_PCT_RANGE = (1.0, 15.0)
 SETTLE_ITERS_RANGE = (50, 2000)
 
+STEP_PCT_RANGE = (0.1, 10.0)
+
 DEFAULTS = {
     "drag_exchange_k": 0.25,   # the optimizer tab's default exchange rate
     "design_iters": 12,
@@ -80,6 +82,14 @@ DEFAULTS = {
     "adjoint_iters": 250,
     "margin_pct": 6.0,
     "settle_iters": 200,
+    # requested relative J change per design iteration — the morph
+    # aggressiveness knob. Floor-tight seeds (flaps sitting at the
+    # aft-thickness floor) violate on the very first 2% step; a gentler
+    # request morphs less per iteration
+    "step_pct": 2.0,
+    # final-stage contract: a polish that improves re-verifies itself on
+    # a fresh mesh without another click (the server chains the run)
+    "auto_reverify": True,
 }
 
 # early stop: J improvement below this relative bar on two consecutive
@@ -165,6 +175,9 @@ def resolve_options(options: dict | None) -> dict:
         v = o.get(key)
         return DEFAULTS[key] if v is None else v
 
+    auto = pick("auto_reverify")
+    if not isinstance(auto, bool):
+        raise ValueError("auto_reverify must be true or false")
     return {
         "drag_exchange_k": _num(pick("drag_exchange_k"),
                                 "drag_exchange_k", *K_RANGE),
@@ -178,6 +191,8 @@ def resolve_options(options: dict | None) -> dict:
                            *MARGIN_PCT_RANGE),
         "settle_iters": _num(pick("settle_iters"), "settle_iters",
                              *SETTLE_ITERS_RANGE, int),
+        "step_pct": _num(pick("step_pct"), "step_pct", *STEP_PCT_RANGE),
+        "auto_reverify": auto,
     }
 
 
@@ -494,6 +509,7 @@ class AdjointPolishJob:
         self.error: str | None = None
         self.iteration = 0
         self.latest: dict | None = None
+        self.baseline: dict | None = None
         self.history: list[dict] = []
         self.mesh = copy.deepcopy(getattr(seed_job, "mesh", None))
         self.result: dict | None = None
@@ -624,6 +640,16 @@ class AdjointPolishJob:
                     f"seed run's {seed_cl:.3f} — deltas are measured "
                     f"against the re-settled state")
             base_df, base_drag, base_j = self._newtons(base_cl, base_cd)
+            with self._lock:
+                # the chart's iteration-0 point: with the baseline in the
+                # snapshot from the settle onward, a one-iteration run
+                # still draws a segment instead of an invisible dot
+                self.baseline = {
+                    "iter": 0, "cl": round(base_cl, 4),
+                    "cd": round(base_cd, 5),
+                    "downforce_n": round(base_df, 1),
+                    "drag_n": round(base_drag, 1),
+                    "j_n": round(base_j, 1), "compliant": True}
             if self._cancelled():
                 return fm
 
@@ -633,7 +659,8 @@ class AdjointPolishJob:
                 drag_exchange_k=o["drag_exchange_k"],
                 region_x=bounds["x"], region_y=bounds["y"],
                 flow_iterations=o["flow_iters"],
-                adjoint_iterations=o["adjoint_iters"])
+                adjoint_iterations=o["adjoint_iters"],
+                step_pct=o["step_pct"])
             if setup["failed"]:
                 with self._lock:
                     self.state = "failed"
@@ -686,10 +713,13 @@ class AdjointPolishJob:
                     self.latest = row
                     self.history = self.history + [row]
                 if not rules["ok"]:
+                    # the delivery (or non-delivery) is stated by
+                    # _finalize, which knows whether anything compliant
+                    # was ever gained — a delivery clause here reads as
+                    # a contradiction on a no-gain run
                     stop_reason = (
                         f"design iteration {it} violated "
-                        f"{rules['violations'][0]['rule']} — "
-                        f"delivering the last compliant shape")
+                        f"{rules['violations'][0]['rule']}")
                     break
                 # gain measured against the best BEFORE this iterate, so
                 # a slow sub-bar crawl still counts as flat
@@ -713,8 +743,7 @@ class AdjointPolishJob:
                                    f"iterations")
                     break
                 if over_hits >= EARLY_STOP_HITS:
-                    stop_reason = ("the optimizer walked past the peak — "
-                                   "delivering the best compliant shape")
+                    stop_reason = "the optimizer walked past the peak"
                     break
 
             self._finalize(fm, bounds, setup,
@@ -890,8 +919,15 @@ class AdjointPolishJob:
                 "improved": bool(improved),
                 "iterations_run": n_done,
                 "delivered_iteration": best["iter"] if improved else None,
-                "stop_reason": stop_reason if improved else (
-                    "no compliant improvement found — " + stop_reason),
+                "stop_reason": (
+                    f"{stop_reason} — delivering the best compliant "
+                    f"shape (iteration {best['iter']})" if improved
+                    else "no compliant improvement found — " + stop_reason
+                    + (" on the very first morph — the seed already "
+                       "sits on that limit; a smaller step request "
+                       "morphs more gently"
+                       if n_done == 1 and "violated" in stop_reason
+                       else "")),
                 "rules": best["rules"] if improved else None,
                 "displacement": best["stats"] if improved else None,
                 "region": bounds,
@@ -971,6 +1007,7 @@ class AdjointPolishJob:
                 "settings": dict(self.options),
                 "elapsed_s": round(elapsed, 1),
                 "latest": self.latest,
+                "baseline": self.baseline,
                 "history": list(self.history),
                 "mesh": self.mesh,
                 "result": self.result if self.state == "done" else None,

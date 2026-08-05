@@ -70,6 +70,7 @@ class StubJob:
 
     def __init__(self, engine="polish", state="done", result=None,
                  config=CFG, seed_settings=None, n_ranks=1):
+        import threading
         self.id = "stub" + os.urandom(4).hex()
         self._engine = engine
         self.state = state
@@ -80,6 +81,7 @@ class StubJob:
         self.seed_settings = seed_settings or {}
         self.n_ranks = n_ranks
         self._container = ""
+        self._lock = threading.Lock()
 
     def snapshot(self):
         return {"engine": self._engine, "id": self.id,
@@ -109,11 +111,14 @@ check("body: defaults are exactly the job's defaults",
       and b.flow_iters == opts["flow_iters"]
       and b.adjoint_iters == opts["adjoint_iters"]
       and b.margin_pct == opts["margin_pct"]
-      and b.settle_iters == opts["settle_iters"])
+      and b.settle_iters == opts["settle_iters"]
+      and b.step_pct == opts["step_pct"]
+      and b.auto_reverify == opts["auto_reverify"] is True)
 for field, val in [("drag_exchange_k", -0.1), ("drag_exchange_k", 10.1),
                    ("design_iters", 0), ("design_iters", 61),
                    ("flow_iters", 99), ("adjoint_iters", 49),
-                   ("margin_pct", 0.5), ("settle_iters", 2001)]:
+                   ("margin_pct", 0.5), ("settle_iters", 2001),
+                   ("step_pct", 0.05), ("step_pct", 10.1)]:
     try:
         server.PolishStartBody(run_id="x", **{field: val})
         check(f"body: {field}={val} refused", False)
@@ -323,6 +328,28 @@ try:
           and rjob.settings["n_iters"] == 700,
           str({k: rjob.settings[k] for k in
                ("edge_size_mm", "first_layer_mm", "n_iters")}))
+    check("reverify: the chained run's id is recorded on the polish",
+          done_polish.result.get("reverify_job_id") == r["job_id"])
+
+    # ---- the auto-chain: the server re-verifies by itself ----
+    auto_polish = make_done_polish()
+    server._polish_autoverify_watch(auto_polish)   # already done: chains
+    rid2 = (auto_polish.result or {}).get("reverify_job_id")
+    check("auto-chain: watcher starts the re-verify and records the id",
+          rid2 is not None,
+          str(auto_polish.result.get("reverify_error")))
+    rjob2 = cfd_run.get(rid2) if rid2 else None
+    if rjob2 is not None:
+        for _ in range(600):
+            if rjob2.state in ("done", "failed", "cancelled"):
+                break
+            time.sleep(0.05)
+    check("auto-chain: the chained run is the standard override run "
+          "and completes",
+          rjob2 is not None and rjob2.snapshot()["state"] == "done"
+          and rjob2.snapshot()["profiles_override"] is True
+          and rjob2.snapshot()["conventions"] == "studio")
+    unplant(auto_polish)
 finally:
     (fluent2d_run._mcp, fluent2d_run._dxf, fluent2d_run._sizing,
      fluent2d_run._chain) = real
@@ -333,7 +360,24 @@ runner = plant(StubJob(engine="fluent2d", state="running"))
 expect_http("reverify: refused while another job runs", 409,
             lambda: server.polish_reverify(done_polish.id),
             "already running")
+# the auto-chain must not fail silently in the same situation
+blocked = make_done_polish()
+server._polish_autoverify_watch(blocked)
+check("auto-chain: a busy solver lands as reverify_error, not silence",
+      "auto re-verify could not start"
+      in (blocked.result.get("reverify_error") or "")
+      and "Re-verify button" in blocked.result["reverify_error"])
+unplant(blocked)
 unplant(runner)
+
+# a polish that delivered nothing chains nothing — and says nothing
+none_polish = plant(StubJob(engine="polish", state="done",
+                            result={"improved": False}))
+server._polish_autoverify_watch(none_polish)
+check("auto-chain: a no-gain polish chains nothing",
+      "reverify_job_id" not in none_polish.result
+      and "reverify_error" not in none_polish.result)
+unplant(none_polish)
 
 # ---------- shared endpoints treat polish as a Fluent engine ----------
 

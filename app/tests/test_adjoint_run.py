@@ -75,12 +75,19 @@ for bad, why in [({"drag_exchange_k": -0.1}, "below range"),
                  ({"design_iters": 61}, "above range"),
                  ({"design_iters": 2.5}, "fractional int"),
                  ({"flow_iters": float("inf")}, "non-finite"),
-                 ({"settle_iters": True}, "bool")]:
+                 ({"settle_iters": True}, "bool"),
+                 ({"step_pct": 0.05}, "step below range"),
+                 ({"step_pct": 10.1}, "step above range"),
+                 ({"auto_reverify": "yes"}, "non-bool auto")]:
     try:
         adjoint_run.resolve_options(bad)
         check(f"options: {why} refused", False)
     except ValueError as e:
         check(f"options: {why} refused", list(bad)[0] in str(e))
+check("options: the auto-reverify contract defaults ON",
+      adjoint_run.resolve_options(None)["auto_reverify"] is True
+      and adjoint_run.resolve_options(
+          {"auto_reverify": False})["auto_reverify"] is False)
 
 
 # ---------- region_bounds ----------
@@ -460,6 +467,12 @@ check("happy: region in result matches region_bounds and reached the "
       and r["region"]["y"] == fake.setup_kw["region_y"])
 check("happy: exchange rate handed to the observable builder",
       fake.setup_kw["drag_exchange_k"] == 0.5)
+check("happy: step request handed to the session layer",
+      fake.setup_kw["step_pct"] == 2.0)
+check("happy: the baseline rides the snapshot as iteration 0",
+      job.snapshot()["baseline"] is not None
+      and job.snapshot()["baseline"]["iter"] == 0
+      and abs(job.snapshot()["baseline"]["cl"] - 2.10) < 1e-9)
 check("happy: no harvest row for a polish",
       not (Path(_TMP) / "harvest.jsonl").exists())
 check("happy: engine and seed threading in the snapshot",
@@ -500,6 +513,24 @@ check("rule-stop: delivered profiles are the compliant morph",
       (job.case_dir / "polished_profiles.json").is_file()
       and json.loads((job.case_dir / "polished_profiles.json")
                      .read_text())["iteration"] == 1)
+
+# --- the floor-tight seed: the FIRST morph violates, nothing gained
+# (the measured live behavior on a seed whose flaps sit at the floor) ---
+
+fake = FakeFM([2.10, 2.11, 2.12], [0.085] * 3,
+              lambda it: [BASE_POLYS[0], squashed(BASE_POLYS[1])])
+job = run_job(fake, options={"design_iters": 12})
+r = job.result
+check("floor-tight: no-gain verdict carries the first-morph diagnosis",
+      job.state == "done" and not r["improved"]
+      and r["stop_reason"].startswith("no compliant improvement")
+      and "very first morph" in r["stop_reason"]
+      and "smaller step request" in r["stop_reason"], r["stop_reason"])
+check("floor-tight: no contradictory delivery clause on a no-gain run",
+      "delivering" not in r["stop_reason"])
+check("floor-tight: the baseline still rides the snapshot for the chart",
+      job.snapshot()["baseline"] is not None
+      and len(job.snapshot()["history"]) == 1)
 
 # --- no compliant improvement: J only degrades ---
 

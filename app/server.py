@@ -1080,6 +1080,14 @@ class PolishStartBody(BaseModel):
     margin_pct: float = Field(default=6.0, ge=1.0, le=15.0,
                               allow_inf_nan=False)
     settle_iters: int = Field(default=200, ge=50, le=2000)
+    # morph aggressiveness: requested relative J change per design
+    # iteration — floor-tight seeds want a gentler request
+    step_pct: float = Field(default=2.0, ge=0.1, le=10.0,
+                            allow_inf_nan=False)
+    # the final-stage contract: an improved polish re-verifies itself on
+    # a fresh mesh without another click (server-side, so it happens
+    # even with the browser closed)
+    auto_reverify: bool = True
 
 
 @app.post("/api/polish/start")
@@ -1109,6 +1117,8 @@ def polish_start(body: PolishStartBody):
                 "adjoint_iters": body.adjoint_iters,
                 "margin_pct": body.margin_pct,
                 "settle_iters": body.settle_iters,
+                "step_pct": body.step_pct,
+                "auto_reverify": body.auto_reverify,
             })
         except (ValueError, TypeError, KeyError) as e:
             raise HTTPException(422, detail=_err_detail(e))
@@ -1116,6 +1126,10 @@ def polish_start(body: PolishStartBody):
             job_id = cfd_run.admit_and_launch(job)
         except RuntimeError as e:
             raise HTTPException(409, detail=str(e))
+    if body.auto_reverify:
+        threading.Thread(target=_polish_autoverify_watch, args=(job,),
+                         name=f"polish-autoverify-{job.id}",
+                         daemon=True).start()
     return {"job_id": job_id}
 
 
@@ -1147,25 +1161,13 @@ def _polish_profiles(job) -> list:
     return polys
 
 
-@app.post("/api/polish/{job_id}/reverify")
-def polish_reverify(job_id: str):
-    """Re-verify the polished shape on a FRESH mesh through the standard
-    ANSYS 2D chain (studio conventions): the honest measure of the
-    polish gain, free of morphed-mesh quality effects. The run carries
-    profiles_override, so the panel comparison and the calibration
-    harvest are disabled on it."""
-    from .core import cfd_run, fluent2d_run, rans_queue
-    job = cfd_run.get(job_id)
-    if job is None:
-        raise HTTPException(404, detail="unknown job")
-    if job.snapshot().get("engine") != "polish":
-        raise HTTPException(422, detail="this run is not an adjoint "
-                                        "polish")
-    polys = _polish_profiles(job)
-    # the seed's resolved mesh recipe, replayed as overrides (requested
-    # values where the chain capped them — it re-caps against the
-    # polished clearances itself); conventions are ALWAYS studio for a
-    # re-verify — the drift doctrine judges convergence
+def _build_reverify_job(job, polys):
+    """The polished profiles as a ready-to-admit Fluent2DJob: the seed's
+    resolved mesh recipe replayed as overrides (requested values where
+    the chain capped them — it re-caps against the polished clearances
+    itself), conventions ALWAYS studio — the drift doctrine judges the
+    re-verification. Shared by the endpoint and the auto-chain."""
+    from .core import fluent2d_run
     seed_settings = dict(getattr(job, "seed_settings", {}) or {})
     overrides = {}
     for name in _ANSYS_OVERRIDE_NAMES:
@@ -1175,6 +1177,65 @@ def polish_reverify(job_id: str):
             overrides[name] = v
     sizing = seed_settings.get("sizing") or "default"
     n_iters = int(seed_settings.get("n_iters") or FLUENT2D_ITERS)
+    return fluent2d_run.Fluent2DJob(
+        job.config, sizing, n_iters, job.n_ranks,
+        "studio", settings=overrides, profiles_override=polys)
+
+
+def _polish_autoverify_watch(job) -> None:
+    """The auto-chain: wait out the polish, then start the fresh-mesh
+    re-verification the moment it finishes improved. Runs server-side so
+    walking away from the browser still ends in a verified number. The
+    outcome — the chained run's id, or why there is none — is written
+    into the polish result, where the UI and the pins read it."""
+    from .core import cfd_run, rans_queue
+    deadline = _time_mod.time() + 13 * 3600   # job backstop + slack
+    while _time_mod.time() < deadline:
+        if job.state in ("done", "failed", "cancelled"):
+            break
+        _time_mod.sleep(2.0)
+    if job.state != "done" or not job.result:
+        return                       # nothing to chain, nothing to report
+    if not job.result.get("improved"):
+        return                       # no compliant shape — no re-verify
+    try:
+        art = job.result.get("artifacts") or {}
+        path = Path(job.case_dir) / (art.get("profiles_json") or "")
+        import json as _json
+        polys = _json.loads(path.read_text(encoding="utf-8"))["elements"]
+        with _rans_start_lock:
+            q = rans_queue.get_current()
+            if q is not None and q.state in ("pending", "running"):
+                raise RuntimeError("a shortlist verification queue is "
+                                   "running")
+            rjob = _build_reverify_job(job, polys)
+            rid = cfd_run.admit_and_launch(rjob)
+        with job._lock:
+            job.result["reverify_job_id"] = rid
+    except Exception as e:
+        with job._lock:
+            job.result["reverify_error"] = (
+                f"auto re-verify could not start: {e} — use the "
+                f"Re-verify button")
+
+
+@app.post("/api/polish/{job_id}/reverify")
+def polish_reverify(job_id: str):
+    """Re-verify the polished shape on a FRESH mesh through the standard
+    ANSYS 2D chain (studio conventions): the honest measure of the
+    polish gain, free of morphed-mesh quality effects. The run carries
+    profiles_override, so the panel comparison and the calibration
+    harvest are disabled on it. (An improved polish chains this
+    automatically unless auto_reverify was off; this endpoint is the
+    manual path.)"""
+    from .core import cfd_run, rans_queue
+    job = cfd_run.get(job_id)
+    if job is None:
+        raise HTTPException(404, detail="unknown job")
+    if job.snapshot().get("engine") != "polish":
+        raise HTTPException(422, detail="this run is not an adjoint "
+                                        "polish")
+    polys = _polish_profiles(job)
     with _rans_start_lock:
         q = rans_queue.get_current()
         if q is not None and q.state in ("pending", "running"):
@@ -1182,16 +1243,16 @@ def polish_reverify(job_id: str):
                                             "queue is running — cancel it "
                                             "or wait for it to finish")
         try:
-            rjob = fluent2d_run.Fluent2DJob(
-                job.config, sizing, n_iters, job.n_ranks,
-                "studio", settings=overrides,
-                profiles_override=polys)
+            rjob = _build_reverify_job(job, polys)
         except (ValueError, TypeError, KeyError) as e:
             raise HTTPException(422, detail=_err_detail(e))
         try:
             rid = cfd_run.admit_and_launch(rjob)
         except RuntimeError as e:
             raise HTTPException(409, detail=str(e))
+    with job._lock:
+        job.result["reverify_job_id"] = rid
+        job.result.pop("reverify_error", None)
     return {"job_id": rid, "polish_id": job_id}
 
 

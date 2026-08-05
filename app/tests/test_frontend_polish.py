@@ -33,7 +33,8 @@ def check(label, ok, extra=""):
 IDS = ["polish-block", "btn-polish-run", "btn-polish-cancel",
        "polish-note", "polish-settings", "polish-k", "polish-iters",
        "polish-flow-iters", "polish-adjoint-iters", "polish-margin",
-       "polish-settle", "polish-progress", "polish-status",
+       "polish-settle", "polish-step", "polish-auto",
+       "polish-progress", "polish-status",
        "polish-charts", "polish-conv", "polish-result", "polish-actions",
        "btn-polish-reverify", "btn-polish-dxf", "btn-polish-case"]
 for i in IDS:
@@ -90,9 +91,21 @@ check("app.js: pin capture carries the polish channel",
       "out.polish = await runSnapshot(polishResult" in APP)
 check("app.js: reverify hands the run to the fl2d machinery with "
       "polish provenance",
-      "fl2dReverifyOf = { polishId: polishResult.id, jobId: job_id }"
-      in APP and '? "polish"' in APP
+      "function attachReverifyRun(jobId, polishId)" in APP
+      and '? "polish"' in APP
       and 'renderPolishReverify(s)' in APP)
+check("app.js: the server-chained re-verify auto-attaches on completion",
+      "async function autoAttachReverify(s)" in APP
+      and "autoAttachReverify(s);" in APP
+      and "reverify_job_id" in APP and "reverify_error" in APP)
+check("app.js: the start body carries the step request and the "
+      "auto-reverify contract",
+      "step_pct: stepPct" in APP
+      and 'auto_reverify: $("polish-auto").checked' in APP)
+check("app.js: the chart starts at the baseline (iteration 0)",
+      "const hist = base ? [{ ...base, iter: 0 }, ...s.history]" in APP)
+check("app.js: a floor-tight no-gain run points at the step knob",
+      "A smaller " in APP and "Step request morphs more gently" in APP)
 check("app.js: the polish provenance names the free-form contour",
       "re-verification of the POLISHED shape" in APP)
 check("app.js: a live polish from another window is re-attached",

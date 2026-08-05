@@ -2718,3 +2718,25 @@ optimizer then shoots the session, 12 h backstop), pin as their own
 run channel, export DXF as exact polylines (a spline would re-smooth
 the very millimeter shaping the adjoint added), and protect their seed
 and case dirs from run-dir pruning while referenced.
+
+**Amendment — the first user run (2026-08-03, same day).** The first
+polish in anger stopped exactly as designed (a floor-tight seed: the
+first morph violated min_thickness_mm) but presented it badly, and the
+workflow asked one click too many. Three changes. (1) Prose: the stop
+line no longer glues a delivery clause onto a no-gain verdict — a
+first-morph violation now reads "no compliant improvement found —
+design iteration 1 violated min_thickness_mm on the very first morph —
+the seed already sits on that limit; a smaller step request morphs
+more gently". (2) Chart: the re-settled baseline rides the snapshot as
+iteration 0, so a one-iteration run draws a real segment instead of an
+invisible point. (3) The re-verification is part of the run, not a
+button: polish is the FINAL stage, so an improved polish chains the
+fresh-mesh re-verify automatically — server-side (a watcher thread
+admits the Fluent2DJob the moment the polish finishes improved, and
+writes reverify_job_id, or reverify_error with the manual fallback
+named, into the polish result), so walking away from the browser still
+ends in a verified number. auto_reverify defaults ON; the manual
+button remains for the off case and for retries. A step-request knob
+(step_pct, 0.1-10%/design iteration) exposes the morph aggressiveness
+the goal row always had — the honest option for floor-tight seeds,
+short of the thickness-preserving design-condition leg.

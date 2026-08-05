@@ -916,7 +916,8 @@ def adjoint_setup(profile_zones: list[str] = ["profile"],
                   region_y: list[float] = [],
                   flow_iterations: int = 300,
                   adjoint_iterations: int = 250,
-                  morphing_method: str = "polynomials") -> dict:
+                  morphing_method: str = "polynomials",
+                  step_pct: float = ADJ_STEP_PCT) -> dict:
     """Configure Fluent's gradient-based shape optimizer (adjoint) for a
     final-stage polish of the loaded, solved case: observables
     J = downforce - k*drag on the profile walls, a cartesian design
@@ -999,7 +1000,7 @@ def adjoint_setup(profile_zones: list[str] = ["profile"],
         # observable/condition fields are the manager's and may refuse a
         # write, which is fine as long as the goal itself lands
         goal_row = {"observable": ADJ_OBS_J, "goal": "step-size",
-                    "value": float(ADJ_STEP_PCT),
+                    "value": float(step_pct),
                     "value_as_percentage": True}
         objs = opt.objectives.objectives
         try:
@@ -1023,8 +1024,8 @@ def adjoint_setup(profile_zones: list[str] = ["profile"],
         st.flow_iterations = int(flow_iterations)
         st.adjoint_iterations = int(adjoint_iterations)
     _fence(applied, failed,
-           f"optimizer: shape-opt, step J +{ADJ_STEP_PCT:g}%/iteration",
-           optimizer)
+           f"optimizer: shape-opt, step J +{float(step_pct):g}"
+           f"%/iteration", optimizer)
     _fence(applied, failed, "optimizer initialize",
            lambda: d.optimizer.initialize())
     return {"applied": applied, "failed": failed,

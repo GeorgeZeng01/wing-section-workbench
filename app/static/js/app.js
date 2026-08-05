@@ -6181,7 +6181,9 @@ async function startPolish() {
   const adjIters = polishReadInt("polish-adjoint-iters", 50, 5000);
   const margin = polishReadInt("polish-margin", 1, 15);
   const settle = polishReadInt("polish-settle", 50, 2000);
-  if ([k, iters, flowIters, adjIters, margin, settle].some(v => v == null)) {
+  const stepPct = polishReadInt("polish-step", 0.1, 10);
+  if ([k, iters, flowIters, adjIters, margin, settle, stepPct]
+      .some(v => v == null)) {
     toast("A polish setting is out of range — the tooltips state each " +
           "field's limits.");
     return;
@@ -6191,6 +6193,7 @@ async function startPolish() {
     const { job_id } = await api.polishStart(seed.id, {
       drag_exchange_k: k, design_iters: iters, flow_iters: flowIters,
       adjoint_iters: adjIters, margin_pct: margin, settle_iters: settle,
+      step_pct: stepPct, auto_reverify: $("polish-auto").checked,
     });
     polishJob = job_id;
     polishResult = null;
@@ -6241,6 +6244,7 @@ function pollPolish() {
         if (s.state === "done") {
           polishResult = s;
           renderPolishResult(s);
+          autoAttachReverify(s);
         }
       }
     } catch (e) {
@@ -6254,6 +6258,38 @@ function pollPolish() {
             `re-attach if it is still running.`);
     }
   }, 1000);
+}
+
+async function autoAttachReverify(s) {
+  // the server chains the fresh-mesh re-verification itself (default);
+  // the page's job is only to notice the chained run and attach the
+  // standard poll to it. The id can land a beat after the polish flips
+  // done (the watcher races the poll), so look again for a little while.
+  if (!s.result?.improved || s.result?.settings?.auto_reverify === false) {
+    return;
+  }
+  for (let tries = 0; tries < 20; tries++) {
+    const rid = s.result?.reverify_job_id;
+    if (rid) {
+      $("btn-polish-reverify").disabled = true;   // the chain owns it
+      attachReverifyRun(rid, s.id);
+      return;
+    }
+    if (s.result?.reverify_error) {
+      const host = $("polish-result");
+      const d = document.createElement("div");
+      d.className = "warning-item";
+      d.textContent = s.result.reverify_error;
+      host.appendChild(d);
+      return;
+    }
+    await new Promise(r => setTimeout(r, 1000));
+    try {
+      s = await api.ransStatus(s.id);
+    } catch {
+      return;   // registry lost the job — the manual button remains
+    }
+  }
 }
 
 function renderPolish(s) {
@@ -6272,14 +6308,18 @@ function renderPolish(s) {
   $("polish-status").textContent = bits.join(" · ");
   if (s.history && s.history.length) {
     $("polish-charts").classList.remove("empty");
-    const base = s.result?.baseline;
+    // the baseline is iteration 0 on the chart: a one-iteration run
+    // draws a real segment instead of an invisible single point, and
+    // every run shows where it started
+    const base = s.baseline ?? s.result?.baseline;
+    const hist = base ? [{ ...base, iter: 0 }, ...s.history] : s.history;
     lineChart($("polish-conv"), {
       series: [
         { name: "J = ΔF − k·drag", color: SERIES[0],
-          x: s.history.map(h => h.iter), y: s.history.map(h => h.j_n) },
+          x: hist.map(h => h.iter), y: hist.map(h => h.j_n) },
         { name: "downforce", color: SERIES[1],
-          x: s.history.map(h => h.iter),
-          y: s.history.map(h => h.downforce_n) },
+          x: hist.map(h => h.iter),
+          y: hist.map(h => h.downforce_n) },
       ],
       xLabel: "design iteration",
       yLabel: "newtons (credible, span-scaled)",
@@ -6326,7 +6366,13 @@ function renderPolishResult(s) {
   if (!r.improved) {
     html += '<div class="warning-item">No compliant improvement found — ' +
       'the seed shape already sits at (or the first step left) the ' +
-      'legality/buildability boundary under this objective.</div>';
+      'legality/buildability boundary under this objective. A smaller ' +
+      'Step request morphs more gently and can stay compliant longer; ' +
+      'a floor-tight seed may simply have nothing to give without ' +
+      'relaxing the constraint.</div>';
+  }
+  if (r.reverify_error) {
+    html += `<div class="warning-item">${esc(r.reverify_error)}</div>`;
   }
   if (r.rules) {
     if (r.rules.ok) {
@@ -6387,6 +6433,32 @@ function renderPolishReverify(s) {
   host.appendChild(div);
 }
 
+function attachReverifyRun(jobId, polishId) {
+  // hand the run to the standard Fluent 2D machinery: same poll, same
+  // chart, same verdict rendering — provenance marks it as the polished
+  // shape's re-verification. Used by the manual button and by the
+  // server-chained auto re-verify alike.
+  fl2dReverifyOf = { polishId, jobId };
+  fl2dJob = jobId;
+  fl2dConventions = "studio";
+  fl2dCEst = null;          // panel estimate does not apply
+  fl2dRev = null;
+  fl2dAdoptedLive = false;
+  fl2dFlow.reset();
+  $("btn-fl2d-cancel").disabled = false;
+  fl2dLockControls(true);
+  $("fl2d-stale").hidden = true;
+  $("fl2d-flow").hidden = true;
+  $("fl2d-conv").innerHTML = "";
+  $("fl2d-charts").classList.add("empty");
+  $("fl2d-result").innerHTML =
+    '<div class="empty-note">Re-verifying the polished shape — fresh ' +
+    'ANSYS mesh on the polished profiles, then the standard studio-' +
+    'conventions solve…</div>';
+  updateSolverButtons();
+  pollFl2d();
+}
+
 $("btn-polish-reverify").addEventListener("click", async () => {
   if (!polishResult) return;
   if (fl2dJob || polishJob || state.ransJob || state.queueActive
@@ -6398,28 +6470,7 @@ $("btn-polish-reverify").addEventListener("click", async () => {
   btn.disabled = true;
   try {
     const { job_id } = await api.polishReverify(polishResult.id);
-    fl2dReverifyOf = { polishId: polishResult.id, jobId: job_id };
-    // hand the run to the standard Fluent 2D machinery: same poll, same
-    // chart, same verdict rendering — provenance marks it as the
-    // polished shape's re-verification
-    fl2dJob = job_id;
-    fl2dConventions = "studio";
-    fl2dCEst = null;          // panel estimate does not apply
-    fl2dRev = null;
-    fl2dAdoptedLive = false;
-    fl2dFlow.reset();
-    $("btn-fl2d-cancel").disabled = false;
-    fl2dLockControls(true);
-    $("fl2d-stale").hidden = true;
-    $("fl2d-flow").hidden = true;
-    $("fl2d-conv").innerHTML = "";
-    $("fl2d-charts").classList.add("empty");
-    $("fl2d-result").innerHTML =
-      '<div class="empty-note">Re-verifying the polished shape — fresh ' +
-      'ANSYS mesh on the polished profiles, then the standard studio-' +
-      'conventions solve…</div>';
-    updateSolverButtons();
-    pollFl2d();
+    attachReverifyRun(job_id, polishResult.id);
   } catch (e) {
     toast(`Could not start the re-verification: ${e.message}`);
     btn.disabled = false;

@@ -877,6 +877,15 @@
                 <span class="f-label">Settle iterations</span>
                 <span class="f-wrap"><input id="polish-settle" type="number"
                   step="50" min="50" max="2000" value="200"><i></i></span></label>
+              <label class="field"
+                     title="How big a relative J change the optimizer is asked for on each design iteration — the morph aggressiveness. A seed whose flaps already sit on the aft-thickness floor violates on an aggressive first step; a smaller request morphs more gently and can stay compliant longer.">
+                <span class="f-label">Step request</span>
+                <span class="f-wrap"><input id="polish-step" type="number"
+                  step="0.1" min="0.1" max="10" value="2"><i>%/iter</i></span></label>
+              <label class="check full" id="polish-auto-wrap"
+                     title="When the polish delivers a compliant improvement, the re-verification on a fresh mesh starts by itself — server-side, so it happens even if this page is closed. The measured fresh-mesh number is the honest gain; the morphed-mesh deltas are only provisional.">
+                <input id="polish-auto" type="checkbox" checked>
+                re-verify automatically when the polish improves</label>
             </div>
           </fieldset>
           <p class="group-note">The polish drives ANSYS Fluent's own
@@ -888,7 +897,9 @@
           first violating step ends the run with the last compliant shape
           as the deliverable. Numbers measured on the morphed mesh are
           provisional — Re-verify runs the polished profiles through the
-          standard chain on a fresh mesh.</p>
+          standard chain on a fresh mesh, and an improved polish chains
+          that re-verification automatically (server-side) unless the
+          checkbox above says otherwise.</p>
         </details>
         <div class="progress" aria-hidden="true"><div id="polish-progress"></div></div>
         <div id="polish-status" class="note">idle — polish reloads the
