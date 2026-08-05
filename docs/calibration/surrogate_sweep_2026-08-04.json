@@ -1,0 +1,379 @@
+{
+ "re": 467000.0,
+ "ncrit": 7.0,
+ "alphas": [
+  -6.0,
+  24.0,
+  1.0
+ ],
+ "rows": [
+  {
+   "name": "s9104BTE",
+   "cl_max_nf": 2.784,
+   "conf_nf": 0.728,
+   "conv_frac": 0.226,
+   "cl_max_xf": 0.946,
+   "ratio": 2.943
+  },
+  {
+   "name": "s9104",
+   "cl_max_nf": 2.622,
+   "conf_nf": 0.824,
+   "conv_frac": 0.903,
+   "cl_max_xf": 2.579,
+   "ratio": 1.017
+  },
+  {
+   "name": "s1223rtl",
+   "cl_max_nf": 2.346,
+   "conf_nf": 0.943,
+   "conv_frac": 0.968,
+   "cl_max_xf": 2.376,
+   "ratio": 0.987
+  },
+  {
+   "name": "s1223",
+   "cl_max_nf": 2.239,
+   "conf_nf": 0.957,
+   "conv_frac": 0.0,
+   "cl_max_xf": null,
+   "ratio": null
+  },
+  {
+   "name": "fx74cl5140",
+   "cl_max_nf": 2.238,
+   "conf_nf": 0.962,
+   "conv_frac": 0.161,
+   "cl_max_xf": 0.846,
+   "ratio": 2.644
+  },
+  {
+   "name": "fx74modsm",
+   "cl_max_nf": 2.2,
+   "conf_nf": 0.968,
+   "conv_frac": 0.968,
+   "cl_max_xf": 2.156,
+   "ratio": 1.021
+  },
+  {
+   "name": "goe525",
+   "cl_max_nf": 2.178,
+   "conf_nf": 0.972,
+   "conv_frac": 1.0,
+   "cl_max_xf": 2.066,
+   "ratio": 1.054
+  },
+  {
+   "name": "goe523",
+   "cl_max_nf": 2.178,
+   "conf_nf": 0.972,
+   "conv_frac": 1.0,
+   "cl_max_xf": 2.066,
+   "ratio": 1.054
+  },
+  {
+   "name": "fx73cl2152",
+   "cl_max_nf": 2.148,
+   "conf_nf": 0.979,
+   "conv_frac": 0.935,
+   "cl_max_xf": 2.11,
+   "ratio": 1.018
+  },
+  {
+   "name": "fx73cl3152",
+   "cl_max_nf": 2.126,
+   "conf_nf": 0.954,
+   "conv_frac": 1.0,
+   "cl_max_xf": 2.084,
+   "ratio": 1.02
+  },
+  {
+   "name": "e420",
+   "cl_max_nf": 2.109,
+   "conf_nf": 0.916,
+   "conv_frac": 0.935,
+   "cl_max_xf": 2.134,
+   "ratio": 0.988
+  },
+  {
+   "name": "fx72150b",
+   "cl_max_nf": 2.106,
+   "conf_nf": 0.972,
+   "conv_frac": 0.903,
+   "cl_max_xf": 1.99,
+   "ratio": 1.059
+  },
+  {
+   "name": "ah93w480b",
+   "cl_max_nf": 2.103,
+   "conf_nf": 0.59,
+   "conv_frac": 0.935,
+   "cl_max_xf": 2.285,
+   "ratio": 0.92
+  },
+  {
+   "name": "ist-mt1-18",
+   "cl_max_nf": 2.087,
+   "conf_nf": 0.973,
+   "conv_frac": 1.0,
+   "cl_max_xf": 2.111,
+   "ratio": 0.989
+  },
+  {
+   "name": "goe652",
+   "cl_max_nf": 2.076,
+   "conf_nf": 0.951,
+   "conv_frac": 0.968,
+   "cl_max_xf": 2.06,
+   "ratio": 1.008
+  },
+  {
+   "name": "goe244",
+   "cl_max_nf": 2.075,
+   "conf_nf": 0.977,
+   "conv_frac": 0.968,
+   "cl_max_xf": 2.131,
+   "ratio": 0.974
+  },
+  {
+   "name": "jn153",
+   "cl_max_nf": 2.066,
+   "conf_nf": 0.925,
+   "conv_frac": 0.0,
+   "cl_max_xf": null,
+   "ratio": null
+  },
+  {
+   "name": "fx74cl6140",
+   "cl_max_nf": 2.059,
+   "conf_nf": 0.968,
+   "conv_frac": 1.0,
+   "cl_max_xf": 2.013,
+   "ratio": 1.023
+  },
+  {
+   "name": "goe441",
+   "cl_max_nf": 2.05,
+   "conf_nf": 0.977,
+   "conv_frac": 1.0,
+   "cl_max_xf": 1.99,
+   "ratio": 1.03
+  },
+  {
+   "name": "goe243",
+   "cl_max_nf": 2.049,
+   "conf_nf": 0.978,
+   "conv_frac": 1.0,
+   "cl_max_xf": 2.063,
+   "ratio": 0.993
+  },
+  {
+   "name": "goe462",
+   "cl_max_nf": 2.049,
+   "conf_nf": 0.867,
+   "conv_frac": 0.0,
+   "cl_max_xf": null,
+   "ratio": null
+  },
+  {
+   "name": "ch10sm",
+   "cl_max_nf": 2.045,
+   "conf_nf": 0.973,
+   "conv_frac": 1.0,
+   "cl_max_xf": 2.013,
+   "ratio": 1.016
+  },
+  {
+   "name": "ui1720",
+   "cl_max_nf": 2.041,
+   "conf_nf": 0.974,
+   "conv_frac": 0.935,
+   "cl_max_xf": 2.046,
+   "ratio": 0.997
+  },
+  {
+   "name": "s1210",
+   "cl_max_nf": 2.035,
+   "conf_nf": 0.965,
+   "conv_frac": 0.968,
+   "cl_max_xf": 2.047,
+   "ratio": 0.994
+  },
+  {
+   "name": "be6699",
+   "cl_max_nf": 2.019,
+   "conf_nf": 0.897,
+   "conv_frac": 0.903,
+   "cl_max_xf": 2.012,
+   "ratio": 1.003
+  },
+  {
+   "name": "goe241",
+   "cl_max_nf": 2.013,
+   "conf_nf": 0.986,
+   "conv_frac": 0.935,
+   "cl_max_xf": 1.958,
+   "ratio": 1.028
+  },
+  {
+   "name": "as6097",
+   "cl_max_nf": 2.01,
+   "conf_nf": 0.934,
+   "conv_frac": 0.935,
+   "cl_max_xf": 2.052,
+   "ratio": 0.979
+  },
+  {
+   "name": "fx73cl1152",
+   "cl_max_nf": 2.008,
+   "conf_nf": 0.965,
+   "conv_frac": 0.935,
+   "cl_max_xf": 1.91,
+   "ratio": 1.051
+  },
+  {
+   "name": "as6098",
+   "cl_max_nf": 2.0,
+   "conf_nf": 0.949,
+   "conv_frac": 0.0,
+   "cl_max_xf": null,
+   "ratio": null
+  },
+  {
+   "name": "goe228",
+   "cl_max_nf": 1.989,
+   "conf_nf": 0.983,
+   "conv_frac": 0.968,
+   "cl_max_xf": 1.907,
+   "ratio": 1.043
+  },
+  {
+   "name": "goe226",
+   "cl_max_nf": 1.981,
+   "conf_nf": 0.976,
+   "conv_frac": 1.0,
+   "cl_max_xf": 1.879,
+   "ratio": 1.054
+  },
+  {
+   "name": "e421",
+   "cl_max_nf": 1.979,
+   "conf_nf": 0.924,
+   "conv_frac": 0.903,
+   "cl_max_xf": 1.974,
+   "ratio": 1.003
+  },
+  {
+   "name": "ist-mt1-21",
+   "cl_max_nf": 1.978,
+   "conf_nf": 0.979,
+   "conv_frac": 1.0,
+   "cl_max_xf": 1.978,
+   "ratio": 1.0
+  },
+  {
+   "name": "goe242",
+   "cl_max_nf": 1.978,
+   "conf_nf": 0.983,
+   "conv_frac": 1.0,
+   "cl_max_xf": 1.907,
+   "ratio": 1.038
+  },
+  {
+   "name": "as6099",
+   "cl_max_nf": 1.978,
+   "conf_nf": 0.958,
+   "conv_frac": 0.903,
+   "cl_max_xf": 2.048,
+   "ratio": 0.966
+  },
+  {
+   "name": "goe234",
+   "cl_max_nf": 1.975,
+   "conf_nf": 0.976,
+   "conv_frac": 0.968,
+   "cl_max_xf": 1.857,
+   "ratio": 1.064
+  },
+  {
+   "name": "fx72150a",
+   "cl_max_nf": 1.974,
+   "conf_nf": 0.977,
+   "conv_frac": 0.0,
+   "cl_max_xf": null,
+   "ratio": null
+  },
+  {
+   "name": "e423",
+   "cl_max_nf": 1.973,
+   "conf_nf": 0.917,
+   "conv_frac": 0.935,
+   "cl_max_xf": 1.987,
+   "ratio": 0.993
+  },
+  {
+   "name": "mh150",
+   "cl_max_nf": 1.972,
+   "conf_nf": 0.955,
+   "conv_frac": 0.935,
+   "cl_max_xf": 1.889,
+   "ratio": 1.044
+  },
+  {
+   "name": "goe531",
+   "cl_max_nf": 1.964,
+   "conf_nf": 0.651,
+   "conv_frac": 0.806,
+   "cl_max_xf": 1.776,
+   "ratio": 1.106
+  },
+  {
+   "name": "mid151c",
+   "cl_max_nf": 1.656,
+   "conf_nf": 0.968,
+   "conv_frac": 0.774,
+   "cl_max_xf": 1.649,
+   "ratio": 1.004
+  },
+  {
+   "name": "mid151b",
+   "cl_max_nf": 1.631,
+   "conf_nf": 0.964,
+   "conv_frac": 0.742,
+   "cl_max_xf": 1.593,
+   "ratio": 1.024
+  },
+  {
+   "name": "ah7476",
+   "cl_max_nf": 1.756,
+   "conf_nf": 0.972,
+   "conv_frac": 0.032,
+   "cl_max_xf": -0.059,
+   "ratio": -29.664
+  },
+  {
+   "name": "goe804",
+   "cl_max_nf": 1.7,
+   "conf_nf": 0.939,
+   "conv_frac": 0.032,
+   "cl_max_xf": 0.101,
+   "ratio": 16.832
+  },
+  {
+   "name": "mid153c",
+   "cl_max_nf": 1.623,
+   "conf_nf": 0.912,
+   "conv_frac": 0.71,
+   "cl_max_xf": 1.615,
+   "ratio": 1.005
+  },
+  {
+   "name": "mid153b",
+   "cl_max_nf": 1.595,
+   "conf_nf": 0.894,
+   "conv_frac": 0.742,
+   "cl_max_xf": 1.579,
+   "ratio": 1.01
+  }
+ ]
+}

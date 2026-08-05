@@ -31,6 +31,7 @@ OFFLINE = ["test_manufacturing.py", "test_panel_validation.py",
            "test_fluent_run.py",
            "test_fluent2d_workflow.py", "test_fluent2d_run.py",
            "test_adjoint_run.py", "test_polish_endpoints.py",
+           "test_surrogate_check.py",
            "test_frontend_fl2d_state.py", "test_frontend_rules.py",
            "test_frontend_charts.py", "test_frontend_optimizer.py",
            "test_frontend_pinned.py", "test_frontend_polish.py",
@@ -72,8 +73,14 @@ def main() -> int:
     import tempfile
     offline_data = tempfile.mkdtemp(prefix="wss_test_offline_data_")
     offline_exports = tempfile.mkdtemp(prefix="wss_test_offline_exports_")
+    # the surrogate cross-check gate is OFF for the suites: their scratch
+    # data dirs carry no verdict cache, so a default-on gate would spawn
+    # a real xfoil.exe per section the optimizer/analysis suites touch —
+    # minutes of nondeterministic wall time. The gate's own suite fakes
+    # the XFOIL seam and force-enables the gate for itself.
     offline_env = {**os.environ, "WSS_DATA_DIR": offline_data,
-                   "WSS_EXPORTS_DIR": offline_exports}
+                   "WSS_EXPORTS_DIR": offline_exports,
+                   "WSS_SURROGATE_CHECK": "off"}
     try:
         for name in OFFLINE:
             print(f"\n=== {name} ===", flush=True)
@@ -95,7 +102,8 @@ def main() -> int:
         [PY, "-m", "uvicorn", "app.server:app", "--port", str(port),
          "--log-level", "warning"],
         cwd=ROOT, env={**os.environ, "WSS_DATA_DIR": scratch_data,
-                       "WSS_EXPORTS_DIR": scratch_exports})
+                       "WSS_EXPORTS_DIR": scratch_exports,
+                       "WSS_SURROGATE_CHECK": "off"})
     try:
         if not wait_healthy(base):
             print("FAIL  scratch server did not become healthy")

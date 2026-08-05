@@ -367,6 +367,24 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
             warnings.append(f"{e['role']}: its polar had not stalled by the "
                             f"last analyzed angle, so the CL_max behind this "
                             f"loading figure is a lower bound, not a stall.")
+        chk = lim.get("surrogate_check")
+        if chk is not None and chk["status"] == "capped":
+            # the XFOIL cross-check overruled the surrogate for this base
+            # geometry — the loading figures above ALREADY use the capped
+            # ceiling; the warning explains why they moved. The
+            # "unverifiable" status (XFOIL has no view at all) attaches to
+            # the element silently and never warns or penalizes: absence
+            # of evidence is not a verdict, and the panel-validated s1223
+            # lives on that branch (measured 2026-08-04)
+            warnings.append(
+                f"{e['role']}: surrogate cross-check capped this "
+                f"section's usable CL_max at {lim['CL_max']:.2f} — "
+                f"NeuralFoil claimed "
+                f"{lim.get('CL_max_claimed', lim['CL_max']):.2f} but "
+                f"XFOIL converged {chk['conv_frac']:.0%} of its polar "
+                f"with a {chk['cl_max_xfoil']:.2f} ceiling. The "
+                f"geometry is outside the surrogate's family; trust "
+                f"the capped numbers.")
         if frac_ground > GROUND_CL_ALLOWANCE:
             ground_hot.append((e["role"], frac_ground))
         elements.append({
@@ -392,6 +410,7 @@ def analyze(cfg: StackConfig, include_geometry: bool = True,
             "cd_lookup_capped": drag_capped,
             "cl_max_at_grid_edge": bool(lim.get("at_grid_edge")),
             "nf_confidence": round(lim["confidence"], 3),
+            "surrogate_check": lim.get("surrogate_check"),
             "slot_gap_pct": round(design[i].get("slot_gap", np.nan) * 100, 2)
                 if i else None,
             "slot_overlap_pct": round(design[i].get("slot_overlap", np.nan) * 100, 2)

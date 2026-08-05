@@ -2780,3 +2780,49 @@ Open lead, not yet built: an XFOIL cross-check gate on out-of-family
 sections (convergence fraction + CL_max disagreement caps the
 usable CL_max / floors the confidence), so the trust machinery sees
 the surrogate's blind spots before the solver hours are spent.
+
+## The XFOIL cross-check gate: the surrogate's blind spots, measured shut (2026-08-04)
+
+**Decision: every isolated-CL_max claim the pipeline consumes now
+passes through an XFOIL cross-check of the section's base geometry —
+one real XFOIL polar per base section and quarter-decade Reynolds
+bucket, cached in process and persisted (app_data/surrogate_checks.json),
+with the verdict derived from the stored MEASUREMENTS at read time so
+threshold tuning never serves a stale status.** The gate lives in
+viscous.cl_limit, which makes it invisible to every consumer: the
+loading bands, the stall budget, the 0.95-CL_max drag caps, the
+optimizer's trust penalty and the candidate badges all read the same
+CL_max and confidence they always read — now capped and floored where
+the cross-check overruled the surrogate. WSS_SURROGATE_CHECK=off is
+the kill switch (the test runner sets it for every suite except the
+gate's own, which fakes the XFOIL seam).
+
+**The thresholds are measured, not chosen** (scripts/surrogate_sweep.py,
+2026-08-04, Re 467k ncrit 7, the top-40 NeuralFoil claims plus every
+section of the day's session; table in app_data/surrogate_sweep.json):
+the 37 agreeing sections converge >= 0.71 of the XFOIL grid at
+nf/xf <= 1.11; the blind-spot cluster (s9104BTE 0.23/2.94, fx74cl5140
+0.16/2.64) sits across a wide gap. XCHECK_CONV_OK = 0.50 and
+XCHECK_RATIO_OK = 1.30 sit inside the gaps with margin on both sides;
+a capped section's usable CL_max is XFOIL's converged ceiling x 1.10
+and its confidence is at most the convergence fraction (0.23 for
+s9104BTE — far under the optimizer's 0.5 trust floor, so the existing
+penalty machinery does the rest).
+
+**Absence of evidence is not a verdict.** The sweep also measured
+XFOIL converging ZERO points on five sections — including plain s1223,
+the panel-validated workhorse behind the RANS-anchored baselines.
+Punishing those would be a false positive on the best-understood
+section in the library, so the verdict has a measured evidence floor
+(XCHECK_EVIDENCE_MIN = 0.10: real blind-spot evidence converged
+>= 0.16, numeric chokes 0.00-0.03): below it the status is
+"unverifiable" — recorded on the element, never warned, never
+penalized — the same missing-data-is-not-a-verdict doctrine the
+re-rank queue's separation tiers follow. The cost of that honesty is
+stated openly: a goe804-class section (1 stray point, claim 1.70)
+escapes the gate and remains a measurement-stage catch.
+
+Known limitation: the first analysis touching a new base section pays
+the XFOIL run synchronously (seconds); verdicts persist across
+restarts, and the working set was pre-warmed at the current operating
+buckets, so in practice the stall is a once-per-new-section event.
