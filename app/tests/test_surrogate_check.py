@@ -167,14 +167,21 @@ try:
           and chk_s["cl_max_usable"] is None)
 
     # ---- caching contract ----
+    check("measurement runs at the REQUESTING Reynolds number, never "
+          "the bucket's (the s9104BTE 467k/562k convergence flip)",
+          any(c[0] == "s9104BTE" and abs(c[1] - RE) < 1.0
+              for c in fake.calls)
+          and chk["re_used"] == round(RE, 1))
     n0 = len(fake.calls)
     viscous.cl_limit("s9104BTE", RE, NCRIT)
     viscous.cl_limit("s9104BTE", RE * 1.05, NCRIT)   # same quarter-decade
     check("cache: same base and Reynolds bucket never re-runs XFOIL",
           len(fake.calls) == n0)
     viscous.cl_limit("s9104BTE", RE * 3.0, NCRIT)    # far bucket
-    check("cache: a distant Reynolds bucket is its own verdict",
-          len(fake.calls) == n0 + 1)
+    check("cache: a distant Reynolds bucket is its own verdict, "
+          "measured at its own Re",
+          len(fake.calls) == n0 + 1
+          and abs(fake.calls[-1][1] - RE * 3.0) < 1.0)
 
     # wrappers share the base's verdict
     n1 = len(fake.calls)

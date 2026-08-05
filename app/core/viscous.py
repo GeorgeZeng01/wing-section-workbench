@@ -213,13 +213,20 @@ def surrogate_check(spec: str, re: float, ncrit: float = 9.0) -> dict:
         hit = _xcheck_mem.get(key)
         if hit is not None:
             return _xcheck_verdict(hit)
-        p = polar(base, re_key, ncrit, "large")
+        # the bucket is the DEDUPE key only — the measurement runs at the
+        # REQUESTING Reynolds number. Measured 2026-08-04: s9104BTE's
+        # XFOIL convergence flips from 7/31 at Re 467k to 30/31 at the
+        # bucket's 562k, so measuring at the bucket value would have
+        # verified the exact section the gate exists to catch. The first
+        # touch's Re is a real operating point; the entry records it.
+        re_used = max(float(re), RE_FLOOR)
+        p = polar(base, re_used, ncrit, "large")
         m = polar_metrics(p)
         nf_max = m["CL_max"]
         a0, a1, da = _XCHECK_ALPHAS
         n_req = int(round((a1 - a0) / da)) + 1
         try:
-            xp = _xfoil_for_check(base, re_key, ncrit)
+            xp = _xfoil_for_check(base, re_used, ncrit)
             cl = np.asarray(xp.get("CL", ()), float)
         except Exception:
             cl = np.asarray((), float)
@@ -229,6 +236,7 @@ def surrogate_check(spec: str, re: float, ncrit: float = 9.0) -> dict:
         # the current thresholds at read time, so tuning a line never
         # serves a stale status from disk
         entry = {"base": base, "re_key": re_key,
+                 "re_used": round(re_used, 1),
                  "cl_max_nf": round(float(nf_max), 3),
                  "cl_max_xfoil": (round(xf_max, 3)
                                   if xf_max is not None else None),
@@ -250,8 +258,9 @@ def surrogate_check(spec: str, re: float, ncrit: float = 9.0) -> dict:
 
 def _xcheck_verdict(entry: dict) -> dict:
     """Measurements -> verdict, against the CURRENT thresholds."""
-    out = {k: entry[k] for k in ("base", "re_key", "cl_max_nf",
-                                 "cl_max_xfoil", "conv_frac", "ratio")}
+    out = {k: entry.get(k) for k in ("base", "re_key", "re_used",
+                                    "cl_max_nf", "cl_max_xfoil",
+                                    "conv_frac", "ratio")}
     out["cl_max_usable"] = None
     out["confidence_cap"] = None
     xf_max = out["cl_max_xfoil"]

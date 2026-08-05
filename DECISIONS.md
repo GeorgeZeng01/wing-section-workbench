@@ -2826,3 +2826,15 @@ Known limitation: the first analysis touching a new base section pays
 the XFOIL run synchronously (seconds); verdicts persist across
 restarts, and the working set was pre-warmed at the current operating
 buckets, so in practice the stall is a once-per-new-section event.
+
+**Amendment (hours later): the bucket is the dedupe key, never the
+measurement point.** The first live cache warm-up caught a flaw in the
+shipped gate: quarter-decade bucketing sent s9104BTE's check to
+Re 562k, where XFOIL converges it 30/31 at ratio 1.01 — VERIFIED —
+while at the actual operating Re 467k it converges 7/31 at ratio 2.94.
+XFOIL's convergence on blind-spot sections is transition-sensitive
+enough to flip across one bucket. The check now runs BOTH tools at the
+REQUESTING Reynolds number (the entry records re_used); the bucket only
+dedupes, so the verdict describes a real operating point — the first
+one that touched the bucket — instead of a rounded one nothing flies
+at.
