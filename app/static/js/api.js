@@ -107,10 +107,10 @@ export const api = {
   ransExportFluent: (id) =>
     request("POST", `/api/rans/${id}/export/fluent`),
   ransQueueStart: (items, meshSize, maxIters = 10000, nRanks = 1,
-                   maxConcurrent = 1) =>
+                   maxConcurrent = 1, engine = "openfoam") =>
     request("POST", "/api/rans-queue/start",
             { items, mesh_size: meshSize, max_iters: maxIters,
-              n_ranks: nRanks, max_concurrent: maxConcurrent }),
+              n_ranks: nRanks, max_concurrent: maxConcurrent, engine }),
   ransQueueCurrent: () => request("GET", "/api/rans-queue/current"),
   ransQueueCancel: () => request("POST", "/api/rans-queue/cancel"),
   // adjoint polish (final stage): seeds from a finished fluent2d run;

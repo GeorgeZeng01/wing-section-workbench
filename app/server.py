@@ -749,28 +749,58 @@ def rans_cancel(job_id: str):
 
 class RansQueueBody(BaseModel):
     items: list[dict]
-    mesh_size: Literal["coarse", "medium", "fine"] = "medium"
+    # OpenFOAM takes the mesh presets; the ANSYS 2D engine takes its two
+    # sizing modes — the endpoint cross-checks engine vs mesh_size
+    mesh_size: Literal["coarse", "medium", "fine",
+                       "default", "studio-yplus1"] = "medium"
     max_iters: int = Field(default=10000, ge=100, le=20000)
     # opt-in parallelism: defaults reproduce the sequential serial queue
     # exactly. n_ranks x max_concurrent is admission-checked against the
     # machine's core budget (422 when over).
     n_ranks: int = Field(default=1, ge=1, le=32)
     max_concurrent: int = Field(default=1, ge=1, le=8)
+    engine: Literal["openfoam", "fluent2d"] = "openfoam"
 
 
 @app.post("/api/rans-queue/start")
 def rans_queue_start(body: RansQueueBody):
-    """Verify an optimizer shortlist with RANS and re-rank by measured
-    downforce. One queue at a time; shares the single-run solver guard.
-    Sequential serial solves by default — concurrency is an explicit
-    opt-in via n_ranks/max_concurrent."""
+    """Verify an optimizer shortlist and re-rank by the measured
+    numbers. One queue at a time; shares the single-run solver guard.
+    engine="openfoam" (default) screens in Docker, sequential serial
+    solves unless n_ranks/max_concurrent opt in; engine="fluent2d" runs
+    each design through the true-2D ANSYS chain under studio
+    conventions — the reference engine as the re-rank's measure, one
+    licensed solve at a time by construction."""
     from .core import rans_queue
+    # cross-field validation first (422 with the fix named), the ANSYS
+    # toolchain probe after it (409 — a machine problem, not a request
+    # problem), so an invalid request never reads as "ANSYS missing"
+    if body.engine == "fluent2d":
+        if body.mesh_size not in ("default", "studio-yplus1"):
+            raise HTTPException(422, detail=(
+                f"the ANSYS 2D engine takes sizing 'default' or "
+                f"'studio-yplus1' — {body.mesh_size!r} is a mesh preset "
+                f"for the OpenFOAM engine"))
+        if body.max_concurrent != 1:
+            raise HTTPException(422, detail=(
+                "the ANSYS 2D engine holds one license seat — the queue "
+                "solves serially; set one solve at a time"))
+        avail = fluent2d_availability()
+        if not avail.get("available"):
+            raise HTTPException(409, detail=(
+                f"the ANSYS toolchain is unavailable — "
+                f"{avail.get('detail') or 'no local installation found'}"))
+    elif body.mesh_size not in ("coarse", "medium", "fine"):
+        raise HTTPException(422, detail=(
+            f"{body.mesh_size!r} is an ANSYS 2D sizing mode — the "
+            f"OpenFOAM engine takes mesh 'coarse', 'medium' or 'fine'"))
     try:
         with _rans_start_lock:
             qid = rans_queue.start(body.items, body.mesh_size,
                                    body.max_iters,
                                    n_ranks=body.n_ranks,
-                                   max_concurrent=body.max_concurrent)
+                                   max_concurrent=body.max_concurrent,
+                                   engine=body.engine)
     except (ValueError, KeyError, TypeError) as e:
         raise HTTPException(422, detail=_err_detail(e))
     except RuntimeError as e:

@@ -424,10 +424,20 @@
             RANS re-rank</h3>
           <div id="rerank-block" hidden>
             <div class="action-row">
+              <select id="rr-engine" class="select-inline"
+                      title="Which solver measures the shortlist. OpenFOAM (Docker) is the screening engine — parallel options, calibrated fine-mesh verdicts. ANSYS Fluent 2D is the reference engine (the true-2D Workbench chain under studio conventions): absolute levels you can trust, but one licensed solve at a time — meshing plus solve runs several minutes per design.">
+                <option value="openfoam" selected>OpenFOAM (screening)</option>
+                <option value="fluent2d">ANSYS Fluent 2D (reference)</option>
+              </select>
               <select id="rr-mesh" class="select-inline">
                 <option value="coarse">Coarse (screening)</option>
                 <option value="medium" selected>Medium</option>
                 <option value="fine">Fine (slow, definitive)</option>
+              </select>
+              <select id="rr-sizing" class="select-inline" hidden
+                      title="Mesh sizing for the ANSYS 2D chain — the same two recipes as the Fluent 2D tab. Default is the documented walkthrough's numbers; Studio y+ 1 resolves the boundary layer directly (slower mesh and solve).">
+                <option value="default" selected>Default sizing (0.1 mm)</option>
+                <option value="studio-yplus1">Studio y+ 1 (resolved wall)</option>
               </select>
               <select id="rr-parallel" class="select-inline"
                       title="How the queue spends the machine's cores — an explicit opt-in; the serial default reproduces the recorded baselines exactly. Parallel options solve several candidates at once (and/or several MPI ranks per solve) within the core budget; results are identical apart from the knife-edge band around the attachment-verdict lines (see the docs).">

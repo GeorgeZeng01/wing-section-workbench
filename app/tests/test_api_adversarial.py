@@ -510,6 +510,33 @@ s_qi, _ = call("POST", "/api/rans-queue/start",
                {"items": [], "max_iters": 60})
 check("queue start keeps the 100-iteration floor", s_qi == 422,
       f"(got {s_qi})")
+# engine/mesh cross-validation answers BEFORE any toolchain probe: an
+# invalid request must never read as "ANSYS missing"
+s_qe1, r_qe1 = call("POST", "/api/rans-queue/start",
+                    {"items": [{"label": "x", "config": GOOD}],
+                     "engine": "fluent2d", "mesh_size": "coarse"})
+check("queue start: ANSYS engine with a mesh preset -> 422 naming "
+      "sizing", s_qe1 == 422
+      and "sizing" in str(r_qe1.get("detail", "")),
+      f"(got {s_qe1}: {r_qe1})")
+s_qe2, _ = call("POST", "/api/rans-queue/start",
+                {"items": [{"label": "x", "config": GOOD}],
+                 "engine": "openfoam", "mesh_size": "default"})
+check("queue start: OpenFOAM engine with a sizing mode -> 422",
+      s_qe2 == 422, f"(got {s_qe2})")
+s_qe3, r_qe3 = call("POST", "/api/rans-queue/start",
+                    {"items": [{"label": "x", "config": GOOD}],
+                     "engine": "fluent2d", "mesh_size": "default",
+                     "max_concurrent": 2})
+check("queue start: parallel ANSYS queue -> 422 naming the license "
+      "seat", s_qe3 == 422
+      and "license seat" in str(r_qe3.get("detail", "")),
+      f"(got {s_qe3}: {r_qe3})")
+s_qe4, _ = call("POST", "/api/rans-queue/start",
+                {"items": [{"label": "x", "config": GOOD}],
+                 "engine": "xfoil"})
+check("queue start: unknown engine -> 422", s_qe4 == 422,
+      f"(got {s_qe4})")
 s_rm, _ = call("POST", "/api/rans/start", {"config": GOOD,
                                            "mesh_size": "ultra"})
 check("rans start with unknown mesh size -> 422", s_rm == 422,

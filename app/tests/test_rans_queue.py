@@ -523,6 +523,159 @@ def main():
         if _budget_prev is not None:
             os.environ["WSS_CORE_BUDGET"] = _budget_prev
 
+    # ---- the ANSYS 2D engine option: validation, wording, end to end ----
+
+    for kw, why, frag in (
+            (dict(engine="xfoil"), "unknown engine", "openfoam"),
+            (dict(engine="fluent2d", mesh_size="coarse"),
+             "mesh preset on the ANSYS engine", "sizing"),
+            (dict(engine="openfoam", mesh_size="default"),
+             "sizing on the OpenFOAM engine", "coarse"),
+            (dict(engine="fluent2d", mesh_size="default",
+                  max_concurrent=2),
+             "parallel ANSYS queue", "license seat")):
+        try:
+            rans_queue.QueueJob([{"label": "x", "config": CFG_D}], **kw)
+            check(f"ansys queue: {why} refused", False)
+        except ValueError as e:
+            check(f"ansys queue: {why} refused", frag in str(e), str(e))
+
+    done_result = {"converged": True, "delta_cl_pct": -30.0}
+    check("classify: fluent2d rows are reference, never band-classified",
+          rans_queue.classify(done_result, "default", "fluent2d")
+          == "ANSYS 2D reference (walkthrough mesh; bands uncalibrated)"
+          and rans_queue.classify(done_result, "studio-yplus1", "fluent2d")
+          == "ANSYS 2D reference (resolved-wall; bands uncalibrated)")
+    check("classify: the OpenFOAM bands are untouched by the new engine",
+          rans_queue.classify(done_result, "fine") == "over-claims")
+
+    from app.core import fluent2d_run
+
+    class QueueFakeFM:
+        """Compact fluent_mcp fake for queue rows: per-row Cl from the
+        runs list (advanced at launch), studio-convention monitors."""
+
+        def __init__(self, runs):
+            self.runs = list(runs)
+            self.row = -1
+            self.cl = []
+            self.cd = []
+            self.launches = 0
+            self.open = 0
+            self.max_open = 0
+
+        def launch(self, **kw):
+            self.row += 1
+            self.launches += 1
+            self.open += 1
+            self.max_open = max(self.max_open, self.open)
+            self.cl, self.cd = [], []
+            return {}
+
+        def read_mesh(self, path):
+            return {"zones": {"wall": ["profile", "ground"]}}
+
+        def setup_external_aero(self, **kw):
+            self.conventions = kw.get("conventions")
+            return {"failed": [], "applied": ["all"]}
+
+        def solve(self, iterations, initialize=True):
+            cl = self.runs[min(self.row, len(self.runs) - 1)]
+            for _ in range(iterations):
+                self.cl.append(cl)
+                self.cd.append(0.07)
+            return {}
+
+        def _report_histories(self):
+            return {"lift_coef": list(self.cl),
+                    "drag_coef": list(self.cd)}
+
+        def write_case_data(self, stem):
+            p = Path(f"{stem}.cas.h5")
+            p.write_bytes(b"CASH5")
+            p.with_name("case.dat.h5").write_bytes(b"DATH5")
+            return {"written": str(p)}
+
+        def export_ascii(self, filename, quantities=None, location=None,
+                         surfaces=None):
+            import math as _m
+            lines = ["cellnumber, x-coordinate, y-coordinate,"
+                     " x-velocity, y-velocity, pressure"]
+            for i in range(400):
+                a = 2 * _m.pi * i / 400
+                r = 0.3 + 0.25 * (i % 7) / 7
+                lines.append(f"{i+1}, {0.2 + r * _m.cos(a):.6e}, "
+                             f"{0.25 + abs(r * _m.sin(a)):.6e}, "
+                             f"{15.0:.6e}, {0.5:.6e}, {-100.0:.6e}")
+            Path(filename).write_text("\n".join(lines) + "\n",
+                                      encoding="utf-8")
+            return {"written": str(filename), "rows": 400}
+
+        def shutdown(self):
+            self.open = max(0, self.open - 1)
+            return {}
+
+    fake = QueueFakeFM(runs=[2.5, 3.0])
+    real_seams = (fluent2d_run._mcp, fluent2d_run._dxf,
+                  fluent2d_run._sizing, fluent2d_run._chain)
+    fluent2d_run._mcp = lambda: fake
+    fluent2d_run._sizing = lambda mode, cfg: {
+        "edge_size_mm": 0.1, "first_layer_mm": 1.0, "n_layers": 10,
+        "growth": 1.2}
+
+    def _fake_dxf(profiles_m, out_path, **kw):
+        Path(out_path).write_bytes(b"DXF")
+        return {"dxf_path": str(out_path), "domain_m": (-1, 0, 3, 1),
+                "n_profiles": len(profiles_m), "n_points": 1}
+
+    def _fake_chain(dxf_path, work_dir, **kw):
+        work = Path(work_dir)
+        work.mkdir(parents=True, exist_ok=True)
+        msh = work / "FFF.msh"
+        msh.write_bytes(b"(2 2)")
+        return {"msh_path": str(msh), "n_cells": 9000,
+                "zones": ["fluid", "inlet", "outlet", "ground",
+                          "upper_bound", "profile"], "stage_s": {}}
+
+    fluent2d_run._dxf = _fake_dxf
+    fluent2d_run._chain = _fake_chain
+    real_qpoll = rans_queue.POLL_S
+    rans_queue.POLL_S = 0.02
+    try:
+        rans_queue.start(
+            [{"label": "a1", "config": CFG_D},
+             {"label": "a2", "config": CFG_D2}],
+            "default", 1200, engine="fluent2d")
+        snap_a = wait_queue(timeout=60)
+    finally:
+        rans_queue.POLL_S = real_qpoll
+        (fluent2d_run._mcp, fluent2d_run._dxf,
+         fluent2d_run._sizing, fluent2d_run._chain) = real_seams
+    ra = snap_a["rows"]
+    check("ansys queue: both rows solve to done",
+          snap_a["state"] == "done"
+          and all(r["state"] == "done" for r in ra),
+          f"({snap_a['state']}: {[(r['state'], r['error']) for r in ra]})")
+    check("ansys queue: snapshot names the engine and the sizing",
+          snap_a["engine"] == "fluent2d"
+          and snap_a["mesh_size"] == "default")
+    check("ansys queue: rows harvested with measured numbers and drag",
+          ra[0]["cl_rans"] == 2.5 and ra[1]["cl_rans"] == 3.0
+          and ra[0]["drag_rans_n"] is not None)
+    check("ansys queue: verdict wording is the reference label",
+          all(r["verdict"] == "ANSYS 2D reference (walkthrough mesh; "
+              "bands uncalibrated)" for r in ra),
+          str([r["verdict"] for r in ra]))
+    check("ansys queue: re-ranked by measured downforce",
+          ra[1]["rank"] == 1 and ra[0]["rank"] == 2)
+    check("ansys queue: solved serially through the licensed engine",
+          fake.launches == 2 and fake.max_open == 1)
+    jobs = [cfd_run.get(r["job_id"]) for r in ra]
+    check("ansys queue: rows are true 2D jobs under studio conventions",
+          all(j is not None and j.snapshot()["engine"] == "fluent2d"
+              and j.snapshot()["conventions"] == "studio" for j in jobs)
+          and fake.conventions == "studio")
+
     print(f"\n{sum(results)}/{len(results)} rans-queue checks passed")
     return 0 if all(results) else 1
 

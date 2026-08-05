@@ -2740,3 +2740,43 @@ button remains for the off case and for retries. A step-request knob
 (step_pct, 0.1-10%/design iteration) exposes the morph aggressiveness
 the goal row always had — the honest option for floor-tight seeds,
 short of the thickness-preserving design-condition leg.
+
+## The re-rank learns the reference engine, and the s9104BTE lesson (2026-08-04)
+
+**Decision: the RANS re-rank queue gains engine="fluent2d" — each
+shortlist row solved through the true-2D ANSYS chain under studio
+conventions, serially by construction (one license seat), with the
+measured numbers re-ranking exactly as before.** The OpenFOAM Docker
+engine stays the default screening path with its parallel opt-ins; the
+ANSYS option is the reference-engine measure (the 2026-07-29 flip:
+Fluent owns absolute levels) for the shortlists you would actually
+build. ANSYS rows are never band-classified — the HEALTHY/OVER-CLAIM
+bands were calibrated on OpenFOAM fine meshes, and neither 2D sizing
+is the calibration-grade preset, so their verdict column reads "ANSYS
+2D reference (…; bands uncalibrated)" and the delta stands on its own.
+Cross-field validation answers before the toolchain probe, so an
+invalid request never reads as "ANSYS missing"; the sizing modes ride
+the existing mesh_size field, mirroring the interactive verify start.
+
+**What prompted it — recorded because the mechanism will recur.** The
+optimizer had been pushing s9104BTE (a blunt-TE library section) into
+every candidate main, claiming 770-792 N at 20 m/s; the OpenFOAM
+re-rank measured those candidates at 206-276 N with 66-73% of the
+suction arc reversed, while the Pareto knee (s1223rtl main, claimed
+534 N) measured 781 N and ranked first. Measured cause: NeuralFoil
+rates s9104BTE's isolated CL_max at 2.78 with 0.881 confidence at
+Re 467k — but XFOIL converges only 7 of 31 polar points on this
+section and caps it at CL_max 0.95. The surrogate over-rates the
+section ~3x, CONFIDENTLY, on a geometry far outside its family
+(3.2%c blunt TE, 0.26%c aft waist, 5.4%c nose radius); s1223rtl, in
+family, agrees with XFOIL within 2%. Every panel-side gate — loading
+band (fraction of the surrogate's own CL_max), stall budget, trust
+penalty (the surrogate's own confidence), wake-shadow screen (the
+panel solution's own wake) — inherits the error, so the optimizer
+correctly maximized a wrong model and no in-loop guard could know.
+The defense-in-depth held at the measurement stage, which is the
+design working as intended — but it cost a queue run to find out.
+Open lead, not yet built: an XFOIL cross-check gate on out-of-family
+sections (convergence fraction + CL_max disagreement caps the
+usable CL_max / floors the confidence), so the trust machinery sees
+the surrogate's blind spots before the solver hours are spent.

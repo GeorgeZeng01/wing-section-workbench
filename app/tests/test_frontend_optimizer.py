@@ -117,5 +117,29 @@ check("no repo paths leak into the new user-facing strings",
       all("app/" not in s and "docs/" not in s and ".py" not in s
           for s in new_strings))
 
+# ---- the re-rank's ANSYS engine option ----
+for i in ("rr-engine", "rr-mesh", "rr-sizing", "rr-parallel"):
+    check(f"re-rank: #{i} present once",
+          len(re.findall(f'id="{i}"', html)) == 1)
+check("re-rank: the engine select offers OpenFOAM and ANSYS 2D",
+      'value="openfoam" selected' in html
+      and 'value="fluent2d">ANSYS Fluent 2D (reference)' in html)
+check("re-rank: choosing ANSYS swaps the mesh control and hides the "
+      "parallel opt-in",
+      '$("rr-engine").addEventListener("change"' in js
+      and '$("rr-mesh").hidden = ansys;' in js
+      and '$("rr-sizing").hidden = !ansys;' in js
+      and '$("rr-parallel").hidden = ansys;' in js)
+check("re-rank: the ANSYS start is serial by construction and sends "
+      "the sizing",
+      'engine === "fluent2d" ? [1, 1]' in js
+      and '? $("rr-sizing").value : $("rr-mesh").value' in js)
+check("re-rank: the status line names the ANSYS engine",
+      '"ANSYS 2D · "' in js)
+check("re-rank: every lock/unlock site covers the new controls",
+      js.count('$("rr-engine").disabled = true;') == 2
+      and js.count('$("rr-engine").disabled = false;') == 1
+      and js.count('$("rr-sizing").disabled = true;') == 2)
+
 print(f"\n{sum(results)}/{len(results)} optimizer frontend checks passed")
 sys.exit(0 if all(results) else 1)

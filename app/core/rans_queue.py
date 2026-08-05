@@ -69,12 +69,22 @@ CONSERVATIVE_HI = 5.0
 RANK_TARGET_TOL = 0.05
 
 
-def classify(result: dict, mesh_size: str = "fine") -> str:
+def classify(result: dict, mesh_size: str = "fine",
+             engine: str = "openfoam") -> str:
     if not result.get("converged"):
         return "no verdict (not converged)"
     d = result.get("delta_cl_pct")
     if d is None:
         return "no panel comparison"
+    if engine == "fluent2d":
+        # the ANSYS engine owns absolute levels (the 2026-07-29 reference
+        # flip), so its measurement stands on its own — but the
+        # HEALTHY/OVER-CLAIM bands were calibrated on OpenFOAM fine
+        # meshes, and neither 2D sizing is the calibration-grade preset:
+        # the delta is reported, never band-classified
+        sizing = ("resolved-wall" if mesh_size == "studio-yplus1"
+                  else "walkthrough mesh")
+        return f"ANSYS 2D reference ({sizing}; bands uncalibrated)"
     if cfd_run.mesh_below_calibration_grade(mesh_size):
         return "screening only (mesh below calibration grade)"
     if d < HEALTHY_LO:
@@ -111,14 +121,26 @@ class QueueJob:
     def __init__(self, items: list[dict], mesh_size: str = "medium",
                  max_iters: int = 10000, objective: str | None = None,
                  target_downforce_n: float | None = None,
-                 n_ranks: int = 1, max_concurrent: int = 1):
+                 n_ranks: int = 1, max_concurrent: int = 1,
+                 engine: str = "openfoam"):
         self.id = uuid.uuid4().hex[:12]
+        if engine not in ("openfoam", "fluent2d"):
+            raise ValueError("engine must be 'openfoam' or 'fluent2d'")
+        self.engine = engine
         if not isinstance(items, list) or not items:
             raise ValueError("nothing to verify — the queue needs at least "
                              "one design")
         if len(items) > MAX_ITEMS:
             raise ValueError(f"at most {MAX_ITEMS} designs per queue")
-        if mesh_size not in ("coarse", "medium", "fine"):
+        if engine == "fluent2d":
+            # mesh_size carries the 2D SIZING mode on this engine, same
+            # contract as the interactive verify start
+            if mesh_size not in ("default", "studio-yplus1"):
+                raise ValueError(
+                    "the ANSYS 2D engine takes sizing 'default' or "
+                    "'studio-yplus1' — mesh presets belong to the "
+                    "OpenFOAM engine")
+        elif mesh_size not in ("coarse", "medium", "fine"):
             raise ValueError("mesh_size must be coarse, medium or fine")
         if objective not in (None, "target", "max_downforce"):
             raise ValueError("objective must be 'target' or 'max_downforce'")
@@ -130,6 +152,12 @@ class QueueJob:
         if not (1 <= self.max_concurrent <= MAX_ITEMS):
             raise ValueError(
                 f"max_concurrent must be between 1 and {MAX_ITEMS}")
+        if engine == "fluent2d" and self.max_concurrent != 1:
+            # one licensed session at a time: the ANSYS queue is serial
+            # by construction, not by preference
+            raise ValueError(
+                "the ANSYS 2D engine holds one license seat — the queue "
+                "solves serially (one solve at a time)")
         budget = cfd_run.core_budget()
         if self.n_ranks * self.max_concurrent > budget:
             raise ValueError(
@@ -240,7 +268,7 @@ class QueueJob:
                     try:
                         jid = cfd_run.start_pooled(
                             row["config"], self.mesh_size, self.max_iters,
-                            self.n_ranks)
+                            self.n_ranks, engine=self.engine)
                     except (RuntimeError, ValueError) as e:
                         with self._lock:
                             row["state"] = "failed"
@@ -353,7 +381,7 @@ class QueueJob:
                     cfd_run.mesh_below_calibration_grade(
                         self.mesh_size),
                     case_dir=r.get("case_dir"))
-                row["verdict"] = classify(r, self.mesh_size)
+                row["verdict"] = classify(r, self.mesh_size, self.engine)
                 # measured attachment state: a separated row must not
                 # outrank an attached one, whatever its forces say — the
                 # ranking demotes on this
@@ -426,6 +454,7 @@ class QueueJob:
                           if self.active is not None else None)
             return {
                 "id": self.id, "state": self.state, "error": self.error,
+                "engine": self.engine,
                 "mesh_size": self.mesh_size, "active": self.active,
                 "active_job_id": active_jid,
                 "active_rows": list(self._active_rows),
@@ -457,11 +486,12 @@ _lock = threading.Lock()
 def start(items: list[dict], mesh_size: str = "medium",
           max_iters: int = 10000, objective: str | None = None,
           target_downforce_n: float | None = None,
-          n_ranks: int = 1, max_concurrent: int = 1) -> str:
+          n_ranks: int = 1, max_concurrent: int = 1,
+          engine: str = "openfoam") -> str:
     global _current
     job = QueueJob(items, mesh_size, max_iters, objective,
                    target_downforce_n, n_ranks,
-                   max_concurrent)   # validates eagerly
+                   max_concurrent, engine)   # validates eagerly
     with _lock:
         if _current is not None and _current.state in ("pending", "running"):
             raise RuntimeError("a verification queue is already running — "

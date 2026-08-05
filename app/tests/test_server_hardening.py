@@ -218,7 +218,8 @@ _rq_stub = types.ModuleType("rans_queue")
 _rq_stub.get_current = lambda: None
 
 
-def _rq_start(items, mesh_size, max_iters, n_ranks=1, max_concurrent=1):
+def _rq_start(items, mesh_size, max_iters, n_ranks=1, max_concurrent=1,
+              engine="openfoam"):
     _lock_held["queue"] = _probe_lock()
     return "queue-stub"
 

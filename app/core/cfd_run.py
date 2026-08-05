@@ -1509,16 +1509,33 @@ def admit_and_launch(job) -> str:
 
 def start_pooled(config: dict, mesh_size: str = "coarse",
                  n_iters: int = cfd.N_ITERS, n_ranks: int = 1,
-                 conventions: str = "default") -> str:
+                 conventions: str = "default",
+                 engine: str = "openfoam") -> str:
     """Queue-owned start: registers and launches a job WITHOUT the
     interactive one-at-a-time guard. The caller (the shortlist queue) owns
     admission — how many pooled jobs run at once, within core_budget() —
     and runs batch_housekeep() once per batch instead of per start.
     start() still refuses while pooled jobs are active, so the verify tab
-    cannot land a second workload on top of a running queue. conventions
-    is accepted for signature parity with start(); the queue solves
-    OpenFOAM only, where it does not apply."""
-    job = RansJob(config, mesh_size, n_iters, n_ranks)
+    cannot land a second workload on top of a running queue.
+
+    engine="openfoam" (default) is the Docker screening engine the queue
+    has always solved; engine="fluent2d" runs each row through the
+    true-2D ANSYS chain under STUDIO conventions (drift-stopped,
+    chord-referenced) — the reference engine as the re-rank's measure.
+    mesh_size carries the 2D SIZING mode there ("default" |
+    "studio-yplus1"), exactly as in start(). The queue is responsible
+    for keeping ANSYS rows serial (one license seat); conventions is
+    accepted for signature parity with start() and applies to neither
+    queue engine (fluent2d rows pin studio conventions — the queue's
+    verdicts are drift-verdict machinery)."""
+    if engine not in ("openfoam", "fluent2d"):
+        raise ValueError("engine must be 'openfoam' or 'fluent2d'")
+    if engine == "fluent2d":
+        from . import fluent2d_run
+        job = fluent2d_run.Fluent2DJob(config, mesh_size, n_iters,
+                                       n_ranks, "studio")
+    else:
+        job = RansJob(config, mesh_size, n_iters, n_ranks)
     with _jobs_lock:
         if _exclusive_claim is not None:
             raise RuntimeError(

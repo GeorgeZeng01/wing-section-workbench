@@ -2940,13 +2940,21 @@ async function startRerank() {
   }
   busy($("btn-rerank"), true);
   try {
+    const engine = $("rr-engine").value === "fluent2d"
+      ? "fluent2d" : "openfoam";
     // "MCxRANKS" -> concurrent solves x MPI ranks per solve; the serial
-    // default 1x1 reproduces the old sequential queue exactly
-    const [mc, ranks] = ($("rr-parallel").value || "1x1")
-      .split("x").map((v) => parseInt(v, 10) || 1);
-    await api.ransQueueStart(items, $("rr-mesh").value, 10000, ranks, mc);
+    // default 1x1 reproduces the old sequential queue exactly. The
+    // ANSYS engine is serial by construction (one license seat).
+    const [mc, ranks] = engine === "fluent2d" ? [1, 1]
+      : ($("rr-parallel").value || "1x1")
+        .split("x").map((v) => parseInt(v, 10) || 1);
+    const mesh = engine === "fluent2d"
+      ? $("rr-sizing").value : $("rr-mesh").value;
+    await api.ransQueueStart(items, mesh, 10000, ranks, mc, engine);
     $("btn-rerank-cancel").disabled = false;
+    $("rr-engine").disabled = true;
     $("rr-mesh").disabled = true;
+    $("rr-sizing").disabled = true;
     $("rr-parallel").disabled = true;
     state.queueActive = true;
     updateSolverButtons();
@@ -2958,6 +2966,16 @@ async function startRerank() {
   }
 }
 
+// the engine choice swaps which mesh control applies and whether the
+// parallel opt-in exists at all (ANSYS = one license seat, serial)
+$("rr-engine").addEventListener("change", () => {
+  const ansys = $("rr-engine").value === "fluent2d";
+  $("rr-mesh").hidden = ansys;
+  $("rr-sizing").hidden = !ansys;
+  $("rr-parallel").hidden = ansys;
+  if (ansys) $("rr-parallel").value = "1x1";
+});
+
 function pollRerank() {
   clearInterval(state.rerankPoll);
   let misses = 0;
@@ -2965,7 +2983,9 @@ function pollRerank() {
     clearInterval(state.rerankPoll);
     busy($("btn-rerank"), false);
     $("btn-rerank-cancel").disabled = true;
+    $("rr-engine").disabled = false;
     $("rr-mesh").disabled = false;
+    $("rr-sizing").disabled = false;
     $("rr-parallel").disabled = false;
     state.queueActive = false;
     updateSolverButtons();
@@ -3007,7 +3027,9 @@ function renderRerank(q) {
   if (q.state) {
     const act = (q.active != null && rows[q.active])
       ? ` — solving ${rows[q.active].label}` : "";
-    status.textContent = `${q.state}${act} · ${q.mesh_size || ""} mesh · ` +
+    const eng = q.engine === "fluent2d" ? "ANSYS 2D · " : "";
+    status.textContent = `${q.state}${act} · ${eng}` +
+                         `${q.mesh_size || ""} mesh · ` +
                          `${Math.round(q.elapsed_s || 0)}s`;
   } else {
     status.textContent = "last verification (restored with the session)";
@@ -6858,7 +6880,9 @@ async function boot() {
       $("rerank-block").hidden = false;
       busy($("btn-rerank"), true);
       $("btn-rerank-cancel").disabled = false;
+      $("rr-engine").disabled = true;
       $("rr-mesh").disabled = true;
+      $("rr-sizing").disabled = true;
       $("rr-parallel").disabled = true;
       state.queueActive = true;
       updateSolverButtons();
