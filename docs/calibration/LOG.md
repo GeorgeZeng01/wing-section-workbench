@@ -1032,7 +1032,8 @@ main, and the session now has three measured cases proving it.
 
 Consolidates ~30 converged Fluent 2D solves (studio conventions,
 studio-yplus1, 3060 iters each). Every number below is measured in the
-entries above; nothing is wired. **Adoption is George's decision.**
+entries above; nothing is wired. **Adoption is a design decision, not
+yet taken.**
 
 ### Proposal 1 — RANS-side separation flag (per solved case)
 
@@ -1073,7 +1074,7 @@ transitional.
 - **Wall-shear pairing** (adjudicates everything above): needs Docker up
   and one image pull, then OpenFOAM re-solves of the calibration configs
   plus the three unlabeled open-cell cases.
-- **Adoption of any line above**: George.
+- **Adoption of any line above**: pending design decision.
 - **First-element exemption fix** in wake_shadow: design decision, needs
   the census channel wired first — which needs proposal 1 adopted.
 
@@ -1194,7 +1195,7 @@ Four converged OF-medium solves of the Fluent-attached designs:
   label; its knife band and fine ordering were fitted to Fluent fields and
   should be re-fitted on wall labels before any adoption.
 
-Session verdict on the loop George asked for: detection, repair and
+Round verdict on the separation loop: detection, repair and
 verification all work end-to-end, and the wall channel now grades each
 piece. The optimizer-facing screen replacement (candidate 4) needs its
 constants re-fitted on the wall-labeled record accumulated today; the
@@ -1240,9 +1241,9 @@ physical-validation question), and every adoption decision above.
 ## 2026-08-03 — The accuracy reference gets the truth channel, and the
 ## engine disagreement is measured at wall level
 
-George's rulings (recorded): both engines remain options; ANSYS is the
-accuracy reference where they disagree; nothing merges or publishes until he
-says. Delegated decisions (mine, reported): the two-mode field verdict is
+Rulings (recorded): both engines remain options; ANSYS is the
+accuracy reference where they disagree; nothing merges or publishes without
+review. Delegated decisions (recorded): the two-mode field verdict is
 adopted and wired; the panel-screen replacement is retired; the compound
 repair objective is direction-only.
 

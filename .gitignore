@@ -23,6 +23,8 @@ xfoil/*.exe
 # local tooling config (kept on disk, not shared)
 .claude/
 .mcp.json
+.agents/
+.codex/
 
 # Fluent runtime droppings — pyfluent's watchdog writes these into the
 # CWD of the process that launched Fluent (the repo root when the app
